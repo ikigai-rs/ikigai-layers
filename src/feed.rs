@@ -12,10 +12,17 @@
 //! number it saw cannot miss an event, and a gap is a defect rather than a quiet hour.
 //! Lines are written whole and synced; a torn last line (a crash mid-write) is dropped on
 //! the next open, because the event it began was never acknowledged.
+//!
+//! **A sequence number is spent once a write that carries it is stored**, whether or not its
+//! event reached the log (ledger #1218). A write stores first and logs second, so an append
+//! that fails leaves an event the log OWES: [`FeedLog::owe`] keeps it, the next number handed
+//! out ([`FeedLog::next`]) is past it, and [`FeedLog::settle`] logs it, in order, before any
+//! later event. A layer whose log cannot be written takes no further writes until it can,
+//! and a host that stops first logs the stored write when it next opens, from the record.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -72,6 +79,11 @@ impl Event {
 pub struct FeedLog {
     path: PathBuf,
     events: Vec<Event>,
+    /// The bytes of the whole, logged events: where the next line goes, whatever a failed
+    /// append left after it.
+    len: u64,
+    /// Events whose writes are stored but whose lines are not logged yet, in order.
+    owed: Vec<Event>,
 }
 
 impl FeedLog {
@@ -115,31 +127,90 @@ impl FeedLog {
         Ok(FeedLog {
             path: path.to_path_buf(),
             events,
+            len: whole.len() as u64,
+            owed: Vec::new(),
         })
     }
 
-    /// The last sequence number written (0 for an empty feed).
+    /// The last sequence number logged (0 for an empty feed).
     pub fn last(&self) -> u64 {
         self.events.len() as u64
     }
 
-    /// Append the event numbered `last() + 1`, synced before it is acknowledged.
+    /// The sequence number the next write carries: past every logged event AND every owed
+    /// one, so a number a stored write holds is never handed out twice.
+    pub fn next(&self) -> u64 {
+        self.last() + self.owed.len() as u64 + 1
+    }
+
+    /// Whether events are owed (stored writes the log does not list yet).
+    pub fn owes(&self) -> bool {
+        !self.owed.is_empty()
+    }
+
+    /// Append the event numbered `last() + 1`, synced before it is acknowledged. The line
+    /// goes after the last whole event, over anything a failed append left behind.
+    ///
+    /// On an error nothing is logged: the caller undoes its write, or [`owe`](Self::owe)s
+    /// the event.
     ///
     /// # Panics
-    /// If `event.seq` is not the next number: the caller assigned it under the layer's
-    /// write lock from [`last`](Self::last), so anything else is a bug in this crate.
+    /// If an event is owed (it must be [`settle`](Self::settle)d first), or if `event.seq`
+    /// is not the next number: the caller took it under the layer's write lock from
+    /// [`next`](Self::next), so either is a bug in this crate.
     pub fn append(&mut self, event: Event) -> Result<(), String> {
+        assert!(self.owed.is_empty(), "an owed event is logged first");
+        self.write(event)
+    }
+
+    fn write(&mut self, event: Event) -> Result<(), String> {
         assert_eq!(event.seq, self.last() + 1, "a feed is gapless");
-        let mut file = OpenOptions::new()
+        let line = event.line();
+        let written = OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(false)
             .open(&self.path)
-            .map_err(|e| format!("open {}: {e}", self.path.display()))?;
-        file.write_all(event.line().as_bytes())
-            .and_then(|()| file.sync_data())
-            .map_err(|e| format!("append to {}: {e}", self.path.display()))?;
+            .and_then(|mut file| {
+                file.set_len(self.len)?;
+                file.seek(SeekFrom::Start(self.len))?;
+                file.write_all(line.as_bytes())?;
+                file.sync_data()
+            });
+        if let Err(e) = written {
+            // Best effort: leave no part of the line that was never acknowledged. The next
+            // append truncates to the same length anyway.
+            if let Ok(file) = OpenOptions::new().write(true).open(&self.path) {
+                let _ = file.set_len(self.len);
+            }
+            return Err(format!("append to {}: {e}", self.path.display()));
+        }
+        self.len += line.len() as u64;
         self.events.push(event);
         Ok(())
+    }
+
+    /// Keep an event whose write is stored but whose line could not be logged: its number
+    /// is spent, and [`settle`](Self::settle) logs it before anything later.
+    ///
+    /// # Panics
+    /// If `event.seq` is not [`next`](Self::next): a bug in this crate.
+    pub fn owe(&mut self, event: Event) {
+        assert_eq!(event.seq, self.next(), "a feed is gapless");
+        self.owed.push(event);
+    }
+
+    /// Log every owed event, in order. Answers how many it logged; on an error the rest
+    /// stay owed.
+    pub fn settle(&mut self) -> Result<usize, String> {
+        let mut logged = 0;
+        while !self.owed.is_empty() {
+            let event = self.owed[0].clone();
+            self.write(event)?;
+            self.owed.remove(0);
+            logged += 1;
+        }
+        Ok(logged)
     }
 
     /// Every event, in order.
