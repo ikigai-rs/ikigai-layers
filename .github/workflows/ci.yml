@@ -1,0 +1,23 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # never cancel main
+jobs:
+  ci:
+    uses: ikigai-rs/.github/.github/workflows/rust.yml@main
+    # No inputs, and each absence is a decision:
+    #
+    # `features:` — none: the crate declares no features, so `--all-targets` sees every
+    # target (the `ikigai-layers` binary included).
+    #
+    # `wasm-lib:` — not claimed. Layer state is files under a state directory (`std::fs`)
+    # and a feed's wait runs on futures-timer's helper thread; a browser host is not a
+    # layer host, and a gate that has never run is not evidence.
+    #
+    # `macos:` — no platform-gated code.
+    #
+    # msrv — automatic: `rust-version` in Cargo.toml makes the shared workflow run clippy
+    # and test on it.
