@@ -38,9 +38,10 @@ pub struct Event {
     pub seq: u64,
     /// When, as `xsd:dateTime` (the kernel clock).
     pub time: String,
-    /// What happened: `say` (the channel model), and later `out` and `taken`.
+    /// What happened: `say` (the channel model), `out` or `taken` (the tuplespace model).
     pub kind: String,
-    /// What it happened to (an entry's IRI, for `say`).
+    /// What it happened to: an entry's IRI for `say`, a tuple's subject for `out` and
+    /// `taken`.
     pub iri: String,
     /// Who did it: the principal.
     pub by: String,
@@ -139,6 +140,11 @@ impl FeedLog {
             .map_err(|e| format!("append to {}: {e}", self.path.display()))?;
         self.events.push(event);
         Ok(())
+    }
+
+    /// Every event, in order.
+    pub fn events(&self) -> &[Event] {
+        &self.events
     }
 
     /// The events after `after`, at most [`MAX_EVENTS`].

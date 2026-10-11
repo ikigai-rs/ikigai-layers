@@ -11,10 +11,17 @@
 //! urn:layer:{layer}:entry:{id}     Source  layer-{layer}-entry       urn:cap:layer:read:{layer}
 //! urn:layer:{layer}:graph:{slug}   Source  layer-{layer}-graph       urn:cap:layer:read:{layer}
 //! urn:layer:{layer}:latest         Source  layer-{layer}-latest      urn:cap:layer:read:{layer}
+//! urn:layer:{layer}:tuples         Sink    layer-{layer}-tuples      urn:cap:layer:out:{layer}   (out)
+//!                                  Source                            urn:cap:layer:read:{layer}  (rd)
+//!                                  Delete                            urn:cap:layer:take:{layer}  (take)
+//! urn:layer:{layer}:receipt:{id}   Source  layer-{layer}-receipt     urn:cap:layer:read:{layer}
 //! urn:layers:feed                  Source  layers-feed               urn:cap:layer:feed:*  (+ exact per layer)
 //! urn:layers:participants          Source  layers-participants       urn:cap:layers:read:participants
 //! urn:collab:{name}                Source  collab                    urn:cap:collab:read:* (+ exact per manifest)
 //! ```
+//!
+//! A channel layer binds `say`, `entries`, `entry`, `graph` and `latest`; a tuplespace layer
+//! binds `tuples` and `receipt`; every layer binds its definition, shapes, context and feed.
 //!
 //! **Why exact, and why per layer.** Core's selection matches a declared scope EXACTLY
 //! unless it ends in `*`, and then it prefix-tests what is held after stripping the `*`
@@ -33,19 +40,20 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, Iri, ReprType,
-    Representation, Request, Result, UriTemplate, Verb,
+    ActionSpec, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
+    Iri, ReprType, Representation, Request, Result, UriTemplate, Verb,
 };
 use oxrdf::{Literal, Triple};
 
 use crate::channel::{self, entry_prefix};
-use crate::config::{ConfigError, LayerDef, Manifest};
+use crate::config::{ConfigError, LayerDef, Manifest, Model, Participants};
 use crate::feed::{self, Event, MAX_WAIT_SECS};
 use crate::host::{Host, LayerState};
 use crate::id;
 use crate::name::{collab_cap, collab_iri, endpoint_id, layer_cap, layer_iri, Participant};
 use crate::rdf::{self, node};
 use crate::time::xsd_date_time;
+use crate::tuplespace::{self, Lookup, Receipt, TupleMeta};
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 const TURTLE: &str = "text/turtle";
@@ -83,7 +91,7 @@ pub fn space(host: &Arc<Host>) -> EndpointSpace {
     let mut space = EndpointSpace::new();
     for (name, state) in host.layers() {
         let base = layer_iri(name);
-        for action in Action::ALL {
+        for action in Action::of(state.def.model) {
             let endpoint = LayerEndpoint {
                 host: Arc::clone(host),
                 state: Arc::clone(state),
@@ -222,20 +230,31 @@ enum Action {
     Entry,
     Graph,
     Latest,
+    Tuples,
+    Receipt,
 }
 
 impl Action {
-    const ALL: [Action; 9] = [
-        Action::Definition,
-        Action::Shapes,
-        Action::Context,
-        Action::Feed,
-        Action::Say,
-        Action::Entries,
-        Action::Entry,
-        Action::Graph,
-        Action::Latest,
-    ];
+    /// Every layer's actions, then its model's.
+    fn of(model: Model) -> Vec<Action> {
+        let mut actions = vec![
+            Action::Definition,
+            Action::Shapes,
+            Action::Context,
+            Action::Feed,
+        ];
+        actions.extend_from_slice(match model {
+            Model::Channel => &[
+                Action::Say,
+                Action::Entries,
+                Action::Entry,
+                Action::Graph,
+                Action::Latest,
+            ][..],
+            Model::Tuplespace => &[Action::Tuples, Action::Receipt][..],
+        });
+        actions
+    }
 
     fn word(self) -> &'static str {
         match self {
@@ -248,6 +267,8 @@ impl Action {
             Action::Entry => "entry",
             Action::Graph => "graph",
             Action::Latest => "latest",
+            Action::Tuples => "tuples",
+            Action::Receipt => "receipt",
         }
     }
 
@@ -256,6 +277,7 @@ impl Action {
         match self {
             Action::Entry => Some("id"),
             Action::Graph => Some("slug"),
+            Action::Receipt => Some("id"),
             _ => None,
         }
     }
@@ -265,11 +287,13 @@ impl Action {
             Action::Definition => base.to_string(),
             Action::Entry => format!("{base}:entry:{{id}}"),
             Action::Graph => format!("{base}:graph:{{slug}}"),
+            Action::Receipt => format!("{base}:receipt:{{id}}"),
             other => format!("{base}:{}", other.word()),
         }
     }
 
-    /// The `{verb}` of the capability this action requires.
+    /// The `{verb}` of the capability this action requires (for `tuples`, its Meta face; each
+    /// of its three verbs declares its own).
     fn cap_verb(self) -> &'static str {
         match self {
             Action::Feed => "feed",
@@ -325,7 +349,11 @@ impl LayerEndpoint {
                 Literal::new_simple_literal(def.model.as_str()),
             ),
         ];
-        for part in ["shapes", "context", "feed"] {
+        let parts: &[&str] = match def.model {
+            Model::Channel => &["shapes", "context", "feed"],
+            Model::Tuplespace => &["shapes", "context", "feed", "tuples"],
+        };
+        for part in parts {
             triples.push(Triple::new(
                 s.clone(),
                 node(rdf::RDFS_SEE_ALSO),
@@ -378,25 +406,41 @@ impl LayerEndpoint {
         Ok(self.feed(&self.state.events_after(after), as_json))
     }
 
-    async fn say(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let author = inv
+    /// The caller's principal, which must be a participant: every write is attributed.
+    fn attributed(&self, inv: &Invocation<'_>, verb: &str) -> Result<(String, Participants)> {
+        let principal = inv
             .capability
             .principal()
             .ok_or_else(|| {
                 Error::Denied(format!(
-                    "`say` on layer `{}` needs a principal, minted by the door that \
-                     authenticated the caller: every entry is attributed, and this request \
+                    "`{verb}` on layer `{}` needs a principal, minted by the door that \
+                     authenticated the caller: every write is attributed, and this request \
                      names nobody (root names nobody either)",
                     self.layer()
                 ))
             })?
             .to_string();
         let participants = self.host.participants().map_err(host_error)?;
-        if !participants.names(&author) {
+        if !participants.names(&principal) {
             return Err(Error::Denied(format!(
-                "{author} is not a participant of this host (participants.ttl does not name it)"
+                "{principal} is not a participant of this host (participants.ttl does not name \
+                 it)"
             )));
         }
+        Ok((principal, participants))
+    }
+
+    fn now(&self, inv: &Invocation<'_>) -> Result<ikigai_core::Time> {
+        inv.now().ok_or_else(|| {
+            Error::Endpoint(
+                "this host gives the kernel no clock, and every write is stamped with its time"
+                    .into(),
+            )
+        })
+    }
+
+    async fn say(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let (author, _) = self.attributed(inv, "say")?;
         let draft = channel::draft(self.def(), inv.inline_arg("content")?)?;
         // From here to the feed append is one step per layer: the sequence number is
         // assigned, stamped, admitted, stored and logged under this lock.
@@ -406,12 +450,7 @@ impl LayerEndpoint {
             .read()
             .expect("channel lock")
             .check_supersedes(&draft, &author)?;
-        let now = inv.now().ok_or_else(|| {
-            Error::Endpoint(
-                "this host gives the kernel no clock, and every entry is stamped with its time"
-                    .into(),
-            )
-        })?;
+        let now = self.now(inv)?;
         let seq = self.state.last_seq() + 1;
         let iri = format!(
             "{}{}",
@@ -530,6 +569,369 @@ impl LayerEndpoint {
             )),
         }
     }
+
+    // ---- the tuplespace model --------------------------------------------------------
+
+    /// The thread every read of a tuplespace hangs from: the `tuples` door's own IRI, which
+    /// the kernel cuts after every Sink (out) and Delete (take) through it.
+    fn tuples_thread(&self) -> String {
+        format!("{}:tuples", layer_iri(self.layer()))
+    }
+
+    /// A store failure is the host's, never the caller's argument.
+    fn space_error(&self, e: impl std::fmt::Display) -> Error {
+        Error::Endpoint(format!("layer `{}`: its space: {e}", self.layer()))
+    }
+
+    /// `out`: drop one tuple, named by its one subject, stamped, admitted by the layer's
+    /// closed shapes; answers its subject.
+    async fn out(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let (dropper, participants) = self.attributed(inv, "out")?;
+        let draft = tuplespace::draft(self.def(), inv.inline_arg("content")?)?;
+        if let Some(to) = draft.addressed_to.iter().find(|p| !participants.names(p)) {
+            return Err(Error::InvalidArgument {
+                name: "content".into(),
+                detail: format!(
+                    "ik:addressedTo <{to}> names no participant of this host, so nobody could \
+                     take the tuple"
+                ),
+            });
+        }
+        let space = self.state.tuplespace();
+        let answer =
+            |subject: &str| Representation::new(ReprType::new(TEXT), subject.as_bytes().to_vec());
+        // From here to the feed append is one step per layer, as for `say`.
+        let _write = self.state.write.lock().await;
+        {
+            let index = space.index.read().expect("tuplespace lock");
+            match index.lookup(&draft.subject) {
+                Lookup::Unknown => {}
+                // The same drop again (a retry after a lost reply): one record, answered as
+                // the drop it repeats, with no new event.
+                Lookup::Pending(meta) if draft.replays(meta, &dropper) => {
+                    return Ok(answer(&draft.subject))
+                }
+                Lookup::Taken(receipt) if draft.replays(&receipt.tuple, &dropper) => {
+                    return Ok(answer(&draft.subject))
+                }
+                _ => {
+                    return Err(Error::Conflict(format!(
+                        "<{}> already names a tuple of layer `{}` (a subject names one tuple, \
+                         pending or taken, for the life of the layer): mint a new one",
+                        draft.subject,
+                        self.layer()
+                    )))
+                }
+            }
+            if let Some(offer) = &draft.offer {
+                check_report(self.def(), &index, offer, &dropper, &draft.addressed_to)?;
+            }
+        }
+        let now = self.now(inv)?;
+        let seq = self.state.last_seq() + 1;
+        let created = xsd_date_time(now);
+        let stamped = draft.stamp(&dropper, &created, seq);
+        admit(inv, self.def(), &stamped).await?;
+        let cid = space
+            .store
+            .drop_tuple(rdf::to_turtle(&stamped).as_bytes())
+            .await
+            .map_err(|e| self.space_error(e))?;
+        let meta = draft.meta(&cid, &dropper, &created, seq);
+        let logged = self
+            .state
+            .feed
+            .lock()
+            .expect("feed lock")
+            .append(tuplespace::out_event(&meta));
+        if let Err(e) = logged {
+            // Never acknowledged and never logged: take it back out, so the space holds only
+            // what the feed records.
+            let _ = space.store.take(&cid).await;
+            return Err(Error::Endpoint(e));
+        }
+        space.record_out(meta);
+        drop(_write);
+        self.host.notify().bump();
+        Ok(answer(&draft.subject))
+    }
+
+    /// `take`: remove one pending tuple, by its subject, atomically; the receipt naming the
+    /// taker is committed before the reply. Answers the tuple as it was taken.
+    async fn take(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let (taker, _) = self.attributed(inv, "take")?;
+        let subject = take_subject(inv)?;
+        let space = self.state.tuplespace();
+        let _write = self.state.write.lock().await;
+        let meta: TupleMeta = {
+            let index = space.index.read().expect("tuplespace lock");
+            match index.lookup(&subject) {
+                Lookup::Pending(meta) => meta.clone(),
+                Lookup::Taken(receipt) => return Err(already_taken(&subject, receipt)),
+                Lookup::Gone => return Err(self.gone(&subject)),
+                Lookup::Unknown => {
+                    return Err(Error::NotFound(format!(
+                        "no tuple <{subject}> in layer `{}`",
+                        self.layer()
+                    )))
+                }
+            }
+        };
+        if self.def().addressed
+            && !meta.addressed_to.is_empty()
+            && !meta.addressed_to.contains(&taker)
+        {
+            return Err(Error::Denied(format!(
+                "<{subject}> is addressed to {}: in layer `{}` only an addressee takes it",
+                meta.addressed_to
+                    .iter()
+                    .map(|p| format!("<{p}>"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.layer()
+            )));
+        }
+        // Read the tuple first: its receipt is staged, holding it, before the take.
+        let Some(bytes) = space
+            .store
+            .read(&meta.cid)
+            .await
+            .map_err(|e| self.space_error(e))?
+        else {
+            space.record_gone(&subject);
+            return Err(self.gone(&subject));
+        };
+        let text = String::from_utf8(bytes)
+            .map_err(|_| self.space_error(format!("tuple {} is not UTF-8", meta.cid)))?;
+        let tuple = rdf::parse_turtle(&text).map_err(|e| self.space_error(e))?;
+        let now = self.now(inv)?;
+        let seq = self.state.last_seq() + 1;
+        let time = xsd_date_time(now);
+        let id = id::mint(now.as_millis(), seq);
+        let (_, document) =
+            tuplespace::receipt_document(self.layer(), &id, &taker, &time, seq, &subject, &tuple);
+        let receipt: Receipt = tuplespace::receipt_of(self.layer(), &document)?;
+        space
+            .store
+            .stage(&meta.cid, &id, &document)
+            .map_err(|e| self.space_error(e))?;
+        // The atomic step: intray's rename. Losing it here means something other than this
+        // host took the tuple (this host's own takers are serialized above).
+        match space.store.take(&meta.cid).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                space.store.unstage(&meta.cid, &id);
+                space.record_gone(&subject);
+                return Err(self.gone(&subject));
+            }
+            Err(e) => {
+                space.store.unstage(&meta.cid, &id);
+                return Err(self.space_error(e));
+            }
+        }
+        space
+            .store
+            .commit(&meta.cid, &id)
+            .map_err(|e| self.space_error(e))?;
+        self.state
+            .feed
+            .lock()
+            .expect("feed lock")
+            .append(tuplespace::taken_event(&receipt))
+            .map_err(Error::Endpoint)?;
+        space.record_taken(receipt);
+        drop(_write);
+        self.host.notify().bump();
+        Ok(turtle(text))
+    }
+
+    fn gone(&self, subject: &str) -> Error {
+        Error::Conflict(format!(
+            "<{subject}> left layer `{}`'s space without a take through this host, so there is \
+             no receipt and nobody can take it",
+            self.layer()
+        ))
+    }
+
+    /// `rd`: list or read the pending tuples (or, with `state=taken`, the receipts).
+    async fn rd(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let state = optional_str(inv, "state")?.unwrap_or("pending");
+        let taken = match state {
+            "pending" => false,
+            "taken" => true,
+            other => {
+                return Err(Error::InvalidArgument {
+                    name: "state".into(),
+                    detail: format!("`{other}` is not one of pending, taken"),
+                })
+            }
+        };
+        let as_turtle = face(inv, &[TEXT, TURTLE])? == TURTLE;
+        let (after, limit) = self.page(inv)?;
+        let tuple = optional_str(inv, "tuple")?;
+        let template = optional_str(inv, "match")?;
+        let space = self.state.tuplespace();
+        let answer = |r: Representation| Ok(r.cacheable().depends_on(self.tuples_thread()));
+        if let (Some(_), Some(_)) = (tuple, template) {
+            return Err(Error::InvalidArgument {
+                name: "match".into(),
+                detail: "tuple= names one tuple and match= selects by a template: give one".into(),
+            });
+        }
+        if let Some(subject) = tuple {
+            let found = {
+                let index = space.index.read().expect("tuplespace lock");
+                match (taken, index.lookup(subject)) {
+                    (false, Lookup::Pending(meta)) => Ok(Err(meta.cid.clone())),
+                    (true, Lookup::Taken(receipt)) => Ok(Ok(receipt.id.clone())),
+                    (false, Lookup::Taken(receipt)) => Err(format!(
+                        "<{subject}> is not pending: <{}> took it at {} (read its receipt with \
+                         state=taken)",
+                        receipt.taker, receipt.time
+                    )),
+                    (true, Lookup::Pending(_)) => {
+                        Err(format!("<{subject}> is pending: nobody has taken it"))
+                    }
+                    (_, Lookup::Gone) => Err(format!(
+                        "<{subject}> left the space without a take through this host"
+                    )),
+                    (_, Lookup::Unknown) => {
+                        Err(format!("no tuple <{subject}> in layer `{}`", self.layer()))
+                    }
+                }
+            };
+            return match found {
+                Ok(Ok(receipt_id)) => answer(turtle(
+                    space
+                        .store
+                        .receipt_text(&receipt_id)
+                        .map_err(|e| self.space_error(e))?,
+                )),
+                Ok(Err(cid)) => match space
+                    .store
+                    .read(&cid)
+                    .await
+                    .map_err(|e| self.space_error(e))?
+                {
+                    Some(bytes) => answer(Representation::new(ReprType::new(TURTLE), bytes)),
+                    // Taken a moment ago: the take's own cut ends this answer.
+                    None => Err(self.not_found_tuple(inv, format!("<{subject}> was just taken"))),
+                },
+                Err(why) => Err(self.not_found_tuple(inv, why)),
+            };
+        }
+        if taken {
+            if template.is_some() {
+                return Err(Error::InvalidArgument {
+                    name: "match".into(),
+                    detail: "a template matches pending tuples; receipts are read with tuple= or \
+                             listed"
+                        .into(),
+                });
+            }
+            let receipts: Vec<Receipt> = space
+                .index
+                .read()
+                .expect("tuplespace lock")
+                .receipts()
+                .iter()
+                .filter(|r| r.seq > after)
+                .take(limit as usize)
+                .cloned()
+                .collect();
+            let mut out = String::new();
+            for r in &receipts {
+                if as_turtle {
+                    out.push_str(
+                        &space
+                            .store
+                            .receipt_text(&r.id)
+                            .map_err(|e| self.space_error(e))?,
+                    );
+                } else {
+                    out.push_str(&format!(
+                        "{} {} {} {}\n",
+                        r.seq, r.time, r.tuple.subject, r.taker
+                    ));
+                }
+            }
+            return answer(if as_turtle {
+                turtle(out)
+            } else {
+                Representation::new(ReprType::new(TEXT), out.into_bytes())
+            });
+        }
+        let matched: Option<std::collections::HashSet<String>> = match template {
+            None => None,
+            Some(query) => Some(space.store.matching(query).await?.into_iter().collect()),
+        };
+        let pending: Vec<TupleMeta> = space
+            .index
+            .read()
+            .expect("tuplespace lock")
+            .pending()
+            .filter(|m| m.seq > after)
+            .filter(|m| matched.as_ref().is_none_or(|hits| hits.contains(&m.cid)))
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        let mut out = String::new();
+        for meta in &pending {
+            if as_turtle {
+                // A tuple taken between the index read and here is simply not listed: the
+                // take's cut ends this answer.
+                if let Some(bytes) = space
+                    .store
+                    .read(&meta.cid)
+                    .await
+                    .map_err(|e| self.space_error(e))?
+                {
+                    out.push_str(&String::from_utf8_lossy(&bytes));
+                }
+            } else {
+                out.push_str(&format!(
+                    "{} {} {} {}\n",
+                    meta.seq, meta.created, meta.subject, meta.dropper
+                ));
+            }
+        }
+        answer(if as_turtle {
+            turtle(out)
+        } else {
+            Representation::new(ReprType::new(TEXT), out.into_bytes())
+        })
+    }
+
+    /// A NotFound that a later out or take can end: it hangs from the tuples thread.
+    fn not_found_tuple(&self, inv: &Invocation<'_>, what: String) -> Error {
+        inv.depends_on(self.tuples_thread());
+        Error::NotFound(what)
+    }
+
+    fn receipt(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let id = inv.bindings.get("id").unwrap_or_default();
+        let space = self.state.tuplespace();
+        let found = space
+            .index
+            .read()
+            .expect("tuplespace lock")
+            .receipt(id)
+            .map(|r| r.id.clone());
+        match found {
+            // A receipt never changes: cacheable for as long as the layer exists.
+            Some(id) => Ok(turtle(
+                space
+                    .store
+                    .receipt_text(&id)
+                    .map_err(|e| self.space_error(e))?,
+            )
+            .cacheable()),
+            None => Err(self.not_found_tuple(
+                inv,
+                format!("no receipt `{id}` in layer `{}`", self.layer()),
+            )),
+        }
+    }
 }
 
 /// Admission: the stamped entry must conform to the layer's closed shapes, by a
@@ -623,6 +1025,93 @@ fn violations(layer: &str, report: &serde_json::Value) -> String {
     )
 }
 
+/// Who may report on `offer`: only the participant this layer's receipt says took it,
+/// otherwise anyone holding `out` could hand back work they never took. And in an addressed
+/// layer, the report is addressed to the offer's offerer and nobody else, or nobody who
+/// should could take it.
+fn check_report(
+    def: &LayerDef,
+    index: &tuplespace::Index,
+    offer: &str,
+    reporter: &str,
+    addressed_to: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let layer = def.name.as_str();
+    let receipt = match index.lookup(offer) {
+        Lookup::Taken(receipt) => receipt,
+        Lookup::Pending(_) => {
+            return Err(Error::Conflict(format!(
+                "ik:offer <{offer}> is still pending in layer `{layer}`: take it before \
+                 reporting on it"
+            )))
+        }
+        Lookup::Gone | Lookup::Unknown => {
+            return Err(Error::InvalidArgument {
+                name: "content".into(),
+                detail: format!(
+                    "ik:offer <{offer}> is no tuple layer `{layer}` has a receipt for, so there \
+                     is no take to report on"
+                ),
+            })
+        }
+    };
+    if receipt.taker != reporter {
+        return Err(Error::Denied(format!(
+            "ik:offer <{offer}> was taken by <{}>: only its taker reports on it",
+            receipt.taker
+        )));
+    }
+    let offerer = &receipt.tuple.dropper;
+    if def.addressed && (addressed_to.len() != 1 || !addressed_to.contains(offerer)) {
+        return Err(Error::InvalidArgument {
+            name: "content".into(),
+            detail: format!(
+                "a report on <{offer}> is addressed to its offerer, <{offerer}>, and nobody else \
+                 (ik:addressedTo): in layer `{layer}` only an addressee takes it"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// A take of a tuple already taken: a typed Conflict naming who won.
+fn already_taken(subject: &str, receipt: &Receipt) -> Error {
+    Error::Conflict(format!(
+        "<{subject}> was already taken by <{}> at {} (receipt <{}>)",
+        receipt.taker, receipt.time, receipt.iri
+    ))
+}
+
+/// The tuple a take names: `tuple=`, or the piped or trailing value, which the engine puts
+/// in `content` for a Delete (`delete urn:layer:tasks:tuples <subject>`). Empty `content`
+/// means not given (an engine `delete` always carries it), and both naming different tuples
+/// is refused rather than resolved by picking one.
+fn take_subject(inv: &Invocation<'_>) -> Result<String> {
+    let named = optional_str(inv, "tuple")?
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let piped = match inv.request.args.get("content") {
+        None => None,
+        Some(_) => Some(
+            std::str::from_utf8(inv.inline_arg("content")?)
+                .map_err(|_| Error::InvalidArgument {
+                    name: "content".into(),
+                    detail: "a tuple's subject is not valid UTF-8".into(),
+                })?
+                .trim(),
+        )
+        .filter(|s| !s.is_empty()),
+    };
+    match (named, piped) {
+        (Some(a), Some(b)) if a != b => Err(Error::InvalidArgument {
+            name: "tuple".into(),
+            detail: format!("tuple=<{a}> and the piped <{b}> name different tuples"),
+        }),
+        (Some(subject), _) | (None, Some(subject)) => Ok(subject.to_string()),
+        (None, None) => Err(Error::MissingArgument("tuple".into())),
+    }
+}
+
 #[async_trait]
 impl Endpoint for LayerEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
@@ -640,6 +1129,16 @@ impl Endpoint for LayerEndpoint {
             Action::Entry => self.entry(inv),
             Action::Graph => self.graph(inv),
             Action::Latest => self.latest(inv),
+            Action::Tuples => match inv.request.verb {
+                Verb::Sink => self.out(inv).await,
+                Verb::Source => self.rd(inv).await,
+                Verb::Delete => self.take(inv).await,
+                other => Err(Error::Endpoint(format!(
+                    "a layer's tuples answer Sink (out), Source (rd) and Delete (take), not \
+                     {other:?}"
+                ))),
+            },
+            Action::Receipt => self.receipt(inv),
         }
     }
 
@@ -780,6 +1279,141 @@ impl Endpoint for LayerEndpoint {
                     ArgSpec::new("about")
                         .summary("the IRI the entry is about")
                         .class(xsd("anyURI")),
+                )
+                .output(TURTLE),
+            Action::Tuples => {
+                let addressed = if self.def().addressed {
+                    " This layer is addressed: a tuple carrying ik:addressedTo is taken only by \
+                     a participant it names."
+                } else {
+                    ""
+                };
+                base.title(format!("Layer {layer}: tuples"))
+                    .summary(format!(
+                        "Layer `{layer}`'s tuplespace: out (Sink) drops a tuple named by its one \
+                         subject under urn:layer:{layer}:, rd (Source) lists or reads the \
+                         pending tuples or, with state=taken, the receipts, and take (Delete) \
+                         removes one atomically: exactly one taker wins, and its receipt names \
+                         it.{addressed}"
+                    ))
+                    .action(
+                        ActionSpec::new(Verb::Source)
+                            .summary(
+                                "rd: the pending tuples in the order they were dropped (one line \
+                                 each, `seq time subject dropper`, or as Turtle), one by \
+                                 tuple=, those a match= ASK holds for; with state=taken, the \
+                                 receipts instead",
+                            )
+                            .input(
+                                ArgSpec::new("tuple")
+                                    .summary(
+                                        "read this tuple (or, with state=taken, its receipt), \
+                                         by its subject",
+                                    )
+                                    .class(xsd("anyURI"))
+                                    .optional(),
+                            )
+                            .input(
+                                ArgSpec::new("match")
+                                    .summary(
+                                        "a SPARQL ASK (no SERVICE): list only the pending tuples \
+                                         whose graph satisfies it",
+                                    )
+                                    .class(xsd("string"))
+                                    .optional(),
+                            )
+                            .input(
+                                ArgSpec::new("state")
+                                    .summary(
+                                        "pending (the space) or taken (the receipts: who took \
+                                         each tuple, and when)",
+                                    )
+                                    .class(xsd("string"))
+                                    .one_of(["pending", "taken"])
+                                    .default_value("pending"),
+                            )
+                            .input(
+                                after_spec(
+                                    "answer tuples dropped (receipts taken) after this ik:seq \
+                                     (default 0)",
+                                )
+                                .default_value("0"),
+                            )
+                            .input(
+                                ArgSpec::new("limit")
+                                    .summary(format!(
+                                        "the most tuples or receipts to answer, at most \
+                                         {MAX_LIMIT}; page with after="
+                                    ))
+                                    .class(xsd("nonNegativeInteger"))
+                                    .default_value(DEFAULT_LIMIT.to_string()),
+                            )
+                            .input(as_spec(&[TEXT, TURTLE]))
+                            .output(TEXT)
+                            .output(TURTLE)
+                            .requires(layer_cap("read", layer)),
+                    )
+                    .action(
+                        ActionSpec::new(Verb::Sink)
+                            .summary(format!(
+                                "out: drop one tuple, Turtle or JSON-LD about one subject the \
+                                 dropper mints under urn:layer:{layer}: (e.g. \
+                                 urn:layer:{layer}:offer:{{ulid}}) and never used before here; \
+                                 the host stamps who, when and its feed position, admits it \
+                                 only if it conforms to the layer's closed shapes, and answers \
+                                 its subject. The same drop sent again is one record"
+                            ))
+                            .input(
+                                ArgSpec::new("content")
+                                    .summary(
+                                        "the tuple, as Turtle or JSON-LD; never \
+                                         prov:wasAttributedTo, dcterms:created or ik:seq, \
+                                         which the host stamps",
+                                    )
+                                    .class(xsd("string")),
+                            )
+                            .output(TEXT)
+                            .requires(layer_cap("out", layer)),
+                    )
+                    .action(
+                        ActionSpec::new(Verb::Delete)
+                            .summary(
+                                "take: remove one pending tuple by its subject, atomically, and \
+                                 answer it; a tuple already taken is a Conflict naming its \
+                                 taker. The receipt is written before the reply, so a taker \
+                                 that lost it reads rd state=taken tuple=<subject>",
+                            )
+                            .input(
+                                ArgSpec::new("tuple")
+                                    .summary("the subject of the tuple to take")
+                                    .class(xsd("anyURI"))
+                                    .optional(),
+                            )
+                            .input(
+                                ArgSpec::new("content")
+                                    .summary(
+                                        "the subject to take, as the piped or trailing value \
+                                         (the same as tuple=; empty = not given)",
+                                    )
+                                    .class(xsd("string"))
+                                    .optional(),
+                            )
+                            .output(TURTLE)
+                            .requires(layer_cap("take", layer)),
+                    )
+            }
+            Action::Receipt => base
+                .title(format!("Layer {layer}: receipt"))
+                .summary(format!(
+                    "One take in layer `{layer}`, by id: who took which tuple, when, and the \
+                     tuple as taken; a receipt never changes"
+                ))
+                .verb(Verb::Source)
+                .input(
+                    ArgSpec::new("id")
+                        .summary("the receipt's id, the last segment of its IRI")
+                        .class(xsd("string"))
+                        .binding(),
                 )
                 .output(TURTLE),
         }

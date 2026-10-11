@@ -9,7 +9,9 @@
 //! `clients.json`) is generated from the manifests ([`grants`], and the `ikigai-layers
 //! grants <config dir>` binary), so the manifest is the one thing an operator edits.
 //!
-//! This version builds the `channel` model: append-only entries, one graph per author.
+//! This version builds two access models: `channel` (append-only entries, one graph per
+//! author) and `tuplespace` (offers taken atomically, reports addressed to their offerer,
+//! with receipts; see [`tuplespace`]).
 //!
 //! ```text
 //! urn:layer:{layer}                 Source  the definition (ik:Layer)         read:{layer}
@@ -21,6 +23,10 @@
 //! urn:layer:{layer}:entry:{id}      Source  one entry (never changes)         read:{layer}
 //! urn:layer:{layer}:graph:{slug}    Source  one author's entries              read:{layer}
 //! urn:layer:{layer}:latest          Source  newest entry about= not superseded read:{layer}
+//! urn:layer:{layer}:tuples          Sink    out: drop one tuple, its subject   out:{layer}
+//!                                   Source  rd: pending tuples, or receipts    read:{layer}
+//!                                   Delete  take: one tuple, atomically        take:{layer}
+//! urn:layer:{layer}:receipt:{id}    Source  one take (never changes)           read:{layer}
 //! urn:layers:feed                   Source  one wait over several feeds       feed:{each layer}
 //! urn:layers:participants           Source  who each principal is             layers:read:participants
 //! urn:collab:{name}                 Source  a manifest                        collab:read:{name}
@@ -33,8 +39,8 @@
 //! No binary serves anything: a host (ikigai-cli's `serve`, ledger #1189) opens a [`Host`]
 //! over its configuration and state directories and binds [`space`], beside
 //! `ikigai-shacl` (admission composes `urn:shacl:validate`) and with a clock (every entry
-//! is stamped with the kernel's time). The door mints each connection's principal; `say`
-//! refuses a request that carries none.
+//! is stamped with the kernel's time). The door mints each connection's principal; `say`,
+//! `out` and `take` refuse a request that carries none.
 //!
 //! ```
 //! use std::sync::Arc;
@@ -80,6 +86,7 @@ pub mod id;
 pub mod name;
 pub mod rdf;
 pub mod time;
+pub mod tuplespace;
 
 pub use config::{Config, ConfigError, LayerDef, Manifest, Model};
 pub use endpoints::space;

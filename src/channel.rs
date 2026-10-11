@@ -69,7 +69,7 @@ pub fn entry_prefix(layer: &str) -> String {
     format!("urn:layer:{layer}:entry:")
 }
 
-fn invalid(detail: impl Into<String>) -> Error {
+pub(crate) fn invalid(detail: impl Into<String>) -> Error {
     Error::InvalidArgument {
         name: "content".into(),
         detail: detail.into(),
@@ -314,6 +314,70 @@ pub struct Draft {
 /// (`prov:wasAttributedTo`, `dcterms:created`, `ik:seq`); no `rdf:type`, or a type no shape
 /// of the layer targets (SHACL conforms vacuously for what nothing targets).
 pub fn draft(def: &LayerDef, content: &[u8]) -> Result<Draft, Error> {
+    let triples = parse_content(def, content)?;
+    let new = node(NEW_SUBJECT);
+    let mut blank = None;
+    let mut placeholder = false;
+    for t in &triples {
+        match &t.subject {
+            NamedOrBlankNode::NamedNode(n) if n.as_str() == NEW_SUBJECT => placeholder = true,
+            NamedOrBlankNode::BlankNode(b) => match &blank {
+                None => blank = Some(b.clone()),
+                Some(one) if one == b => {}
+                Some(_) => return Err(invalid("more than one subject: an entry is one subject")),
+            },
+            other => {
+                return Err(invalid(format!(
+                    "subject {other}: write about <{NEW_SUBJECT}> (or one blank node), and the \
+                     host names the entry"
+                )))
+            }
+        }
+    }
+    if placeholder && blank.is_some() {
+        return Err(invalid("more than one subject: an entry is one subject"));
+    }
+    let supersedes_p = rdf::ik_supersedes();
+    let mut checked = Vec::with_capacity(triples.len());
+    let mut types = BTreeSet::new();
+    let mut supersedes = BTreeSet::new();
+    for t in triples {
+        let p = t.predicate.as_str();
+        refuse_stamp(p)?;
+        let object = match t.object {
+            Term::BlankNode(ref b) if Some(b) == blank.as_ref() => Term::NamedNode(new.clone()),
+            Term::NamedNode(_) | Term::Literal(_) => t.object.clone(),
+            _ => {
+                return Err(invalid(
+                    "a blank node or a quoted triple as an object: an entry is one subject, \
+                     and every other node is named by an IRI",
+                ))
+            }
+        };
+        if p == rdf::RDF_TYPE {
+            types.insert(admitted_type(def, &object)?);
+        }
+        if p == supersedes_p {
+            match object_iri(&object) {
+                Some(target) => {
+                    supersedes.insert(target.to_string());
+                }
+                None => return Err(invalid("ik:supersedes names an entry by its IRI")),
+            }
+        }
+        checked.push(Triple::new(new.clone(), t.predicate, object));
+    }
+    require_type(def, &types)?;
+    Ok(Draft {
+        triples: checked,
+        supersedes,
+    })
+}
+
+/// Parse what a writer sent: Turtle, or JSON-LD when it starts with `{` or `[`, at most the
+/// layer's `entry_max` bytes, in the default graph only. What the triples may say is the
+/// caller's (each model's) to check.
+pub(crate) fn parse_content(def: &LayerDef, content: &[u8]) -> Result<Vec<Triple>, Error> {
     if content.len() > def.entry_max {
         return Err(invalid(format!(
             "{} bytes, over layer `{}`'s bound of {}",
@@ -337,82 +401,41 @@ pub fn draft(def: &LayerDef, content: &[u8]) -> Result<Draft, Error> {
         }
         triples.push(Triple::new(quad.subject, quad.predicate, quad.object));
     }
-    let new = node(NEW_SUBJECT);
-    let mut blank = None;
-    let mut placeholder = false;
-    for t in &triples {
-        match &t.subject {
-            NamedOrBlankNode::NamedNode(n) if n.as_str() == NEW_SUBJECT => placeholder = true,
-            NamedOrBlankNode::BlankNode(b) => match &blank {
-                None => blank = Some(b.clone()),
-                Some(one) if one == b => {}
-                Some(_) => return Err(invalid("more than one subject: an entry is one subject")),
-            },
-            other => {
-                return Err(invalid(format!(
-                    "subject {other}: write about <{NEW_SUBJECT}> (or one blank node), and the \
-                     host names the entry"
-                )))
-            }
-        }
-    }
-    if placeholder && blank.is_some() {
-        return Err(invalid("more than one subject: an entry is one subject"));
-    }
     if triples.is_empty() {
         return Err(invalid("an empty graph"));
     }
-    let stamps = [
-        rdf::PROV_ATTRIBUTED.to_string(),
-        rdf::DCT_CREATED.to_string(),
-        rdf::ik_seq(),
-    ];
-    let supersedes_p = rdf::ik_supersedes();
-    let mut checked = Vec::with_capacity(triples.len());
-    let mut types = BTreeSet::new();
-    let mut supersedes = BTreeSet::new();
-    for t in triples {
-        let p = t.predicate.as_str();
-        if stamps.iter().any(|s| s == p) {
-            return Err(invalid(format!(
-                "<{p}> is stamped by the host (who, when, and the feed position) and refused \
-                 if sent"
-            )));
-        }
-        let object = match t.object {
-            Term::BlankNode(ref b) if Some(b) == blank.as_ref() => Term::NamedNode(new.clone()),
-            Term::NamedNode(_) | Term::Literal(_) => t.object.clone(),
-            _ => {
-                return Err(invalid(
-                    "a blank node or a quoted triple as an object: an entry is one subject, \
-                     and every other node is named by an IRI",
-                ))
-            }
-        };
-        if p == rdf::RDF_TYPE {
-            match object_iri(&object) {
-                Some(class) if def.target_classes.contains(class) => {
-                    types.insert(class.to_string());
-                }
-                _ => {
-                    return Err(invalid(format!(
-                        "rdf:type {object}: layer `{}` admits only {}",
-                        def.name,
-                        list(&def.target_classes)
-                    )))
-                }
-            }
-        }
-        if p == supersedes_p {
-            match object_iri(&object) {
-                Some(target) => {
-                    supersedes.insert(target.to_string());
-                }
-                None => return Err(invalid("ik:supersedes names an entry by its IRI")),
-            }
-        }
-        checked.push(Triple::new(new.clone(), t.predicate, object));
+    Ok(triples)
+}
+
+/// The predicates the host stamps (who, when, and the feed position), refused if sent.
+pub(crate) fn refuse_stamp(predicate: &str) -> Result<(), Error> {
+    if predicate == rdf::PROV_ATTRIBUTED
+        || predicate == rdf::DCT_CREATED
+        || predicate == rdf::ik_seq()
+    {
+        return Err(invalid(format!(
+            "<{predicate}> is stamped by the host (who, when, and the feed position) and \
+             refused if sent"
+        )));
     }
+    Ok(())
+}
+
+/// An `rdf:type` object, admitted only when a shape of the layer targets it: SHACL conforms
+/// vacuously for what nothing targets.
+pub(crate) fn admitted_type(def: &LayerDef, object: &Term) -> Result<String, Error> {
+    match object_iri(object) {
+        Some(class) if def.target_classes.contains(class) => Ok(class.to_string()),
+        _ => Err(invalid(format!(
+            "rdf:type {object}: layer `{}` admits only {}",
+            def.name,
+            list(&def.target_classes)
+        ))),
+    }
+}
+
+/// At least one admitted `rdf:type`.
+pub(crate) fn require_type(def: &LayerDef, types: &BTreeSet<String>) -> Result<(), Error> {
     if types.is_empty() {
         return Err(invalid(format!(
             "no rdf:type: layer `{}` admits {}",
@@ -420,10 +443,7 @@ pub fn draft(def: &LayerDef, content: &[u8]) -> Result<Draft, Error> {
             list(&def.target_classes)
         )));
     }
-    Ok(Draft {
-        triples: checked,
-        supersedes,
-    })
+    Ok(())
 }
 
 fn list(classes: &BTreeSet<String>) -> String {
