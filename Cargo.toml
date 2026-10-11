@@ -76,3 +76,10 @@ ikigai-vocab = "0.1.96"
 # LIBRARY never links it: admission is a sub-request to `urn:shacl:validate`.
 # 0.3.3 is the current published line. ⚠ `"0.3.3"` is `<0.4.0`.
 ikigai-shacl = "0.3.3"
+
+[target.'cfg(unix)'.dev-dependencies]
+# `tests/partial_write.rs` injects a torn write from outside the library by lowering the
+# process's file-size limit (`setrlimit(RLIMIT_FSIZE)`, with `SIGXFSZ` ignored). Those calls
+# and constants long predate 0.2.150, which is a conservative floor rather than a measured
+# one; the tests ran against 0.2.190. ⚠ `"0.2.150"` is `<0.3.0`.
+libc = "0.2.150"

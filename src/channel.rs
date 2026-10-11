@@ -31,6 +31,10 @@ use crate::rdf::{self, node, object_iri, subject_iri};
 /// The subject an author writes for the entry the host is about to name.
 pub const NEW_SUBJECT: &str = "urn:layer:new";
 
+/// The suffix of an entry file still being written (`.{id}.ttl.partial`, beside where it
+/// will be stored): never read as an entry, and cleared on open.
+pub const PARTIAL: &str = ".partial";
+
 /// What the index knows about one entry.
 #[derive(Clone, Debug)]
 pub struct EntryMeta {
@@ -98,6 +102,14 @@ impl Channel {
             }
             for file in read_dir(&slug_dir)? {
                 if file.extension().is_none_or(|x| x != "ttl") {
+                    // An entry write that never completed (see `append`): never a record.
+                    let partial = file
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with('.') && n.ends_with(PARTIAL));
+                    if partial {
+                        let _ = std::fs::remove_file(&file);
+                    }
                     continue;
                 }
                 let text = std::fs::read_to_string(&file)
@@ -235,21 +247,49 @@ impl Channel {
             .join(format!("{}.ttl", meta.id))
     }
 
-    /// Store a stamped, admitted entry: written once (`create_new`, so nothing is ever
-    /// overwritten), synced, then indexed.
+    /// Store a stamped, admitted entry: written whole and synced under a name the index never
+    /// reads ([`PARTIAL`]), then renamed into place, never over an existing entry; then
+    /// indexed.
+    ///
+    /// So an entry file is whole or absent (ledger #1221). A write that fails part-way
+    /// removes what it began, and if that removal fails too, or the host stops mid-write,
+    /// what is left is a `.partial` file that the next open ignores and clears, never a
+    /// torn entry it would refuse the layer over. Nothing carrying the entry's number was
+    /// stored, so the next write takes that number.
     pub fn append(&mut self, triples: &[Triple]) -> Result<EntryMeta, String> {
         let meta = self.meta(triples)?;
         let path = self.path_of(&meta);
-        std::fs::create_dir_all(path.parent().expect("a graph directory"))
+        let dir = path.parent().expect("a graph directory");
+        std::fs::create_dir_all(dir)
             .map_err(|e| format!("create the graph of {}: {e}", meta.author))?;
-        let mut file = OpenOptions::new()
+        let partial = dir.join(format!(".{}.ttl{PARTIAL}", meta.id));
+        let written = OpenOptions::new()
             .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| format!("create {}: {e}", path.display()))?;
-        file.write_all(rdf::to_turtle(triples).as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|e| format!("write {}: {e}", path.display()))?;
+            .create(true)
+            .truncate(true)
+            .open(&partial)
+            .and_then(|mut file| {
+                file.write_all(rdf::to_turtle(triples).as_bytes())?;
+                file.sync_all()
+            })
+            .map_err(|e| format!("write {}: {e}", partial.display()))
+            .and_then(|()| {
+                // The rename replaces silently, so the check is what keeps an entry from
+                // ever being overwritten: one host per state directory, and this runs under
+                // the layer's write lock, so nothing can appear between the two.
+                if path.exists() {
+                    return Err(format!(
+                        "{} exists: an entry is never overwritten",
+                        path.display()
+                    ));
+                }
+                std::fs::rename(&partial, &path)
+                    .map_err(|e| format!("store {}: {e}", path.display()))
+            });
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&partial);
+            return Err(e);
+        }
         self.index(meta.clone())?;
         Ok(meta)
     }

@@ -148,6 +148,11 @@ impl FeedLog {
         !self.owed.is_empty()
     }
 
+    /// The first owed event: the stored write the log must list before anything later.
+    pub fn first_owed(&self) -> Option<&Event> {
+        self.owed.first()
+    }
+
     /// Append the event numbered `last() + 1`, synced before it is acknowledged. The line
     /// goes after the last whole event, over anything a failed append left behind.
     ///
