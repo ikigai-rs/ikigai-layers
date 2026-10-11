@@ -445,9 +445,13 @@ impl LayerEndpoint {
     /// before it stores anything, so no second write can be stamped with a spent number and
     /// nothing piles up unlogged.
     fn settle_feed(&self) -> Result<u64> {
-        let (settled, next) = {
+        let (settled, next, owed) = {
             let mut feed = self.state.feed.lock().expect("feed lock");
-            (feed.settle(), feed.next())
+            let settled = feed.settle();
+            let owed = feed
+                .first_owed()
+                .map(|e| format!("{} <{}> by <{}>, ik:seq {}", e.kind, e.iri, e.by, e.seq));
+            (settled, feed.next(), owed)
         };
         match settled {
             Ok(0) => Ok(next),
@@ -456,9 +460,10 @@ impl LayerEndpoint {
                 Ok(next)
             }
             Err(e) => Err(Error::Endpoint(format!(
-                "layer `{}`'s feed cannot be written ({e}): a stored write's event is not \
+                "layer `{}`'s feed cannot be written ({e}): a stored write's event ({}) is not \
                  logged yet, and the layer takes no write until it is",
-                self.layer()
+                self.layer(),
+                owed.as_deref().unwrap_or("unknown")
             ))),
         }
     }
@@ -776,21 +781,33 @@ impl LayerEndpoint {
                 return Err(self.space_error(e));
             }
         }
-        space
-            .store
-            .commit(&meta.cid, &id)
-            .map_err(|e| self.space_error(e))?;
-        // The take is done and cannot be undone: whatever the feed says, it is recorded, and
-        // a feed that cannot log it owes the event (ledger #1218).
+        // The take is done and cannot be undone: whatever the commit and the feed say, it is
+        // recorded, and its number is spent (ledger #1218, #1221). A receipt that cannot be
+        // committed stays staged, which is a record too: reads fall back to it, and the next
+        // open commits it (its tuple has left the space).
+        let committed = space.store.commit(&meta.cid, &id);
         let logged = self.log_stored(tuplespace::taken_event(&receipt));
         let receipt_iri = receipt.iri.clone();
         space.record_taken(receipt);
         drop(_write);
+        let mut failures = Vec::new();
+        if let Err(e) = committed {
+            failures.push(format!(
+                "its receipt could not be committed ({e}), so it is read from where it is \
+                 staged and committed when the host next opens"
+            ));
+        }
         if let Err(e) = logged {
+            failures.push(format!(
+                "its feed event could not be logged ({e}), so it is logged before the layer's \
+                 next event, or when the host next opens"
+            ));
+        }
+        if !failures.is_empty() {
             return Err(Error::Endpoint(format!(
-                "<{subject}> is taken by <{taker}> (receipt <{receipt_iri}>, ik:seq {seq}), but \
-                 its feed event could not be logged ({e}): the take stands, and its event is \
-                 logged before the layer's next event, or when the host next opens"
+                "<{subject}> is taken by <{taker}> (receipt <{receipt_iri}>, ik:seq {seq}) and \
+                 the take stands, but {}",
+                failures.join("; and ")
             )));
         }
         self.host.notify().bump();

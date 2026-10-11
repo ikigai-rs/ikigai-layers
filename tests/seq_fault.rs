@@ -266,3 +266,127 @@ fn a_crash_after_a_failed_append_that_reached_the_disk_reopens() {
     let three = say(&f.kernel, "talk", &bobby, &message("three")).unwrap();
     assert_eq!(seq_of_entry(&three), 3);
 }
+
+/// The receipt a take will commit, by id: the same operations on a twin fixture. The test
+/// clock is deterministic, so the twin's take is stamped at the same instant with the same
+/// sequence number, and mints the same id.
+fn twin_receipt_id(steps: impl Fn(&Fixture)) -> String {
+    let twin = fixture();
+    steps(&twin);
+    let receipts = twin.state.path().join(TASKS).join("receipts");
+    let mut ids: Vec<String> = std::fs::read_dir(&receipts)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_file())
+        .map(|p| p.file_stem().unwrap().to_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    ids.pop().unwrap()
+}
+
+/// A take whose receipt cannot be committed (ledger #1221): intray's take has happened, so
+/// the take stands. Its sequence number is spent, it is recorded, its receipt reads from
+/// where it is staged, and the next open commits it.
+///
+/// The fault is injected from outside: the receipt's id is predicted on a twin fixture, and
+/// a directory takes its name, so the commit (a rename onto it) fails with EISDIR.
+#[test]
+fn a_take_whose_receipt_could_not_be_committed_is_a_take_and_its_seq_is_spent() {
+    let plasma = gonk();
+    let id = twin_receipt_id(|f| {
+        out(&f.kernel, &gonk(), &offer("a")).unwrap();
+        out(&f.kernel, &gonk(), &offer("b")).unwrap();
+        take(&f.kernel, &bobby_gonk(), &offer_iri("a")).unwrap();
+    });
+    let mut f = fixture();
+    out(&f.kernel, &plasma, &offer("a")).unwrap();
+    out(&f.kernel, &plasma, &offer("b")).unwrap();
+    let blocker = f
+        .state
+        .path()
+        .join(TASKS)
+        .join("receipts")
+        .join(format!("{id}.ttl"));
+    std::fs::create_dir(&blocker).unwrap();
+    std::fs::write(blocker.join("in-the-way"), "").unwrap();
+
+    let failed = take(&f.kernel, &bobby_gonk(), &offer_iri("a")).unwrap_err();
+    assert!(matches!(failed, Error::Endpoint(_)), "{failed:?}");
+    let message = failed.to_string();
+    assert!(
+        message.contains(&bobby_gonk()),
+        "names the taker: {message}"
+    );
+    assert!(message.contains(&id), "names the receipt: {message}");
+
+    // The take stands: a retry finds it, and its receipt reads (from the staged file).
+    let again = take(&f.kernel, &bobby_gonk(), &offer_iri("a"));
+    assert!(
+        matches!(again, Err(Error::Conflict(ref m)) if m.contains("already taken")),
+        "{again:?}"
+    );
+    let receipt_iri = format!("urn:layer:{TASKS}:receipt:{id}");
+    let receipt = source(&f.kernel, &receipt_iri, &[], &tasker(&bobby_gonk()));
+    assert!(receipt.contains(&bobby_gonk()), "{receipt}");
+    let listed = source(
+        &f.kernel,
+        TUPLES,
+        &[("state", "taken"), ("tuple", &offer_iri("a"))],
+        &tasker(&bobby_gonk()),
+    );
+    assert_eq!(listed, receipt);
+
+    // Its number is spent: the next write carries the one after it.
+    out(&f.kernel, &plasma, &offer("c")).unwrap();
+    let expected = vec![
+        (1, "out".to_string(), offer_iri("a")),
+        (2, "out".to_string(), offer_iri("b")),
+        (3, "taken".to_string(), offer_iri("a")),
+        (4, "out".to_string(), offer_iri("c")),
+    ];
+    assert_eq!(events(&f.kernel, TASKS), expected);
+
+    // The obstacle is cleared and the host restarts: the open commits the staged receipt.
+    std::fs::remove_dir_all(&blocker).unwrap();
+    f.reopen();
+    assert!(blocker.is_file(), "the staged receipt is committed on open");
+    assert_eq!(events(&f.kernel, TASKS), expected);
+    assert_eq!(
+        source(&f.kernel, &receipt_iri, &[], &tasker(&bobby_gonk())),
+        receipt
+    );
+    let again = take(&f.kernel, &plasma, &offer_iri("a"));
+    assert!(
+        matches!(again, Err(Error::Conflict(ref m)) if m.contains("already taken")),
+        "{again:?}"
+    );
+}
+
+/// A write refused because the feed still cannot log an owed event names that event, so the
+/// operator knows which stored write is waiting (ledger #1221).
+#[test]
+fn a_write_refused_while_the_feed_is_broken_names_the_owed_event() {
+    let mut f = fixture();
+    let bobby = participant("bobby");
+    say(&f.kernel, "talk", &bobby, &message("one")).unwrap();
+    break_feed(&f, "talk");
+    let failed = say(&f.kernel, "talk", &bobby, &message("two")).unwrap_err();
+    let two = entry_in(&failed, "talk");
+    let refused = say(&f.kernel, "talk", &bobby, &message("three")).unwrap_err();
+    let message = refused.to_string();
+    assert!(message.contains(&two), "names the owed entry: {message}");
+    assert!(message.contains("ik:seq 2"), "and its number: {message}");
+    mend_feed(&f, "talk");
+
+    let plasma = gonk();
+    out(&f.kernel, &plasma, &offer("a")).unwrap();
+    break_feed(&f, TASKS);
+    take(&f.kernel, &bobby_gonk(), &offer_iri("a")).unwrap_err();
+    let refused = out(&f.kernel, &plasma, &offer("b")).unwrap_err();
+    let message = refused.to_string();
+    assert!(message.contains("taken"), "names the owed take: {message}");
+    assert!(message.contains(&offer_iri("a")), "{message}");
+    assert!(message.contains("ik:seq 2"), "{message}");
+    mend_feed(&f, TASKS);
+    f.reopen();
+}

@@ -29,8 +29,10 @@
 //! A take stages its receipt (`receipts/.taking/{cid}.{id}.ttl`), then takes from intray,
 //! then commits the receipt (a rename), then logs the feed event. On open, a staged receipt
 //! whose tuple is still pending is a take that never happened (removed); one whose tuple
-//! is gone is a take that did (committed). Events stored but not logged are logged then, in
-//! order, as the channel model does.
+//! is gone is a take that did (committed), and one that does not read back whole is a stage
+//! that never completed (discarded). Events stored but not logged are logged then, in order,
+//! as the channel model does. A take whose commit fails is still a take: it is recorded, its
+//! number is spent, and its receipt is read from where it is staged until that open.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::OpenOptions;
@@ -316,7 +318,10 @@ impl Store {
         self.staging.join(format!("{cid}.{id}.ttl"))
     }
 
-    /// Stage a receipt before its take: written once and synced.
+    /// Stage a receipt before its take: written once and synced. A write that fails part-way
+    /// removes what it began (ledger #1221); if even that fails, or the host stops mid-write,
+    /// the next open discards the torn file, since no take ever follows a stage that did not
+    /// complete.
     pub fn stage(&self, cid: &str, id: &str, text: &str) -> std::result::Result<(), String> {
         let path = self.staged_path(cid, id);
         let mut file = OpenOptions::new()
@@ -324,9 +329,14 @@ impl Store {
             .create_new(true)
             .open(&path)
             .map_err(|e| format!("create {}: {e}", path.display()))?;
-        file.write_all(text.as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|e| format!("write {}: {e}", path.display()))
+        let written = file
+            .write_all(text.as_bytes())
+            .and_then(|()| file.sync_all());
+        drop(file);
+        written.map_err(|e| {
+            let _ = std::fs::remove_file(&path);
+            format!("write {}: {e}", path.display())
+        })
     }
 
     /// Drop a staged receipt whose take did not happen.
@@ -340,10 +350,29 @@ impl Store {
         std::fs::rename(&from, &to).map_err(|e| format!("commit {}: {e}", to.display()))
     }
 
-    /// A committed receipt's document (the take, and the tuple as taken).
+    /// A receipt's document (the take, and the tuple as taken): committed, or still staged
+    /// when its take happened but the commit failed (ledger #1221), until the next open
+    /// commits it.
     pub fn receipt_text(&self, id: &str) -> std::result::Result<String, String> {
         let path = self.receipt_path(id);
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))
+        let committed = match std::fs::read_to_string(&path) {
+            Ok(text) => return Ok(text),
+            Err(e) => format!("read {}: {e}", path.display()),
+        };
+        let suffix = format!(".{id}.ttl");
+        let staged = std::fs::read_dir(&self.staging).ok().and_then(|dir| {
+            dir.filter_map(|entry| entry.ok().map(|e| e.path()))
+                .find(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.ends_with(&suffix))
+                })
+        });
+        match staged {
+            Some(staged) => std::fs::read_to_string(&staged)
+                .map_err(|e| format!("read {}: {e}", staged.display())),
+            None => Err(committed),
+        }
     }
 }
 
@@ -384,7 +413,7 @@ impl Tuplespace {
             .map_err(|e| format!("list the space: {e}"))?
             .into_iter()
             .collect();
-        settle_staged(&store, &pending_ids)?;
+        settle_staged(&store, &pending_ids, layer)?;
         let mut index = Index::default();
         let mut stored = Vec::new();
         for file in read_dir(&store.receipts)? {
@@ -476,7 +505,16 @@ fn read_dir(dir: &Path) -> std::result::Result<Vec<PathBuf>, String> {
 }
 
 /// Settle every staged receipt: its take happened if its tuple is no longer pending.
-fn settle_staged(store: &Store, pending: &BTreeSet<String>) -> std::result::Result<(), String> {
+///
+/// A staged file that does not read back as a whole receipt is a stage that never completed
+/// (a write that failed and whose removal failed too, or a host that stopped mid-write), and
+/// no take follows a stage until it is synced whole: it is discarded, whether or not its
+/// tuple is pending, rather than committed as a record it never was (ledger #1221).
+fn settle_staged(
+    store: &Store,
+    pending: &BTreeSet<String>,
+    layer: &str,
+) -> std::result::Result<(), String> {
     for file in read_dir(&store.staging)? {
         let name = file
             .file_name()
@@ -488,7 +526,11 @@ fn settle_staged(store: &Store, pending: &BTreeSet<String>) -> std::result::Resu
         else {
             continue;
         };
-        if pending.contains(cid) {
+        let bytes = std::fs::read(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
+        let whole = String::from_utf8(bytes)
+            .ok()
+            .is_some_and(|text| parse_receipt(layer, &text).is_ok());
+        if pending.contains(cid) || !whole {
             store.unstage(cid, id);
         } else {
             store.commit(cid, id)?;
