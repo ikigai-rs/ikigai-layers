@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::channel::Channel;
 use crate::config::{self, Config, ConfigError, LayerDef, Model, Participants};
 use crate::feed::{self, Event, FeedLog, Notify};
+use crate::tuplespace::Tuplespace;
 
 /// One layer's state.
 pub struct LayerState {
@@ -21,18 +22,36 @@ pub struct LayerState {
     pub(crate) model: ModelState,
 }
 
-/// The state each access model holds. One arm per built model; the tuplespace model
-/// (ledger #1187) is the next arm.
+/// The state each access model holds. One arm per built model; the `graph` model
+/// (ledger #1170, arc 14) would be the next.
 pub enum ModelState {
     /// A channel's entries.
     Channel(RwLock<Channel>),
+    /// A tuplespace's space, receipts and index.
+    Tuplespace(Tuplespace),
 }
 
 impl LayerState {
     /// The channel, for a channel layer.
+    ///
+    /// # Panics
+    /// On a layer of another model: a channel's actions are bound only on channel layers,
+    /// so this is a bug in this crate, never a caller's input.
     pub(crate) fn channel(&self) -> &RwLock<Channel> {
         match &self.model {
             ModelState::Channel(channel) => channel,
+            _ => unreachable!("channel actions are bound only on channel layers"),
+        }
+    }
+
+    /// The tuplespace, for a tuplespace layer.
+    ///
+    /// # Panics
+    /// On a layer of another model, as [`channel`](Self::channel).
+    pub(crate) fn tuplespace(&self) -> &Tuplespace {
+        match &self.model {
+            ModelState::Tuplespace(space) => space,
+            _ => unreachable!("tuplespace actions are bound only on tuplespace layers"),
         }
     }
 
@@ -151,6 +170,33 @@ fn open_layer(def: LayerDef, dir: &Path) -> Result<LayerState, String> {
                 })?;
             }
             ModelState::Channel(RwLock::new(channel))
+        }
+        Model::Tuplespace => {
+            let logged: Vec<String> = feed
+                .events()
+                .iter()
+                .filter(|e| e.kind == "out")
+                .map(|e| e.iri.clone())
+                .collect();
+            let (space, stored) = Tuplespace::open(&def, dir, &logged)?;
+            // A drop or a take is stored before its feed event (a tuple is in the space, a
+            // receipt is committed), so a crash between the two leaves events the feed has
+            // not logged: log them now, in order, as the channel does.
+            let logged_to = feed.last();
+            for event in stored.into_iter().filter(|e| e.seq > logged_to) {
+                if event.seq != feed.last() + 1 {
+                    return Err(format!(
+                        "{} `{}` has sequence {} but the feed ends at {}: a gap no repair \
+                         can close",
+                        event.kind,
+                        event.iri,
+                        event.seq,
+                        feed.last()
+                    ));
+                }
+                feed.append(event)?;
+            }
+            ModelState::Tuplespace(space)
         }
     };
     Ok(LayerState {

@@ -50,6 +50,9 @@ pub const MAX_ENTRY_MAX: usize = 1024 * 1024;
 pub enum Model {
     /// Append-only entries, one graph per author: `say`, and reads.
     Channel,
+    /// A tuplespace fronting an ikigai-intray space: `out` drops a tuple, `take` removes
+    /// one atomically and leaves a receipt naming its taker, and reads.
+    Tuplespace,
 }
 
 impl Model {
@@ -57,6 +60,7 @@ impl Model {
     pub fn as_str(self) -> &'static str {
         match self {
             Model::Channel => "channel",
+            Model::Tuplespace => "tuplespace",
         }
     }
 
@@ -65,24 +69,21 @@ impl Model {
     pub fn verbs(self) -> &'static [&'static str] {
         match self {
             Model::Channel => &["read", "feed", "say"],
+            Model::Tuplespace => &["read", "feed", "out", "take"],
         }
     }
 
     fn parse(word: &str) -> Result<Model, String> {
         match word {
             "channel" => Ok(Model::Channel),
+            "tuplespace" => Ok(Model::Tuplespace),
             // Named by the design and not built in this version: refused loudly rather than
             // served as something it is not.
-            "tuplespace" => Err(
-                "model `tuplespace` is not built in this version (the tuplespace model is the \
-                 next arc, ledger #1187)"
-                    .into(),
-            ),
             "graph" => {
                 Err("model `graph` is not built in this version (ledger #1170, arc 14)".into())
             }
             other => Err(format!(
-                "unknown model `{other}` (this version builds: channel)"
+                "unknown model `{other}` (this version builds: channel, tuplespace)"
             )),
         }
     }
@@ -104,10 +105,13 @@ pub struct LayerDef {
     pub target_classes: BTreeSet<String>,
     /// The egress context: this layer's own allowlist of terms, as JSON-LD.
     pub context: String,
-    /// The bound on one entry's content, in bytes.
+    /// The bound on one entry's (or tuple's) content, in bytes.
     pub entry_max: usize,
-    /// The predicate `latest about=` reads (default `dcterms:subject`).
+    /// The predicate `latest about=` reads (default `dcterms:subject`). A channel's only.
     pub about: String,
+    /// A tuplespace's only: whether a tuple carrying `ik:addressedTo` may be taken only by a
+    /// participant it names (default `false`).
+    pub addressed: bool,
     /// The collaborations this layer is declared shared with. `None` means private: at
     /// most one manifest may mount it.
     pub shared: Option<BTreeSet<String>>,
@@ -122,6 +126,7 @@ struct LayerToml {
     label: Option<String>,
     entry_max: Option<toml::Value>,
     about: Option<String>,
+    addressed: Option<bool>,
     shared: Option<Vec<String>>,
 }
 
@@ -179,6 +184,22 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
     let parsed: LayerToml =
         toml::from_str(&read(path)?).map_err(|e| ConfigError(format!("{at}: {e}")))?;
     let model = Model::parse(&parsed.model).map_err(|e| ConfigError(format!("{at}: {e}")))?;
+    // An option of another model is a definition saying something it does not mean, so it
+    // is refused like a typo'd key rather than ignored.
+    match model {
+        Model::Channel if parsed.addressed.is_some() => {
+            return err(format!(
+                "{at}: `addressed` is a tuplespace option; a channel has no take"
+            ))
+        }
+        Model::Tuplespace if parsed.about.is_some() => {
+            return err(format!(
+                "{at}: `about` is a channel option (its `latest about=` read); a tuplespace \
+                 has no latest"
+            ))
+        }
+        _ => {}
+    }
     let shapes = read(&beside(layers_dir, &parsed.shapes, path)?)?;
     let target_classes = check_shapes(&shapes)
         .map_err(|e| ConfigError(format!("{at}: shapes `{}`: {e}", parsed.shapes)))?;
@@ -224,6 +245,7 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         context,
         entry_max,
         about,
+        addressed: parsed.addressed.unwrap_or(false),
         shared,
     })
 }

@@ -227,13 +227,34 @@ fn a_generated_grant_projects_exactly_its_layers() {
     .collect();
     assert_eq!(claude, expected);
 
-    // The machine reads and follows talk-bobby and can say nothing anywhere.
+    // The machine reads and follows talk-bobby and can say nothing anywhere; on the task
+    // layer it holds every verb, each its own action of the one tuples door.
     let gonk_grant = grant(&format!("client.layers.{GONK_FP}"));
     let machine = manifold(&f.kernel, &gonk_grant);
     assert!(machine.contains("layer-talk-bobby-feed__source"));
     assert!(
-        machine.iter().all(|a| !a.ends_with("__sink")),
+        machine.iter().all(|a| !a.ends_with("-say__sink")),
         "{machine:?}"
+    );
+    for tool in [
+        "layer-tasks-bobby-tuples__sink",
+        "layer-tasks-bobby-tuples__source",
+        "layer-tasks-bobby-tuples__delete",
+        "layer-tasks-bobby-receipt__source",
+        "layer-tasks-bobby-feed__source",
+    ] {
+        assert!(machine.contains(tool), "{tool}: {machine:?}");
+    }
+    // Bobby reads and follows the task layer, and neither drops nor takes.
+    let bobby = manifold(&f.kernel, &grant("bobby"));
+    assert!(
+        bobby.contains("layer-tasks-bobby-tuples__source"),
+        "{bobby:?}"
+    );
+    assert!(
+        !bobby.contains("layer-tasks-bobby-tuples__sink")
+            && !bobby.contains("layer-tasks-bobby-tuples__delete"),
+        "{bobby:?}"
     );
     assert!(machine
         .iter()

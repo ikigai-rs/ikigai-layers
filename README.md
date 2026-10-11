@@ -20,6 +20,10 @@ holds and nothing more.
   every entry, and refuses any of the three if a writer sends them.
 - **Append-only by construction.** There is no edit and no delete. A correction is a new
   entry that `ik:supersedes` the old one, only ever its own author's.
+- **Taking work is claiming it.** In a task layer, a take is atomic: of two participants
+  taking one offer, exactly one wins, the other is told who did, and a receipt naming the
+  winner is written before either hears back. Reports on an offer are addressed to its
+  offerer, and only its taker can send them.
 - **Isolation is the default, and enforced.** A layer belongs to one collaboration unless
   its own definition records the decision to share it. A manifest that mounts someone
   else's layer stops the host from starting and the grant generator from writing.
@@ -41,19 +45,27 @@ holds and nothing more.
 | `urn:layer:{layer}:entry:{id}` | Source | one entry (never changes) | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:graph:{slug}` | Source | one author's entries | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:latest` | Source | the newest entry `about=` an IRI that nothing supersedes | `urn:cap:layer:read:{layer}` |
+| `urn:layer:{layer}:tuples` | Sink | `out`: drop one tuple; answers its subject | `urn:cap:layer:out:{layer}` |
+| `urn:layer:{layer}:tuples` | Source | `rd`: the pending tuples (or one, or those a `match=` ASK holds for); `state=taken`: the receipts | `urn:cap:layer:read:{layer}` |
+| `urn:layer:{layer}:tuples` | Delete | `take`: remove one tuple by its subject, atomically | `urn:cap:layer:take:{layer}` |
+| `urn:layer:{layer}:receipt:{id}` | Source | one take: who, when, and the tuple as taken (never changes) | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:feed` | Source | events `after=` a sequence, `wait=` up to 60 s | `urn:cap:layer:feed:{layer}` |
 | `urn:layers:feed` | Source | one wait over several feeds, `after=talk:12,notes:3` | `urn:cap:layer:feed:{each}` |
 | `urn:layers:participants` | Source | who each principal is | `urn:cap:layers:read:participants` |
 | `urn:collab:{name}` | Source | a collaboration's manifest | `urn:cap:collab:read:{name}` |
 
-Endpoint ids are `layer-{layer}-{action}` (`layer-talk-say`), so MCP tools are
-`layer-talk-say__sink`, `layer-talk-feed__source` and so on. Layer names are lowercase
-`[a-z0-9-]`, at most 24 characters, which keeps the longest tool name inside MCP's 64.
+A channel layer binds `say`, `entries`, `entry`, `graph` and `latest`; a tuplespace layer
+binds `tuples` and `receipt`; every layer binds its definition, shapes, context and feed.
 
-This version builds the **channel** model (append-only entries, one graph per author). The
-**tuplespace** model (offers taken atomically, reports addressed to their offerer, with
-receipts) is next; a definition naming it is refused until then, never served as something
-it is not.
+Endpoint ids are `layer-{layer}-{action}` (`layer-talk-say`), so MCP tools are
+`layer-talk-say__sink`, `layer-tasks-bobby-tuples__delete` and so on. Layer names are
+lowercase `[a-z0-9-]`, at most 24 characters, which keeps the longest tool name inside
+MCP's 64.
+
+This version builds two access models: **channel** (append-only entries, one graph per
+author) and **tuplespace** (offers taken atomically, reports addressed to their offerer,
+with receipts). The **graph** model (each author replaces their own graph) is not built; a
+definition naming it is refused, never served as something it is not.
 
 ## Configuration
 
@@ -79,6 +91,19 @@ context = "msg.context.jsonld"   # the egress allowlist
 entry_max = "16KiB"              # optional; the default
 shared  = ["bobby", "chris"]     # optional: the collaborations that may mount it
 ```
+
+A task layer:
+
+```toml
+# layers/tasks-bobby.toml   ->  urn:layer:tasks-bobby
+model     = "tuplespace"
+shapes    = "tasks.shapes.ttl"
+context   = "tasks.context.jsonld"
+addressed = true                 # a tuple with ik:addressedTo is taken only by an addressee
+```
+
+`addressed` is a tuplespace's option and `about` a channel's; naming one on the other
+model is refused, like a misspelled key.
 
 Every node shape must be `sh:closed true` and the shapes must target at least one class;
 an entry must be typed with a targeted class and only those (SHACL answers "conforms" for
@@ -151,6 +176,46 @@ And a follower that was waiting on `source urn:layer:talk:feed after=0 wait=50` 
 1 2026-10-10T00:00:01.000Z say urn:layer:talk:entry:01m4hhr0z80000000000001 urn:collab:participant:brian
 ```
 
+## Offering and taking work
+
+A tuple is one subject that its dropper names, under the layer's own IRI and never used
+there before:
+
+```text
+$ cat offer.ttl
+@prefix ik: <https://ikigai-rs.dev/ns#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+<urn:layer:tasks-bobby:offer:01m4hhr0z8> a ik:Offer ;
+    dcterms:title "Layer vocabulary" ; ik:brief "Add the layer terms." ;
+    ik:repository <https://github.com/ikigai-rs/ikigai-core> .
+
+$ cat offer.ttl | ikigai -c 'sink urn:layer:tasks-bobby:tuples'
+urn:layer:tasks-bobby:offer:01m4hhr0z8
+```
+
+The host stamps who dropped it, when and its feed position into the tuple, as for an
+entry. Sending the same tuple again (a retry after a lost reply) is one record, answered
+the same way; anything else under a used name is a Conflict.
+
+Taking it is the claim:
+
+```text
+$ ikigai -c 'delete urn:layer:tasks-bobby:tuples urn:layer:tasks-bobby:offer:01m4hhr0z8'
+```
+
+answers the tuple, and a second taker is refused with a Conflict that names the first.
+Before the reply, the host commits a receipt: the take as a `prov:Activity` that
+`prov:used` the offer, `prov:wasAssociatedWith` the taker, ended at a time, numbered in the
+feed, with the tuple as taken. A taker that lost its reply reads
+`source urn:layer:tasks-bobby:tuples state=taken tuple=<offer>`.
+
+Reports (`ik:Progress`, `ik:Release`, `ik:Handback` with `ik:evidence`) name the offer
+with `ik:offer` and are addressed to its offerer with `ik:addressedTo`. The host admits a
+report only from the participant whose take of that offer it holds a receipt for, in an
+addressed layer only when it is addressed to that offer's offerer alone, and there only an
+addressee can take it. The feed records `out` and `taken`
+events, with the tuple's subject and who did it.
+
 ## Hosting it
 
 A host library: a host (ikigai-cli's `serve`) opens a `Host` over its configuration and
@@ -159,6 +224,13 @@ composes `urn:shacl:validate`) on a kernel with a clock. State is plain files: e
 written once to `<state>/{layer}/graphs/{author}/{id}.ttl`, and each feed is
 `<state>/{layer}/feed.log`; one host process per state directory. Admission fails closed:
 without a validator bound, nothing is admitted.
+
+A tuplespace layer fronts an [ikigai-intray](https://crates.io/crates/ikigai-intray) space
+at `<state>/{layer}/tuples/`, which the host links and calls under its own
+`urn:cap:space:*`: participants never hold a space capability, and the space is never
+bound into the kernel. Intray's take is a rename, which is what makes it atomic. Receipts
+are `<state>/{layer}/receipts/{id}.ttl`. Keep the state directory out of any intray root a
+reactor watches.
 
 ## License
 

@@ -25,6 +25,14 @@ pub const DCT_HAS_PART: &str = "http://purl.org/dc/terms/hasPart";
 pub const DCT_IS_PART_OF: &str = "http://purl.org/dc/terms/isPartOf";
 /// `dcterms:contributor`: a collaboration to a participant it grants anything.
 pub const DCT_CONTRIBUTOR: &str = "http://purl.org/dc/terms/contributor";
+/// `prov:Activity`: a take, as its receipt records it.
+pub const PROV_ACTIVITY: &str = "http://www.w3.org/ns/prov#Activity";
+/// `prov:used`: a take to the tuple it removed.
+pub const PROV_USED: &str = "http://www.w3.org/ns/prov#used";
+/// `prov:wasAssociatedWith`: a take to its taker (the principal its door minted).
+pub const PROV_ASSOCIATED: &str = "http://www.w3.org/ns/prov#wasAssociatedWith";
+/// `prov:endedAtTime`: when a take happened, by the kernel clock.
+pub const PROV_ENDED: &str = "http://www.w3.org/ns/prov#endedAtTime";
 /// `xsd:dateTime`.
 pub const XSD_DATE_TIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 /// `xsd:integer`.
@@ -46,6 +54,17 @@ pub fn ik_seq() -> String {
 /// `ik:supersedes`.
 pub fn ik_supersedes() -> String {
     format!("{IK}supersedes")
+}
+
+/// `ik:addressedTo`: the participant a tuple is for. In an `addressed` tuplespace only a
+/// participant it names may take it.
+pub fn ik_addressed_to() -> String {
+    format!("{IK}addressedTo")
+}
+
+/// `ik:offer`: the offer a report is about.
+pub fn ik_offer() -> String {
+    format!("{IK}offer")
 }
 
 /// `ik:Layer`. ⚠ Never `ik:layer` (lowercase): that is a dry run's chain cell with

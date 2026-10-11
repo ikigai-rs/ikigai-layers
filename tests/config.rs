@@ -25,13 +25,13 @@ fn the_fixture_loads() {
     let loaded = Config::load(config.path()).unwrap();
     assert_eq!(
         loaded.layers.keys().collect::<Vec<_>>(),
-        ["notes", "talk", "talk-bobby"]
+        ["notes", "talk", "talk-bobby", "tasks-bobby"]
     );
     assert_eq!(
         loaded.collabs.keys().collect::<Vec<_>>(),
         ["bobby", "chris"]
     );
-    assert_eq!(loaded.participants.members.len(), 6);
+    assert_eq!(loaded.participants.members.len(), 7);
 }
 
 /// Brian, 2026-10-10: a manifest naming a layer another manifest names is REFUSED unless
@@ -107,11 +107,7 @@ fn layer_names_fit_a_tool_name() {
 
 #[test]
 fn only_built_models_load() {
-    for (model, says) in [
-        ("tuplespace", "ledger #1187"),
-        ("graph", "not built"),
-        ("crdt", "unknown model"),
-    ] {
+    for (model, says) in [("graph", "not built"), ("crdt", "unknown model")] {
         let config = Scratch::new("cfg");
         write_config(&config);
         config.write("layers/extra.toml", &layer(model, ""));
@@ -134,6 +130,13 @@ fn a_definition_may_not_say_what_it_does_not_mean() {
         (layer("channel", "entry_max = \"2GiB\"\n"), "unit"),
         (layer("channel", "entry_max = \"4MiB\"\n"), "outside"),
         (layer("channel", "shared = [\"Bob\"]\n"), "no collaboration name"),
+        // An option of another model says something the layer does not mean.
+        (layer("channel", "addressed = true\n"), "a tuplespace option"),
+        (
+            layer("tuplespace", "about = \"urn:example:p\"\n"),
+            "a channel option",
+        ),
+        (layer("tuplespace", "addressed = \"yes\"\n"), "invalid type"),
     ];
     for (text, says) in cases {
         let config = Scratch::new("cfg");
