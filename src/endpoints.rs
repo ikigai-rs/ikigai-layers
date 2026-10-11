@@ -439,19 +439,50 @@ impl LayerEndpoint {
         })
     }
 
+    /// Under the layer's write lock, before a write takes its sequence number: log what an
+    /// earlier write stored but could not log (ledger #1218), and answer the number this
+    /// write carries. When the feed still cannot be written the write is refused here,
+    /// before it stores anything, so no second write can be stamped with a spent number and
+    /// nothing piles up unlogged.
+    fn settle_feed(&self) -> Result<u64> {
+        let (settled, next) = {
+            let mut feed = self.state.feed.lock().expect("feed lock");
+            (feed.settle(), feed.next())
+        };
+        match settled {
+            Ok(0) => Ok(next),
+            Ok(_) => {
+                self.host.notify().bump();
+                Ok(next)
+            }
+            Err(e) => Err(Error::Endpoint(format!(
+                "layer `{}`'s feed cannot be written ({e}): a stored write's event is not \
+                 logged yet, and the layer takes no write until it is",
+                self.layer()
+            ))),
+        }
+    }
+
+    /// Log a stored write's event. When the feed cannot be written the event is OWED: its
+    /// number stays spent, and the next write (or the next open) logs it first.
+    fn log_stored(&self, event: Event) -> std::result::Result<(), String> {
+        let mut feed = self.state.feed.lock().expect("feed lock");
+        feed.append(event.clone()).inspect_err(|_| feed.owe(event))
+    }
+
     async fn say(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let (author, _) = self.attributed(inv, "say")?;
         let draft = channel::draft(self.def(), inv.inline_arg("content")?)?;
         // From here to the feed append is one step per layer: the sequence number is
         // assigned, stamped, admitted, stored and logged under this lock.
         let _write = self.state.write.lock().await;
+        let seq = self.settle_feed()?;
         self.state
             .channel()
             .read()
             .expect("channel lock")
             .check_supersedes(&draft, &author)?;
         let now = self.now(inv)?;
-        let seq = self.state.last_seq() + 1;
         let iri = format!(
             "{}{}",
             entry_prefix(self.layer()),
@@ -466,19 +497,21 @@ impl LayerEndpoint {
             .expect("channel lock")
             .append(&stamped)
             .map_err(Error::Endpoint)?;
-        self.state
-            .feed
-            .lock()
-            .expect("feed lock")
-            .append(Event {
-                seq,
-                time: created,
-                kind: "say".into(),
-                iri: iri.clone(),
-                by: author,
-            })
-            .map_err(Error::Endpoint)?;
+        let logged = self.log_stored(Event {
+            seq,
+            time: created,
+            kind: "say".into(),
+            iri: iri.clone(),
+            by: author,
+        });
         drop(_write);
+        if let Err(e) = logged {
+            return Err(Error::Endpoint(format!(
+                "entry <{iri}> is stored, with ik:seq {seq}, but its feed event could not be \
+                 logged ({e}): it is logged before the layer's next event, or when the host \
+                 next opens. Saying it again would store it twice"
+            )));
+        }
         self.host.notify().bump();
         Ok(Representation::new(ReprType::new(TEXT), iri.into_bytes()))
     }
@@ -627,8 +660,8 @@ impl LayerEndpoint {
                 check_report(self.def(), &index, offer, &dropper, &draft.addressed_to)?;
             }
         }
+        let seq = self.settle_feed()?;
         let now = self.now(inv)?;
-        let seq = self.state.last_seq() + 1;
         let created = xsd_date_time(now);
         let stamped = draft.stamp(&dropper, &created, seq);
         admit(inv, self.def(), &stamped).await?;
@@ -638,17 +671,31 @@ impl LayerEndpoint {
             .await
             .map_err(|e| self.space_error(e))?;
         let meta = draft.meta(&cid, &dropper, &created, seq);
+        let event = tuplespace::out_event(&meta);
         let logged = self
             .state
             .feed
             .lock()
             .expect("feed lock")
-            .append(tuplespace::out_event(&meta));
+            .append(event.clone());
         if let Err(e) = logged {
             // Never acknowledged and never logged: take it back out, so the space holds only
-            // what the feed records.
-            let _ = space.store.take(&cid).await;
-            return Err(Error::Endpoint(e));
+            // what the feed records, and its number is free again.
+            match space.store.take(&cid).await {
+                Ok(_) => return Err(Error::Endpoint(e)),
+                Err(back) => {
+                    // Still in the space, so its number is spent (ledger #1218): owed to the
+                    // feed, and recorded as the pending tuple it is.
+                    self.state.feed.lock().expect("feed lock").owe(event);
+                    space.record_out(meta);
+                    return Err(Error::Endpoint(format!(
+                        "<{}> is dropped, with ik:seq {seq}, but its feed event could not be \
+                         logged ({e}) and it could not be taken back ({back}): it is logged \
+                         before the layer's next event, or when the host next opens",
+                        draft.subject
+                    )));
+                }
+            }
         }
         space.record_out(meta);
         drop(_write);
@@ -691,6 +738,7 @@ impl LayerEndpoint {
                 self.layer()
             )));
         }
+        let seq = self.settle_feed()?;
         // Read the tuple first: its receipt is staged, holding it, before the take.
         let Some(bytes) = space
             .store
@@ -705,7 +753,6 @@ impl LayerEndpoint {
             .map_err(|_| self.space_error(format!("tuple {} is not UTF-8", meta.cid)))?;
         let tuple = rdf::parse_turtle(&text).map_err(|e| self.space_error(e))?;
         let now = self.now(inv)?;
-        let seq = self.state.last_seq() + 1;
         let time = xsd_date_time(now);
         let id = id::mint(now.as_millis(), seq);
         let (_, document) =
@@ -733,14 +780,19 @@ impl LayerEndpoint {
             .store
             .commit(&meta.cid, &id)
             .map_err(|e| self.space_error(e))?;
-        self.state
-            .feed
-            .lock()
-            .expect("feed lock")
-            .append(tuplespace::taken_event(&receipt))
-            .map_err(Error::Endpoint)?;
+        // The take is done and cannot be undone: whatever the feed says, it is recorded, and
+        // a feed that cannot log it owes the event (ledger #1218).
+        let logged = self.log_stored(tuplespace::taken_event(&receipt));
+        let receipt_iri = receipt.iri.clone();
         space.record_taken(receipt);
         drop(_write);
+        if let Err(e) = logged {
+            return Err(Error::Endpoint(format!(
+                "<{subject}> is taken by <{taker}> (receipt <{receipt_iri}>, ik:seq {seq}), but \
+                 its feed event could not be logged ({e}): the take stands, and its event is \
+                 logged before the layer's next event, or when the host next opens"
+            )));
+        }
         self.host.notify().bump();
         Ok(turtle(text))
     }
