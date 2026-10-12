@@ -14,7 +14,11 @@
 //! - **The entries, author-graph and latest reads are cacheable on the `say` thread**: the
 //!   kernel cuts `urn:layer:{layer}:say` after every Sink through it, which is the only way
 //!   an entry is written. `tests/channel.rs` pins the cut.
-//! - **Feeds, the participants graphs and manifests are live**: a feed waits on the next
+//! - **`urn:layers:me` is probed under root too**, which names nobody, so it refuses every
+//!   probe: the checks that need an answer are waived for it with that reason, and
+//!   `tests/me.rs` pins each of them under principals a door minted. It is not declared
+//!   `live` either: with CACHEABLE waived nothing would hold it to the declaration.
+//! - **Feeds, the participants graphs, `urn:layers:me` and manifests are live**: a feed waits on the next
 //!   event, and the config reads are re-read per request because enrollment is live.
 //! - **`out` is probed under root too**, so it refuses every probe the same way (a drop is
 //!   attributed): `OUTPUTS` is waived for the tuples door with that reason. **`take` is not
@@ -47,6 +51,36 @@ fn suite(f: &common::Fixture, entry_ids: &[(String, String)], receipt: &str) -> 
         .live("layers-participants")
         .live("collab")
         .live("collab-participants");
+    // `urn:layers:me` answers who the door says the caller is, and the suite probes under
+    // root, which names nobody, so every probe is refused: the checks that need an answer
+    // are waived, and tests/me.rs pins each under principals a door minted.
+    for (check, pinned) in [
+        (
+            Check::Outputs,
+            "its text/turtle and application/json answers",
+        ),
+        (
+            Check::SkolemRdf,
+            "that its Turtle face carries no blank node",
+        ),
+        (
+            Check::Vocabulary,
+            "that every ik: term it emits is one the vocabulary defines",
+        ),
+        (
+            Check::Cacheable,
+            "that it is live: the participants graph is read per request",
+        ),
+    ] {
+        suite = suite.opt_out_check(
+            "layers-me",
+            check,
+            format!(
+                "the suite probes under root, which names no principal, so urn:layers:me \
+                 refuses every probe; tests/me.rs pins {pinned}"
+            ),
+        );
+    }
     for layer in LAYERS {
         let id = |action: &str| format!("layer-{layer}-{action}");
         let entry = &entry_ids
@@ -160,6 +194,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
         "collab".to_string(),
         "collab-participants".to_string(),
         "layers-feed".to_string(),
+        "layers-me".to_string(),
         "layers-participants".to_string(),
     ];
     for layer in LAYERS {

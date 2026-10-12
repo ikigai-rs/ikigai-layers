@@ -52,6 +52,7 @@ holds and nothing more.
 | `urn:layer:{layer}:feed` | Source | events `after=` a sequence, `wait=` up to 60 s | `urn:cap:layer:feed:{layer}` |
 | `urn:layers:feed` | Source | one wait over several feeds, `after=talk:12,notes:3` | `urn:cap:layer:feed:{each}` |
 | `urn:layers:participants` | Source | who each principal is, across the host (the operator's) | `urn:cap:layers:read:participants` |
+| `urn:layers:me` | Source | who the door says the caller is: its principal and, when it is a participant, its kind and the collaborations granting it anything (`as=application/json` for a client) | `urn:cap:collab:read:*`, which every generated grant holds |
 | `urn:collab:{name}` | Source | a collaboration's manifest | `urn:cap:collab:read:{name}` |
 | `urn:collab:{name}:participants` | Source | who takes part in that collaboration: each participant its manifest grants anything, as the participants graph describes it | `urn:cap:collab:read:{name}` |
 
@@ -237,6 +238,11 @@ State is plain files: each entry is written once to
   roster and no generated grant reads it; each participant reads
   `urn:collab:{name}:participants` for its own collaborations, under the
   `urn:cap:collab:read:{name}` its grant already carries.
+- **Who a participant is, by its own door's word.** `urn:layers:me` answers the principal the
+  door minted for the caller, so a client never infers its identity from the attribution on
+  records it already holds. It is readable under any generated grant, needs no new token, and
+  lists only the collaborations whose exact tokens the caller holds. A request that names no
+  principal (root names nobody) is refused, never answered with an empty graph.
 
 A tuplespace layer fronts an [ikigai-intray](https://crates.io/crates/ikigai-intray) space
 at `<state>/{layer}/tuples/`, which the host links and calls under its own
