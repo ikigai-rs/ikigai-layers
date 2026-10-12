@@ -222,6 +222,8 @@ fn a_generated_grant_projects_exactly_its_layers() {
         "layers-feed__source",
         "collab__source",
         "collab-participants__source",
+        // Who the door says it is (ledger #1314), under the collaboration token it holds.
+        "layers-me__source",
     ]
     .into_iter()
     .map(String::from)

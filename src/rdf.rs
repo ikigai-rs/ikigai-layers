@@ -33,6 +33,14 @@ pub const PROV_USED: &str = "http://www.w3.org/ns/prov#used";
 pub const PROV_ASSOCIATED: &str = "http://www.w3.org/ns/prov#wasAssociatedWith";
 /// `prov:endedAtTime`: when a take happened, by the kernel clock.
 pub const PROV_ENDED: &str = "http://www.w3.org/ns/prov#endedAtTime";
+/// `foaf:primaryTopic`: `urn:layers:me` to the principal it describes.
+pub const FOAF_PRIMARY_TOPIC: &str = "http://xmlns.com/foaf/0.1/primaryTopic";
+/// `foaf:Person`: a participant who is a person.
+pub const FOAF_PERSON: &str = "http://xmlns.com/foaf/0.1/Person";
+/// `prov:SoftwareAgent`: a participant that is an agent acting for a person.
+pub const PROV_SOFTWARE_AGENT: &str = "http://www.w3.org/ns/prov#SoftwareAgent";
+/// `prov:actedOnBehalfOf`: an agent or a machine to the participant it acts for.
+pub const PROV_ACTED_FOR: &str = "http://www.w3.org/ns/prov#actedOnBehalfOf";
 /// `xsd:dateTime`.
 pub const XSD_DATE_TIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 /// `xsd:integer`.
@@ -76,6 +84,11 @@ pub fn ik_layer_class() -> String {
 /// `ik:layerModel`.
 pub fn ik_layer_model() -> String {
     format!("{IK}layerModel")
+}
+
+/// `ik:Machine`: a participant that is a running host acting under its own identity.
+pub fn ik_machine() -> String {
+    format!("{IK}Machine")
 }
 
 /// `ik:Collaboration`.

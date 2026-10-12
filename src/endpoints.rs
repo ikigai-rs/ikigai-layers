@@ -17,6 +17,7 @@
 //! urn:layer:{layer}:receipt:{id}   Source  layer-{layer}-receipt     urn:cap:layer:read:{layer}
 //! urn:layers:feed                  Source  layers-feed               urn:cap:layer:feed:*  (+ exact per layer)
 //! urn:layers:participants          Source  layers-participants       urn:cap:layers:read:participants
+//! urn:layers:me                    Source  layers-me                 urn:cap:collab:read:*  (any participant grant)
 //! urn:collab:{name}                Source  collab                    urn:cap:collab:read:* (+ exact per manifest)
 //! urn:collab:{name}:participants   Source  collab-participants       urn:cap:collab:read:* (+ exact per manifest)
 //! ```
@@ -76,6 +77,9 @@ pub const VALIDATE: &str = "urn:shacl:validate";
 /// `urn:cap:collab:read:{name}` every generated grant already carries (ledger #1282).
 pub const CAP_PARTICIPANTS: &str = "urn:cap:layers:read:participants";
 
+/// `urn:layers:me`: who the door says the caller is.
+pub const ME: &str = "urn:layers:me";
+
 /// The family `urn:layers:feed` declares (and then checks exactly, per layer).
 pub const CAP_FEED_FAMILY: &str = "urn:cap:layer:feed:*";
 
@@ -120,6 +124,12 @@ pub fn space(host: &Arc<Host>) -> EndpointSpace {
         .bind(
             Exact::new("urn:layers:participants"),
             ParticipantsEndpoint {
+                host: Arc::clone(host),
+            },
+        )
+        .bind(
+            Exact::new(ME),
+            MeEndpoint {
                 host: Arc::clone(host),
             },
         )
@@ -1634,6 +1644,142 @@ impl Endpoint for ParticipantsEndpoint {
             .verb(Verb::Meta)
             .requires(CAP_PARTICIPANTS)
             .output(TURTLE)
+    }
+}
+
+/// `urn:layers:me`: the caller's principal as its door minted it and, when that principal is
+/// a participant, who the participants graph says it is and the collaborations whose
+/// manifests grant it anything (ledger #1314).
+///
+/// A client otherwise has no way to learn which principal its door minted for it: gonk's
+/// mirror and taker inferred it from the attribution on records they already held, which
+/// cannot resolve a take whose reply was lost before the first take (ledger #1313).
+///
+/// **The capability.** It declares `urn:cap:collab:read:*`, the family every generated
+/// grant already holds (each grant carries `urn:cap:collab:read:{name}` for every manifest
+/// naming its participant), so no grant needs a new token. A collaboration is listed only
+/// when the caller also holds its exact token: what an attenuated capability is answered
+/// never exceeds what it could read at `urn:collab:{name}`. Under a generated grant the two
+/// lists are the same.
+///
+/// **No principal is a refusal** (`Denied`), never an empty answer: a door that mints none
+/// leaves its caller unable to write anything (every write is attributed), an empty Turtle
+/// graph cannot be told from a broken read, and a capability that carries a principal would
+/// succeed. Root names nobody, so root is refused too.
+struct MeEndpoint {
+    host: Arc<Host>,
+}
+
+/// One word for what a participant is, from its `rdf:type`s: a machine (`ik:Machine`,
+/// itself a `prov:SoftwareAgent`, so checked first), a person (`foaf:Person`), an agent
+/// (`prov:SoftwareAgent`), or `other`.
+fn kind_of(types: &std::collections::BTreeSet<String>) -> &'static str {
+    if types.contains(&rdf::ik_machine()) {
+        "machine"
+    } else if types.contains(rdf::FOAF_PERSON) {
+        "person"
+    } else if types.contains(rdf::PROV_SOFTWARE_AGENT) {
+        "agent"
+    } else {
+        "other"
+    }
+}
+
+#[async_trait]
+impl Endpoint for MeEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let principal = inv.capability.principal().ok_or_else(|| {
+            Error::Denied(
+                "urn:layers:me answers the principal the door minted for the caller, and this \
+                 request names nobody (root names nobody either)"
+                    .into(),
+            )
+        })?;
+        let as_json = face(inv, &[TURTLE, JSON])? == JSON;
+        // Read from the files on every request (enrollment is live), so never cached.
+        let participants = self.host.participants().map_err(host_error)?;
+        let member = participants.members.get(principal);
+        let collabs: Vec<String> = match member {
+            None => Vec::new(),
+            Some(_) => self
+                .host
+                .collabs_with(&participants)
+                .map_err(host_error)?
+                .values()
+                .filter(|m| {
+                    m.mounts
+                        .iter()
+                        .any(|mount| mount.grants.keys().any(|p| p.iri() == principal))
+                })
+                .filter(|m| inv.capability.allows(&collab_cap(&m.name)))
+                .map(|m| collab_iri(&m.name))
+                .collect(),
+        };
+        let about: Vec<&Triple> = participants
+            .triples
+            .iter()
+            .filter(|t| rdf::subject_iri(&t.subject) == Some(principal))
+            .collect();
+        if as_json {
+            let acts_for: Vec<&str> = about
+                .iter()
+                .filter(|t| t.predicate.as_str() == rdf::PROV_ACTED_FOR)
+                .filter_map(|t| rdf::object_iri(&t.object))
+                .collect();
+            let body = serde_json::json!({
+                "principal": principal,
+                "participant": member.map(|_| principal),
+                "kind": member.map(|m| kind_of(&m.types)),
+                "types": member.map(|m| m.types.iter().collect::<Vec<_>>()).unwrap_or_default(),
+                "label": member.and_then(|m| m.label.as_deref()),
+                "actsFor": acts_for,
+                "collaborations": collabs,
+            });
+            return Ok(Representation::new(
+                ReprType::new(JSON),
+                body.to_string().into_bytes(),
+            ));
+        }
+        let me = node(principal);
+        let mut triples = vec![Triple::new(
+            node(ME),
+            node(rdf::FOAF_PRIMARY_TOPIC),
+            me.clone(),
+        )];
+        triples.extend(about.into_iter().cloned());
+        for collab in &collabs {
+            let c = node(collab);
+            triples.push(Triple::new(
+                c.clone(),
+                node(rdf::RDF_TYPE),
+                node(&rdf::ik_collaboration()),
+            ));
+            triples.push(Triple::new(c, node(rdf::DCT_CONTRIBUTOR), me.clone()));
+        }
+        Ok(turtle(rdf::to_turtle(&triples)))
+    }
+
+    fn name(&self) -> &str {
+        "layers-me"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("layers-me")
+            .title("Who am I")
+            .summary(
+                "The caller's principal, as the door that authenticated it minted it (the \
+                 subject of urn:layers:me's foaf:primaryTopic), and when it is a participant, \
+                 what the participants graph says of it and each collaboration whose manifest \
+                 grants it anything (dcterms:contributor); the JSON face adds its kind \
+                 (person, agent, machine or other). Readable under any participant's grant; \
+                 a request that names no principal is refused",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(CAP_COLLAB_FAMILY)
+            .input(as_spec(&[TURTLE, JSON]))
+            .output(TURTLE)
+            .output(JSON)
     }
 }
 
