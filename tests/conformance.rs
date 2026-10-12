@@ -74,9 +74,7 @@ fn suite(f: &common::Fixture, entry_ids: &[(String, String)], receipt: &str) -> 
         .fixture(Probe::new("layers-feed", Verb::Source).arg("after", "talk:0"))
         // Answered about its caller, so probed AS one: brian, through the grant his door
         // mints (two collaborations), and every check judges what it served.
-        .fixture(
-            Probe::new("layers-me", Verb::Source).capability(minted(f, &participant("brian"))),
-        )
+        .fixture(Probe::new("layers-me", Verb::Source).capability(minted(f, &participant("brian"))))
         .live("layers-feed")
         .live("layers-participants")
         .live("collab")

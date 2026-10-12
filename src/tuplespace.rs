@@ -44,6 +44,7 @@ use ikigai_core::{
     ArgRef, Bindings, Capability, Endpoint, Error, Invocation, Iri, Request, Result, Verb,
 };
 use ikigai_intray::SpaceEndpoint;
+use ikigai_store::budget::EvaluationBudget;
 use oxrdf::{Literal, NamedOrBlankNode, Term, Triple};
 
 use crate::channel::{admitted_type, invalid, parse_content, refuse_stamp, require_type};
@@ -243,13 +244,15 @@ fn space_iri() -> Iri {
 }
 
 impl Store {
-    fn open(dir: &Path) -> std::result::Result<Store, String> {
+    /// The space under `dir`, its `match=` evaluations run within `budget`: the HOST's one,
+    /// shared by every tuplespace layer, so one overdue count caps them all (ledger #1362).
+    fn open(dir: &Path, budget: EvaluationBudget) -> std::result::Result<Store, String> {
         let receipts = dir.join("receipts");
         let staging = receipts.join(".taking");
         std::fs::create_dir_all(&staging)
             .map_err(|e| format!("create {}: {e}", staging.display()))?;
         Ok(Store {
-            space: SpaceEndpoint::new(dir.to_path_buf()),
+            space: SpaceEndpoint::new(dir.to_path_buf()).with_evaluation_budget(budget),
             receipts,
             staging,
             authority: Capability::scoped([
@@ -401,13 +404,27 @@ impl Tuplespace {
     /// Open a layer's space under `dir` (`<state>/{layer}`), settle any take a crash
     /// interrupted, and rebuild the index from the space, the receipts and the subjects the
     /// feed has logged (`logged`: every `out` event's IRI, so a tuple that left the space
-    /// without a receipt still keeps its name used).
+    /// without a receipt still keeps its name used). Its `match=` evaluations run within a
+    /// budget of its OWN ([`EvaluationBudget::default`]); a host opens every layer with
+    /// [`open_with_budget`](Self::open_with_budget) instead, so they share one.
     pub fn open(
         def: &LayerDef,
         dir: &Path,
         logged: &[String],
     ) -> std::result::Result<(Tuplespace, Stored), String> {
-        let store = Store::open(dir)?;
+        Self::open_with_budget(def, dir, logged, EvaluationBudget::default())
+    }
+
+    /// [`open`](Self::open), its `match=` evaluations within `budget`: a clone of the host's
+    /// one, so every layer shares one overdue count (see [`crate::Host::match_budget`],
+    /// ledger #1362).
+    pub fn open_with_budget(
+        def: &LayerDef,
+        dir: &Path,
+        logged: &[String],
+        budget: EvaluationBudget,
+    ) -> std::result::Result<(Tuplespace, Stored), String> {
+        let store = Store::open(dir, budget)?;
         let layer = def.name.as_str();
         let pending_ids: BTreeSet<String> = block_on(store.list())
             .map_err(|e| format!("list the space: {e}"))?

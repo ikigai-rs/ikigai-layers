@@ -845,9 +845,11 @@ impl LayerEndpoint {
             name: "match".into(),
             detail: format!(
                 "layer `{}` does not take match=: its definition does not set `match = true`. \
-                 A template is a SPARQL ASK evaluated against every pending tuple with no time \
-                 bound, so a layer opts in only when it trusts its readers with that; read the \
-                 pending tuples without one (rd, or rd tuple=) and select them yourself",
+                 A template is a SPARQL ASK evaluated against every pending tuple; its caller \
+                 is answered within the host's time budget, but one the evaluator cannot stop \
+                 holds a core until it ends, so a layer opts in only when it trusts its readers \
+                 with that; read the pending tuples without one (rd, or rd tuple=) and select \
+                 them yourself",
                 self.layer()
             ),
         }

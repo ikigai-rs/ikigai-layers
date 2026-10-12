@@ -10,6 +10,7 @@ use crate::channel::Channel;
 use crate::config::{self, Config, ConfigError, LayerDef, Model, Participants};
 use crate::feed::{self, Event, FeedLog, Notify};
 use crate::tuplespace::Tuplespace;
+use ikigai_store::budget::EvaluationBudget;
 
 /// One layer's state.
 pub struct LayerState {
@@ -91,6 +92,8 @@ pub struct Host {
     config_dir: PathBuf,
     layers: BTreeMap<String, Arc<LayerState>>,
     notify: Arc<Notify>,
+    /// The ONE time budget every tuplespace layer's `match=` runs within (ledger #1362).
+    match_budget: EvaluationBudget,
     /// Held, never read: the state directory's lock lives exactly as long as the host.
     _lock: File,
 }
@@ -106,6 +109,7 @@ impl Host {
         state_dir: impl AsRef<Path>,
     ) -> Result<Arc<Host>, ConfigError> {
         let config = Config::load(&config_dir)?;
+        let match_budget = EvaluationBudget::new(config::load_match_budget(&config.dir)?);
         for (name, def) in &config.layers {
             compile_shapes(def).map_err(|e| ConfigError(format!("layer `{name}`: {e}")))?;
         }
@@ -114,7 +118,8 @@ impl Host {
         let mut layers = BTreeMap::new();
         for (name, def) in config.layers {
             let dir = state_dir.join(&name);
-            let state = open_layer(def, &dir)
+            // A CLONE: every layer shares the one overdue count (ledger #1362).
+            let state = open_layer(def, &dir, match_budget.clone())
                 .map_err(|e| ConfigError(format!("layer `{name}` state: {e}")))?;
             layers.insert(name, Arc::new(state));
         }
@@ -122,6 +127,7 @@ impl Host {
             config_dir: config.dir,
             layers,
             notify: Arc::new(Notify::default()),
+            match_budget,
             _lock: lock,
         }))
     }
@@ -134,6 +140,15 @@ impl Host {
     /// One layer.
     pub fn layer(&self, name: &str) -> Option<&Arc<LayerState>> {
         self.layers.get(name)
+    }
+
+    /// The time budget every tuplespace layer's `rd match=` runs within: ONE per host, from
+    /// [`config::load_match_budget`], cloned into each layer, so its
+    /// [`overdue_evaluations`](EvaluationBudget::overdue_evaluations) counts the templates
+    /// still running after their callers were answered across every layer, and its
+    /// `max_overdue` refuses the next one, in any layer, while that many are (ledger #1362).
+    pub fn match_budget(&self) -> &EvaluationBudget {
+        &self.match_budget
     }
 
     /// The change signal every feed append bumps.
@@ -220,7 +235,7 @@ fn lock_state(state_dir: &Path) -> Result<File, String> {
     Ok(file)
 }
 
-fn open_layer(def: LayerDef, dir: &Path) -> Result<LayerState, String> {
+fn open_layer(def: LayerDef, dir: &Path, budget: EvaluationBudget) -> Result<LayerState, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let feed_path = dir.join("feed.log");
     feed::touch(&feed_path)?;
@@ -260,7 +275,7 @@ fn open_layer(def: LayerDef, dir: &Path) -> Result<LayerState, String> {
                 .filter(|e| e.kind == "out")
                 .map(|e| e.iri.clone())
                 .collect();
-            let (space, stored) = Tuplespace::open(&def, dir, &logged)?;
+            let (space, stored) = Tuplespace::open_with_budget(&def, dir, &logged, budget)?;
             // A drop or a take is stored before its feed event (a tuple is in the space, a
             // receipt is committed), so a crash between the two leaves events the feed has
             // not logged: log them now, in order, as the channel does.

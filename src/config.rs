@@ -8,6 +8,7 @@
 //!   participants.ttl             who each principal is (served at urn:layers:participants)
 //!   collabs/{name}.toml          a collaboration's manifest (served at urn:collab:{name})
 //!   enrollment.toml              certificate fingerprints, read only by the grants generator
+//!   layers.toml                  optional: the host's own options ([`load_match_budget`])
 //! ```
 //!
 //! Everything is checked when it is read, and a broken file is the OPERATOR's error: it is
@@ -17,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use ikigai_store::budget::TimeBudget;
 use oxrdf::{Term, Triple};
 use serde::Deserialize;
 
@@ -115,11 +117,12 @@ pub struct LayerDef {
     /// A tuplespace's only: whether `rd` takes a `match=` template (default `false`).
     ///
     /// Off unless the definition says `match = true`, because a template is the CALLER's
-    /// SPARQL ASK, evaluated against every pending tuple with no bound on time: the store's
-    /// limits bound its size and nesting, and a cross join of a few triple patterns is small
-    /// and shallow and still runs for minutes (ledger #1327). So a layer whose readers include
-    /// anyone it would not hand a thread to keeps it off; `rd` without a template, `out` and
-    /// `take` are the same either way.
+    /// SPARQL ASK, evaluated against every pending tuple: the store's limits bound its size
+    /// and nesting, and a cross join of a few triple patterns is small and shallow and still
+    /// runs for minutes (ledger #1327). The host's time budget ([`load_match_budget`])
+    /// answers its caller in time, but what the evaluator cannot stop goes on holding a core
+    /// until it ends. So a layer whose readers include anyone it would not hand a thread to
+    /// keeps it off; `rd` without a template, `out` and `take` are the same either way.
     pub matching: bool,
     /// The collaborations this layer is declared shared with. `None` means private: at
     /// most one manifest may mount it.
@@ -715,6 +718,83 @@ fn list(names: &BTreeSet<&str>) -> String {
         .map(|n| format!("`{n}`"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The host's own options, beside `layers/` in the config dir. Optional: without it every
+/// option has its default.
+pub const HOST_FILE: &str = "layers.toml";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostToml {
+    #[serde(rename = "match")]
+    matching: Option<MatchToml>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatchToml {
+    budget_ms: Option<u64>,
+    max_overdue: Option<usize>,
+}
+
+/// The time budget every `rd match=` on this host runs within, from the `[match]` table of
+/// [`HOST_FILE`] (ledger #1362):
+///
+/// ```toml
+/// # layers.toml
+/// [match]
+/// budget_ms   = 2000   # how long one template may run before its caller gets a Timeout
+/// max_overdue = 1      # how many may run on past that, host-wide, before rd match= refuses
+/// ```
+///
+/// Absent (the file, the table or a key), each is ikigai-store's default: a 5 s budget, and
+/// a quarter of this machine's cores overdue (at least one). The host builds ONE
+/// [`EvaluationBudget`](ikigai_store::budget::EvaluationBudget) from this and hands it to
+/// every tuplespace layer, so `max_overdue` caps the cores the templates of ALL its layers
+/// can hold, not each layer's.
+///
+/// A template is evaluated under the host's own authority, never the caller's, so a
+/// `urn:cap:store:budget:<ms>` grant a participant holds does not raise it: `budget_ms` is
+/// what every caller gets. Zero for either is refused (no template could run, or none could
+/// be abandoned), never rounded up.
+pub fn load_match_budget(dir: &Path) -> Result<TimeBudget, ConfigError> {
+    let path = dir.join(HOST_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(TimeBudget::default()),
+        Err(e) => return err(format!("read {}: {e}", path.display())),
+    };
+    let at = path.display();
+    let parsed: HostToml = toml::from_str(&text).map_err(|e| ConfigError(format!("{at}: {e}")))?;
+    let Some(matching) = parsed.matching else {
+        return Ok(TimeBudget::default());
+    };
+    let mut budget = TimeBudget::default();
+    match matching.budget_ms {
+        Some(0) => {
+            return err(format!(
+                "{at}: `match.budget_ms` is 0, so no template could ever answer; give a \
+                 positive number of milliseconds, or leave it out for the default"
+            ))
+        }
+        Some(ms) => {
+            budget = TimeBudget::new(std::time::Duration::from_millis(ms))
+                .with_max_overdue(budget.max_overdue())
+        }
+        None => {}
+    }
+    match matching.max_overdue {
+        Some(0) => {
+            return err(format!(
+                "{at}: `match.max_overdue` is 0; the least is 1 (one template still running \
+                 after its caller was answered refuses the next until it ends)"
+            ))
+        }
+        Some(n) => budget = budget.with_max_overdue(n),
+        None => {}
+    }
+    Ok(budget)
 }
 
 /// Everything in one directory, checked.
