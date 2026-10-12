@@ -914,3 +914,170 @@ fn a_request_addressed_to_one_resolver_is_its_alone() {
     let answer = block_on(asker.ask_as("to-r2", &ask, Duration::from_millis(300))).unwrap();
     assert_eq!(text(&answer), "the value of x");
 }
+
+// ---- an asker that reads only JSON --------------------------------------------------------
+
+/// An asker with nothing but a JSON parser (ledger #1371): it reads the layer's context as
+/// JSON, asks in JSON-LD, waits on the feed's JSON, and reads its answer from the JSON-LD
+/// face, `serde_json` alone, no RDF parser. The reference resolver serves it unchanged.
+struct JsonAsker<'g> {
+    g: &'g Gateway,
+    who: &'static str,
+    layer: &'static str,
+}
+
+impl JsonAsker<'_> {
+    fn call(&self, verb: Verb, what: &str, args: &[(&str, &str)]) -> Result<serde_json::Value> {
+        let repr = issue(
+            &self.g.layers,
+            verb,
+            &format!("urn:layer:{}:{what}", self.layer),
+            args,
+            &self.g.grant(self.who),
+        )?;
+        Ok(serde_json::from_slice(&repr.bytes).expect("every answer read here is JSON"))
+    }
+
+    /// Ask `resource` under `correlation`, and wait for the answer: the reply node's JSON.
+    fn ask(&self, correlation: &str, resource: &str, args: &[&str]) -> serde_json::Value {
+        let context = self.call(Verb::Source, "context", &[]).unwrap();
+        let subject = format!("urn:layer:{}:request:{correlation}", self.layer);
+        let request = serde_json::json!({
+            "@context": context["@context"],
+            "@id": subject,
+            "@type": "Request",
+            "correlation": correlation,
+            "resource": resource,
+            "verb": "Source",
+            "argument": args,
+        });
+        let asked = self
+            .call(
+                Verb::Sink,
+                "tuples",
+                &[
+                    ("content", &request.to_string()),
+                    ("as", "application/json"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(asked, serde_json::json!({ "@id": subject }));
+        let reply = format!("urn:layer:{}:reply:{correlation}", self.layer);
+        let deadline = Instant::now() + DEADLINE;
+        let mut cursor = 0u64;
+        loop {
+            match self.call(
+                Verb::Delete,
+                "tuples",
+                &[("tuple", &reply), ("as", "application/ld+json")],
+            ) {
+                Ok(doc) => return reply_node(&doc, &reply),
+                Err(Error::NotFound(_)) => {}
+                Err(e) => panic!("taking <{reply}>: {e}"),
+            }
+            assert!(Instant::now() < deadline, "no answer to <{subject}>");
+            let feed = self
+                .call(
+                    Verb::Source,
+                    "feed",
+                    &[
+                        ("after", &cursor.to_string()),
+                        ("wait", "1"),
+                        ("as", "application/json"),
+                    ],
+                )
+                .unwrap();
+            cursor = feed["last"].as_u64().expect("the feed's `last`");
+        }
+    }
+}
+
+/// The node `id` of a JSON-LD answer's `@graph`.
+fn reply_node(doc: &serde_json::Value, id: &str) -> serde_json::Value {
+    doc["@graph"]
+        .as_array()
+        .expect("a top-level @graph array")
+        .iter()
+        .find(|n| n["@id"] == id)
+        .unwrap_or_else(|| panic!("no <{id}> in {doc}"))
+        .clone()
+}
+
+fn bytes_of(reply: &serde_json::Value) -> String {
+    use base64::Engine;
+    let encoded = reply["bytes"]
+        .as_str()
+        .expect("bytes, as their base64 text");
+    String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("base64"),
+    )
+    .unwrap()
+}
+
+#[test]
+fn an_asker_reading_only_json_crosses_the_gateway() {
+    let g = gateway_fixture();
+    let asker = JsonAsker {
+        g: &g,
+        who: "a",
+        layer: LAYER,
+    };
+    let (ok, failed) = g.with_resolver("r1", LAYER, || {
+        (
+            asker.ask("json1", "urn:data:x", &["shout=yes"]),
+            asker.ask("json2", "urn:data:missing", &[]),
+        )
+    });
+    // A representation: its media type and its bytes.
+    assert_eq!(ok["@type"], "Reply");
+    assert_eq!(ok["mediaType"], "text/plain");
+    assert_eq!(bytes_of(&ok), "THE VALUE OF X");
+    assert_eq!(ok["offer"], gateway::request_subject(LAYER, "json1"));
+    assert_eq!(ok["addressedTo"], participant("a"));
+    assert_eq!(ok["correlation"], "json1");
+    // The host's stamps: who answered, when, and where in the feed, as strings.
+    assert_eq!(ok["attributedTo"], participant("r1"));
+    assert!(ok["created"].is_string() && ok["seq"].is_string(), "{ok}");
+    // A typed error: its kind and message.
+    assert_eq!(failed["@type"], "Failure");
+    assert_eq!(failed["errorKind"], "not-found");
+    assert!(
+        failed["message"].as_str().unwrap().contains("missing"),
+        "{failed}"
+    );
+
+    // A take whose reply was lost: the second take is a Conflict, and the answer is read
+    // back, in JSON, from the receipt that holds it.
+    let reply = gateway::reply_subject(LAYER, "json1");
+    match asker.call(
+        Verb::Delete,
+        "tuples",
+        &[("tuple", &reply), ("as", "application/ld+json")],
+    ) {
+        Err(Error::Conflict(m)) => assert!(m.contains(&participant("a")), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    let receipt = asker
+        .call(
+            Verb::Source,
+            "tuples",
+            &[
+                ("state", "taken"),
+                ("tuple", &reply),
+                ("as", "application/ld+json"),
+            ],
+        )
+        .unwrap();
+    let activity = receipt["@graph"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["@type"] == "Activity")
+        .unwrap_or_else(|| panic!("no Activity in {receipt}"))
+        .clone();
+    assert_eq!(activity["used"], reply);
+    assert_eq!(activity["associatedWith"], participant("a"));
+    assert_eq!(bytes_of(&reply_node(&receipt, &reply)), "THE VALUE OF X");
+}

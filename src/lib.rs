@@ -17,6 +17,11 @@
 //! ([`gateway`]): an ask layer per asker carries requests and their answers (a representation,
 //! or a typed error), and an event channel per resource owner carries invalidations.
 //!
+//! Every answer a participant reads also has a JSON face ([`json`]), so a participant with
+//! only an HTTP client and a JSON parser can take part: a graph as the layer's egress context,
+//! pruned and compacted, always one top-level `@graph` array (`as=application/ld+json`), and a
+//! list or a write's answer as plain JSON (`as=application/json`).
+//!
 //! ```text
 //! urn:layer:{layer}                 Source  the definition (ik:Layer)         read:{layer}
 //! urn:layer:{layer}:shapes          Source  the closed admission shapes       read:{layer}
@@ -94,6 +99,7 @@ pub mod gateway;
 pub mod grants;
 pub mod host;
 pub mod id;
+pub mod json;
 pub mod name;
 pub mod rdf;
 pub mod time;

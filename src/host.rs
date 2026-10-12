@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::channel::Channel;
 use crate::config::{self, Config, ConfigError, LayerDef, Model, Participants};
 use crate::feed::{self, Event, FeedLog, Notify};
+use crate::json::{egress_context, Egress};
 use crate::tuplespace::Tuplespace;
 use ikigai_store::budget::EvaluationBudget;
 
@@ -23,6 +24,9 @@ pub struct LayerState {
     pub(crate) feed: Mutex<FeedLog>,
     /// The model's state.
     pub(crate) model: ModelState,
+    /// The context its JSON-LD faces compact with: its egress context with the host's stamp
+    /// terms merged in ([`crate::json::egress_context`]), checked when the host opened.
+    pub(crate) egress: serde_json::Value,
 }
 
 /// The state each access model holds. One arm per built model; the `graph` model
@@ -94,6 +98,8 @@ pub struct Host {
     notify: Arc<Notify>,
     /// The ONE time budget every tuplespace layer's `match=` runs within (ledger #1362).
     match_budget: EvaluationBudget,
+    /// The host's own JSON-LD processor, bound into no space (ledger #1371).
+    json: Egress,
     /// Held, never read: the state directory's lock lives exactly as long as the host.
     _lock: File,
 }
@@ -101,17 +107,24 @@ pub struct Host {
 impl Host {
     /// Open a host: check the whole configuration (a manifest that breaks the isolation
     /// rule stops the host here, not at its first read, and so do shapes the validator cannot
-    /// compile), take the state directory's lock (refused, naming the holder's pid, when
-    /// another host holds it), then open every layer's state, repairing a feed that lost the
-    /// event of an entry stored just before a crash.
+    /// compile, and so does an egress context that cannot carry the host's stamps to its JSON-LD
+    /// faces, see [`Egress::check`]), take the state directory's lock (refused, naming the
+    /// holder's pid, when another host holds it), then open every layer's state, repairing a
+    /// feed that lost the event of an entry stored just before a crash.
     pub fn open(
         config_dir: impl AsRef<Path>,
         state_dir: impl AsRef<Path>,
     ) -> Result<Arc<Host>, ConfigError> {
         let config = Config::load(&config_dir)?;
         let match_budget = EvaluationBudget::new(config::load_match_budget(&config.dir)?);
+        let json = Egress::new();
+        let mut egress = BTreeMap::new();
         for (name, def) in &config.layers {
             compile_shapes(def).map_err(|e| ConfigError(format!("layer `{name}`: {e}")))?;
+            let context = egress_context(&def.context)
+                .and_then(|context| json.check(name, &context).map(|()| context))
+                .map_err(|e| ConfigError(format!("layer `{name}`: {e}")))?;
+            egress.insert(name.clone(), context);
         }
         let state_dir = state_dir.as_ref();
         let lock = lock_state(state_dir).map_err(ConfigError)?;
@@ -119,7 +132,8 @@ impl Host {
         for (name, def) in config.layers {
             let dir = state_dir.join(&name);
             // A CLONE: every layer shares the one overdue count (ledger #1362).
-            let state = open_layer(def, &dir, match_budget.clone())
+            let context = egress.remove(&name).expect("checked above");
+            let state = open_layer(def, &dir, match_budget.clone(), context)
                 .map_err(|e| ConfigError(format!("layer `{name}` state: {e}")))?;
             layers.insert(name, Arc::new(state));
         }
@@ -128,6 +142,7 @@ impl Host {
             layers,
             notify: Arc::new(Notify::default()),
             match_budget,
+            json,
             _lock: lock,
         }))
     }
@@ -149,6 +164,11 @@ impl Host {
     /// `max_overdue` refuses the next one, in any layer, while that many are (ledger #1362).
     pub fn match_budget(&self) -> &EvaluationBudget {
         &self.match_budget
+    }
+
+    /// The host's own JSON-LD processor, which every layer's JSON-LD faces compact through.
+    pub(crate) fn json(&self) -> &Egress {
+        &self.json
     }
 
     /// The change signal every feed append bumps.
@@ -235,7 +255,12 @@ fn lock_state(state_dir: &Path) -> Result<File, String> {
     Ok(file)
 }
 
-fn open_layer(def: LayerDef, dir: &Path, budget: EvaluationBudget) -> Result<LayerState, String> {
+fn open_layer(
+    def: LayerDef,
+    dir: &Path,
+    budget: EvaluationBudget,
+    egress: serde_json::Value,
+) -> Result<LayerState, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let feed_path = dir.join("feed.log");
     feed::touch(&feed_path)?;
@@ -301,5 +326,6 @@ fn open_layer(def: LayerDef, dir: &Path, budget: EvaluationBudget) -> Result<Lay
         write: futures::lock::Mutex::new(()),
         feed: Mutex::new(feed),
         model,
+        egress,
     })
 }
