@@ -348,8 +348,9 @@ pub struct Draft {
 /// Parse and check what an author sent to `say`: Turtle, or JSON-LD when it starts with
 /// `{` or `[`.
 ///
-/// Refused (as a bad `content`): more than the layer's `entry_max` bytes; a parse error; a
-/// named graph; anything but exactly one subject, `<urn:layer:new>` or one blank node; a
+/// Refused (as a bad `content`): more than the layer's `entry_max` bytes; JSON-LD nested
+/// deeper than [`MAX_JSON_DEPTH`]; a parse error; a named graph; anything but exactly one
+/// subject, `<urn:layer:new>` or one blank node; a
 /// blank node or a quoted triple anywhere else; any of the three stamps
 /// (`prov:wasAttributedTo`, `dcterms:created`, `ik:seq`); no `rdf:type`, or a type no shape
 /// of the layer targets (SHACL conforms vacuously for what nothing targets).
@@ -415,7 +416,8 @@ pub fn draft(def: &LayerDef, content: &[u8]) -> Result<Draft, Error> {
 }
 
 /// Parse what a writer sent: Turtle, or JSON-LD when it starts with `{` or `[`, at most the
-/// layer's `entry_max` bytes, in the default graph only. What the triples may say is the
+/// layer's `entry_max` bytes (and JSON-LD at most [`MAX_JSON_DEPTH`] levels deep), in the
+/// default graph only. What the triples may say is the
 /// caller's (each model's) to check.
 pub(crate) fn parse_content(def: &LayerDef, content: &[u8]) -> Result<Vec<Triple>, Error> {
     if content.len() > def.entry_max {
@@ -428,6 +430,15 @@ pub(crate) fn parse_content(def: &LayerDef, content: &[u8]) -> Result<Vec<Triple
     }
     let first = content.iter().find(|b| !b.is_ascii_whitespace());
     let json = matches!(first, Some(b'{') | Some(b'['));
+    if json {
+        let depth = json_depth(content);
+        if depth > MAX_JSON_DEPTH {
+            return Err(invalid(format!(
+                "JSON-LD nested {depth} levels deep, over the bound of {MAX_JSON_DEPTH}: an entry \
+                 is one subject, and no entry needs more"
+            )));
+        }
+    }
     let format = if json {
         RdfFormat::from_media_type("application/ld+json").expect("a known format")
     } else {
@@ -445,6 +456,55 @@ pub(crate) fn parse_content(def: &LayerDef, content: &[u8]) -> Result<Vec<Triple
         return Err(invalid("an empty graph"));
     }
     Ok(triples)
+}
+
+/// The deepest JSON-LD a write may nest (objects and arrays together, the `@context`
+/// included).
+///
+/// JSON-LD's parser recurses once per nested object, and a stack overflow ABORTS the
+/// process, so depth is bounded BEFORE anything is parsed, whatever the size bound allows:
+/// 1500 nested objects (12 KB, under the default 16 KiB `entry_max`) overflowed a 2 MiB
+/// thread, the stack a door's runtime gives each worker (the audit of 2026-10-11). An entry
+/// is one subject whose other nodes are IRIs, so real entries nest a handful of levels; 64
+/// is the bound ikigai-store puts on SPARQL nesting, for the same reason.
+pub const MAX_JSON_DEPTH: usize = 64;
+
+/// The deepest nesting of objects and arrays in `json`, read byte by byte with no
+/// recursion, outside strings (an escaped quote does not end one). Not a validator: the
+/// parser judges the rest.
+///
+/// ```
+/// use ikigai_layers::channel::json_depth;
+///
+/// assert_eq!(json_depth(b"{}"), 1);
+/// assert_eq!(json_depth(br#"{"a": [{"b": "{[\"{["}]}"#), 3);
+/// assert_eq!(json_depth(&b"[".repeat(100_000)), 100_000);
+/// ```
+pub fn json_depth(json: &[u8]) -> usize {
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    let (mut in_string, mut escaped) = (false, false);
+    for &b in json {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
 }
 
 /// The predicates the host stamps (who, when, and the feed position), refused if sent.

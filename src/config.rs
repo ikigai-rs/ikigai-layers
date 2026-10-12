@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use oxrdf::{Term, Triple};
 use serde::Deserialize;
 
-use crate::name::{is_layer_name, is_short_name, Participant};
+use crate::name::{is_layer_name, is_plain_file_name, is_short_name, Participant};
 use crate::rdf::{self, object_iri, subject_iri};
 
 /// A configuration the host cannot serve, with the file it came from.
@@ -177,7 +177,8 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
     if !is_layer_name(&name) {
         return err(format!(
             "{at}: `{name}` is not a layer name (lowercase [a-z0-9-], at most {} characters, \
-             so its longest MCP tool name fits in 64)",
+             so its longest MCP tool name fits in 64, and no Windows device name, since it \
+             names a directory)",
             crate::name::MAX_LAYER_NAME
         ));
     }
@@ -250,12 +251,11 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
     })
 }
 
-/// A file a definition names, which must sit in `layers/` itself: a bare file name, so a
-/// definition cannot read anything outside the host's own configuration.
+/// A file a definition names, which must sit in `layers/` itself: a bare file name
+/// ([`is_plain_file_name`]: no separator, no drive prefix, no device name), so a definition
+/// cannot read anything outside the host's own configuration on any platform.
 fn beside(layers_dir: &Path, file: &str, def: &Path) -> Result<PathBuf, ConfigError> {
-    let plain =
-        !file.is_empty() && !file.starts_with('.') && !file.contains('/') && !file.contains('\\');
-    if !plain {
+    if !is_plain_file_name(file) {
         return err(format!(
             "{}: `{file}` must be a file name in layers/, not a path",
             def.display()

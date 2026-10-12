@@ -285,32 +285,58 @@ pub fn format_cursor(cursor: &BTreeMap<String, u64>) -> String {
 /// read parked on it. One for the whole host, so one wait can cover any set of layers;
 /// a woken reader re-checks its own layers, and a wake for another layer is a spurious
 /// wake, which costs one check.
+///
+/// **A wait that ends leaves nothing behind**, whichever way it ends: a [`Changed`] takes its
+/// waker back out when it is dropped, so a long poll that times out on a quiet layer does
+/// not stay parked until the next write. Before that, every timed-out wait left its waker
+/// (and so its task) here until some write on the host woke it, and a participant holding
+/// any feed grant could grow the host's memory by repeating short waits (the audit of
+/// 2026-10-11).
 #[derive(Default)]
 pub struct Notify {
-    state: Mutex<(u64, Vec<Waker>)>,
+    state: Mutex<Parked>,
+}
+
+/// The generation and the parked readers, each under the id its [`Changed`] holds.
+#[derive(Default)]
+struct Parked {
+    generation: u64,
+    next_id: u64,
+    wakers: Vec<(u64, Waker)>,
 }
 
 impl Notify {
     /// The current generation.
     pub fn generation(&self) -> u64 {
-        self.state.lock().expect("notify lock").0
+        self.state.lock().expect("notify lock").generation
     }
 
     /// Bump the generation and wake every parked reader.
     pub fn bump(&self) {
         let wakers = {
             let mut state = self.state.lock().expect("notify lock");
-            state.0 += 1;
-            std::mem::take(&mut state.1)
+            state.generation += 1;
+            std::mem::take(&mut state.wakers)
         };
-        for waker in wakers {
+        for (_, waker) in wakers {
             waker.wake();
         }
     }
 
     /// A future that is ready once the generation differs from `seen`.
     pub fn changed(&self, seen: u64) -> Changed<'_> {
-        Changed { notify: self, seen }
+        Changed {
+            notify: self,
+            seen,
+            id: None,
+        }
+    }
+
+    /// How many waits are parked on the signal now. A wait is parked only while it waits:
+    /// it leaves when an event wakes it, when its own timeout ends it, or when its read is
+    /// dropped.
+    pub fn parked(&self) -> usize {
+        self.state.lock().expect("notify lock").wakers.len()
     }
 }
 
@@ -318,19 +344,51 @@ impl Notify {
 pub struct Changed<'a> {
     notify: &'a Notify,
     seen: u64,
+    /// The id this wait's waker is parked under, once it has parked.
+    id: Option<u64>,
 }
 
 impl std::future::Future for Changed<'_> {
     type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let mut state = self.notify.state.lock().expect("notify lock");
-        if state.0 != self.seen {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = &mut *self;
+        let mut state = this.notify.state.lock().expect("notify lock");
+        if state.generation != this.seen {
+            // A bump took every waker, this one included; anything still parked under this
+            // id is removed on drop.
             return Poll::Ready(());
         }
-        if !state.1.iter().any(|w| w.will_wake(cx.waker())) {
-            state.1.push(cx.waker().clone());
+        let parked = this
+            .id
+            .and_then(|id| state.wakers.iter_mut().find(|(at, _)| *at == id));
+        match parked {
+            Some((_, waker)) => {
+                if !waker.will_wake(cx.waker()) {
+                    *waker = cx.waker().clone();
+                }
+            }
+            None => {
+                let id = state.next_id;
+                state.next_id += 1;
+                state.wakers.push((id, cx.waker().clone()));
+                this.id = Some(id);
+            }
         }
         Poll::Pending
+    }
+}
+
+impl Drop for Changed<'_> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            // Never a second panic while unwinding: a poisoned lock still holds the list.
+            let mut state = self
+                .notify
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.wakers.retain(|(at, _)| *at != id);
+        }
     }
 }
 
