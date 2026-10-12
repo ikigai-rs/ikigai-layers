@@ -62,7 +62,8 @@ binds `tuples` and `receipt`; every layer binds its definition, shapes, context 
 Endpoint ids are `layer-{layer}-{action}` (`layer-talk-say`), so MCP tools are
 `layer-talk-say__sink`, `layer-tasks-bobby-tuples__delete` and so on. Layer names are
 lowercase `[a-z0-9-]`, at most 24 characters, which keeps the longest tool name inside
-MCP's 64.
+MCP's 64, and never a Windows device name (`nul`, `con`, `com1`, …), since a layer's name
+is also a directory; participant short names follow the same rule.
 
 This version builds two access models: **channel** (append-only entries, one graph per
 author) and **tuplespace** (offers taken atomically, reports addressed to their offerer,
@@ -162,7 +163,8 @@ $ cat note.ttl | ikigai -c 'sink urn:layer:talk:say'
 urn:layer:talk:entry:01m4hhr0z80000000000001
 ```
 
-Turtle or JSON-LD, about `<urn:layer:new>` (or one blank node). What is stored:
+Turtle or JSON-LD, about `<urn:layer:new>` (or one blank node); JSON-LD nested more than
+64 levels deep is refused before it is parsed. What is stored:
 
 ```turtle
 <urn:layer:talk:entry:01m4hhr0z80000000000001> a ik:Message ;
