@@ -13,6 +13,10 @@
 //! author) and `tuplespace` (offers taken atomically, reports addressed to their offerer,
 //! with receipts; see [`tuplespace`]).
 //!
+//! On those two, a GATEWAY between kernels is configuration plus a reference participant
+//! ([`gateway`]): an ask layer per asker carries requests and their answers (a representation,
+//! or a typed error), and an event channel per resource owner carries invalidations.
+//!
 //! ```text
 //! urn:layer:{layer}                 Source  the definition (ik:Layer)         read:{layer}
 //! urn:layer:{layer}:shapes          Source  the closed admission shapes       read:{layer}
@@ -86,6 +90,7 @@ pub mod channel;
 pub mod config;
 pub mod endpoints;
 pub mod feed;
+pub mod gateway;
 pub mod grants;
 pub mod host;
 pub mod id;
