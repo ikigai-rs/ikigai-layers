@@ -112,8 +112,8 @@ fn two_participants_each_learn_who_the_door_says_they_are() {
     .collect();
     assert_eq!(facts(&turtle), expected, "{turtle}");
 
-    // What the conformance suite cannot check under root, which names nobody: no blank
-    // node, and every ik: term one the published vocabulary defines.
+    // No blank node, and every ik: term one the published vocabulary defines, for the
+    // machine too: tests/conformance.rs checks both as brian (ledger #1321).
     for t in triples(&turtle) {
         assert!(!ikigai_layers::rdf::has_blank_node(&t), "{t}");
         for term in [t.predicate.to_string(), t.object.to_string()] {

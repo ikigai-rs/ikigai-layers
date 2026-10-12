@@ -20,22 +20,32 @@ keywords = ["ikigai", "roc", "collaboration", "capability", "rdf"]
 categories = ["network-programming"]
 
 [dependencies]
-# The published kernel, the SAME one the hosts link. **0.1.96 is a TESTED floor**: the API
+# The published kernel, the SAME one the hosts link. **0.1.98 is a TESTED floor**: the API
 # this crate calls arrived earlier (the principal a door mints into the capability,
-# `Capability::principal`, and `Invocation::depends_on` on a failure, both 0.1.93), but
-# 0.1.96 is the release that carried the layer vocabulary these graphs emit (ikigai-vocab
-# 0.1.96, one workspace), and it is the version every test here ran against.
-# ⚠ `"0.1.96"` is a RANGE, `>=0.1.96, <0.2.0`: when core reaches 0.2 this line must move or
+# `Capability::principal`, and `Invocation::depends_on` on a failure, both 0.1.93; the layer
+# vocabulary these graphs emit, 0.1.96), and 0.1.98 is the head every test here ran against,
+# the one ikigai-intray 0.1.55 and ikigai-store 0.2.19 were released beside. (0.1.97 is
+# YANKED; a resolve never picks it.)
+# ⚠ `"0.1.98"` is a RANGE, `>=0.1.98, <0.2.0`: when core reaches 0.2 this line must move or
 # the crate freezes out of it.
-ikigai-core = "0.1.96"
+ikigai-core = "0.1.98"
 # The space a tuplespace layer fronts: intray's `urn:space:{name}` endpoint, linked and
 # invoked privately under the host's own `urn:cap:space:*` (core gives an endpoint no way to
 # issue above its caller's capability, so the space is a value the host owns, never a name it
-# resolves). Its rename-based take is the atomic step every take here turns on; intray itself
-# is unchanged. 0.1.47 is the current line and the one every test here ran against; the
-# unique staging names two concurrent takes depend on (ledger #877) arrived by 0.1.45.
-# ⚠ `"0.1.47"` is `<0.2.0`.
-ikigai-intray = "0.1.47"
+# resolves). Its rename-based take is the atomic step every take here turns on. **0.1.55 is
+# the floor this crate needs**: it runs every `match=` within an `EvaluationBudget` and takes
+# one from its mounter (`SpaceEndpoint::with_evaluation_budget`, ledger #1327), which is how
+# every tuplespace layer of a host shares ONE overdue count (ledger #1362). The unique staging
+# names two concurrent takes depend on (ledger #877) arrived by 0.1.45.
+# ⚠ `"0.1.55"` is `<0.2.0`.
+ikigai-intray = "0.1.55"
+# The time budget a `match=` runs within (`ikigai_store::budget::{EvaluationBudget,
+# TimeBudget}`): the host builds ONE from `layers.toml` and hands a clone to every tuplespace
+# layer, and `Host::match_budget` exposes it. Named directly because those types are in this
+# crate's API; it is the same store intray links (cargo unifies them). 0.2.19 is the current
+# line and the one every test here ran against; `EvaluationBudget` arrived in 0.2.18.
+# ⚠ `"0.2.19"` is `<0.3.0`.
+ikigai-store = "0.2.19"
 # `Endpoint::invoke` is `async_trait`, and every endpoint here carries the host's state.
 async-trait = "0.1"
 # `futures::lock::Mutex` serializes a layer's writes ACROSS the validation sub-request (an
@@ -71,15 +81,18 @@ oxttl = "0.2.4"
 oxrdfio = "0.2.6"
 
 [dev-dependencies]
-# The module recipe as one test. 0.6.1 is the CURRENT published definition of "done".
-# ⚠ `"0.6.1"` is `<0.7.0`: raise it when conformance moves, or this crate keeps reporting
+# The module recipe as one test. 0.6.2 is the CURRENT published definition of "done", and
+# the floor this suite needs: `Fixture::capability` probes `urn:layers:me` and the write
+# doors AS a minted participant instead of waiving their checks (ledger #1321).
+# ⚠ `"0.6.2"` is `<0.7.0`: raise it when conformance moves, or this crate keeps reporting
 # green against an old rulebook.
-ikigai-conformance = "0.6.1"
+ikigai-conformance = "0.6.2"
 # `TurtleRenderer` gives the test kernels a JSON Meta face (without one the engine's routing
 # cannot be observed), and its `VOCABULARY` is the conformance suite's oracle: 0.1.96 is the
 # first that defines the layer family these graphs use, so the dev pin is what makes the
 # vocabulary check judge against it (cargo unifies the conformance crate's own `0.1.91`).
-ikigai-vocab = "0.1.96"
+# 0.1.98 moves with core: one workspace, one version.
+ikigai-vocab = "0.1.98"
 
 [target.'cfg(unix)'.dev-dependencies]
 # `tests/partial_write.rs` injects a torn write from outside the library by lowering the
