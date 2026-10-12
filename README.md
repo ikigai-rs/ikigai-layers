@@ -253,6 +253,112 @@ addressed layer only when it is addressed to that offer's offerer alone, and the
 addressee can take it. The feed records `out` and `taken`
 events, with the tuple's subject and who did it.
 
+## A gateway between kernels
+
+One kernel asks another to resolve a resource and gets the answer back, through layers, with
+neither resolving into the other and neither adopting the other's wire, cache or security
+model (ledger #1370; the first step of a gateway between ikigai and NetKernel). It is
+configuration: the example in [`gateway/`](gateway/) is two kernels, `plasma` and
+`netkernel`, each asking the other.
+
+- **An ask layer per asker** (`gateway-plasma`): a tuplespace, `addressed = true`. The layer
+  is the read boundary (whoever holds `read` on a layer reads all of it), so an asker's
+  requests and answers are seen by that asker and the resolvers serving it, and by no other
+  asker. A resolver sees every request on the layers it serves: it is the server.
+- **An event channel per resource owner** (`gateway-events-plasma`): only the owner holds
+  `say`, so nobody can invalidate another kernel's resources; every kernel that may ask the
+  owner reads it.
+- **Closed shapes** ([`gateway.shapes.ttl`](gateway/layers/gateway.shapes.ttl),
+  [`gateway-events.shapes.ttl`](gateway/layers/gateway-events.shapes.ttl)) and **egress
+  contexts** with no `@vocab`. The terms are layer-local under `urn:layers:gateway:` (`gw:`)
+  beside core's `ik:verb`, `ik:mediaType`, `ik:offer`, `ik:addressedTo` and `ik:seq`.
+
+| tuple | name | carries |
+| --- | --- | --- |
+| `gw:Request` | `urn:layer:{layer}:request:{correlation}` | `gw:correlation`, `gw:resource` (an IRI), `ik:verb` (one of `Source`, `Sink`, `Exists`, `Delete`, `Meta`), any number of `gw:argument` (`name=value`, text), at most one `ik:addressedTo` (the one resolver that may take it) |
+| `gw:Reply` | `urn:layer:{layer}:reply:{correlation}` | `ik:offer` (the request), `ik:addressedTo` (the asker), `gw:correlation`, `ik:mediaType` (with parameters), `gw:bytes` (`xsd:base64Binary`) |
+| `gw:Failure` | `urn:layer:{layer}:reply:{correlation}` | `ik:offer`, `ik:addressedTo`, `gw:correlation`, `gw:errorKind` (one of `unresolved`, `missing-argument`, `invalid-argument`, `endpoint`, `denied`, `not-found`, `conflict`, `timeout`, `unavailable`, `depth-exceeded`: ikigai-core's `Error::kind()`), and `gw:message`, `gw:argumentName`, `gw:target`, `gw:depth` as the kind has them |
+| `gw:Invalidation` | an entry, said about `<urn:layer:new>` | `gw:resource` (what changed, the sayer's own), `gw:reason` |
+
+**The asker is the host's stamp** (`prov:wasAttributedTo`), never a field. **The host
+enforces the protocol**: the atomic take gives a request to exactly one resolver; an answer
+is admitted only from the participant whose take of the request the layer holds a receipt
+for, addressed to the asker alone, and only the asker can take it.
+
+**A request runs under the resolver's authority, never the asker's.** No capability crosses
+a layer. The resolver issues the request into its own kernel under the capability its
+operator gave it, answers only the verbs its operator allows (by default `Source`, `Exists`
+and `Meta`, none of which changes anything; a mutating verb is answered `denied`) and, when
+its operator sets them, only names under given prefixes. The layer grant says who may ask;
+the resolver says what asking can do.
+
+The reference participant for an ikigai kernel is
+[`ikigai_layers::gateway`](src/gateway.rs): an `Asker` drops a request and waits for its
+answer with a deadline (withdrawing a request no resolver took in time), and a `Resolver`
+with `serve`, `serve_pending` and `follow` takes requests, resolves them and answers. A
+representation larger than the layer's `entry_max` (base64 costs a third) is answered as an
+`endpoint` failure saying so.
+
+### The wire contract a participant carries
+
+Every step is an ordinary request at the layer host, so this is also what an HTTP front for
+non-ikigai participants (phase 2, for NetKernel) must carry: a verb, an IRI and named
+arguments in; a media type and bytes out; and for an error, its KIND and message and, for
+`missing-argument` and `invalid-argument`, the argument's name, because a participant
+branches on them (a `conflict` on a take is a lost race, a `not-found` is an answer not there
+yet). The front authenticates the participant and mints its principal, exactly as the ikigai
+door does; the participant never names itself.
+
+An asker, on its own layer:
+
+| step | request | answer |
+| --- | --- | --- |
+| ask | `Sink urn:layer:{layer}:tuples content=<gw:Request>` | `text/plain`: the request's subject. `invalid-argument` (`content`) when the shapes refuse it; `conflict` when the correlation id was used before (the same request again is a replay, answered the same) |
+| wait | `Source urn:layer:{layer}:feed after=<cursor> wait=<seconds, at most 60> as=application/json` | `{"layer", "last", "events": [{"seq", "time", "kind", "iri", "by"}]}`: wakes on any event; the next cursor is `last` |
+| take the answer | `Delete urn:layer:{layer}:tuples tuple=<urn:layer:{layer}:reply:{correlation}>` | `text/turtle`: the `gw:Reply` or `gw:Failure`, stamped. `not-found` while there is none; `conflict` once taken (a take whose reply was lost: read it back with `Source …:tuples state=taken tuple=<reply>`, the receipt holding it) |
+| withdraw at the deadline | `Delete urn:layer:{layer}:tuples tuple=<the request>` | the request, when nobody took it; `conflict` naming the resolver that did |
+
+A resolver, on each layer it serves:
+
+| step | request | answer |
+| --- | --- | --- |
+| find requests | `Source urn:layer:{layer}:tuples after=<seq>`, or follow the feed's `out` events whose IRI is under `…:request:` | `text/plain`, a line per pending tuple: `seq created subject dropper` |
+| take one | `Delete urn:layer:{layer}:tuples tuple=<request>` | `text/turtle`: the request, stamped with its asker. `conflict` naming the winner when another resolver took it; `denied` when it is addressed to another |
+| answer | `Sink urn:layer:{layer}:tuples content=<gw:Reply or gw:Failure>` | `text/plain`: the answer's subject |
+| say what changed | `Sink urn:layer:gateway-events-{owner}:say content=<gw:Invalidation>` | `text/plain`: the entry's IRI |
+
+What crosses, Turtle or JSON-LD under the layer's own context (`Source
+urn:layer:{layer}:context`); answers come back as Turtle:
+
+```json
+{ "@context": { "…": "the layer's context, inline" },
+  "@id": "urn:layer:gateway-plasma:request:01m4rjm4zt",
+  "@type": "Request",
+  "correlation": "01m4rjm4zt",
+  "resource": "res:/demo/hello",
+  "verb": "Source",
+  "argument": ["as=text/plain"] }
+```
+
+```turtle
+<urn:layer:gateway-plasma:reply:01m4rjm4zt> a gw:Reply ;
+    ik:offer <urn:layer:gateway-plasma:request:01m4rjm4zt> ;
+    ik:addressedTo <urn:collab:participant:plasma> ;
+    gw:correlation "01m4rjm4zt" ;
+    ik:mediaType "text/plain" ;
+    gw:bytes "aGVsbG8="^^xsd:base64Binary ;
+    prov:wasAttributedTo <urn:collab:participant:netkernel> ;
+    dcterms:created "2026-10-12T18:00:01.000Z"^^xsd:dateTime ;
+    ik:seq 3 .
+```
+
+Not built yet, and stated so nothing is inferred from silence: the HTTP front itself; any
+publication of invalidations from golden-thread cuts (the shape is here, the mapping is the
+research question); binary arguments (an argument is text; a `Sink` of bytes is not carried);
+a per-asker capability on the resolver side (every asker gets the resolver's one); and any
+cleanup of an answer that arrives after its asker gave up (it stays pending, addressed to the
+asker).
+
 ## Hosting it
 
 A host library: a host (ikigai-cli's `serve`) opens a `Host` over its configuration and
