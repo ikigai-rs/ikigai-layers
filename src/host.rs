@@ -202,7 +202,8 @@ fn lock_state(state_dir: &Path) -> Result<File, String> {
                 _ => "a pid it has not written".to_string(),
             };
             return Err(format!(
-                "state directory {} is held by another layer host ({holder}, {}): one host per                  state directory, since the lock that keeps each feed gapless is in-process",
+                "state directory {} is held by another layer host ({holder}, {}): one host per \
+                 state directory, since the lock that keeps each feed gapless is in-process",
                 state_dir.display(),
                 path.display()
             ));

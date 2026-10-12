@@ -731,8 +731,9 @@ pub struct TupleDraft {
 /// Parse and check what a dropper sent to `out`: Turtle, or JSON-LD when it starts with `{`
 /// or `[`.
 ///
-/// Refused (as a bad `content`): more than the layer's `entry_max` bytes; a parse error; a
-/// named graph; anything but exactly one subject, an IRI under `urn:layer:{layer}:` that is
+/// Refused (as a bad `content`): more than the layer's `entry_max` bytes; JSON-LD nested
+/// deeper than [`crate::channel::MAX_JSON_DEPTH`]; a parse error; a named graph; anything
+/// but exactly one subject, an IRI under `urn:layer:{layer}:` that is
 /// not one of the host's own words ([`check_subject`]); a blank node or a quoted triple
 /// anywhere; any of the three stamps (`prov:wasAttributedTo`, `dcterms:created`, `ik:seq`);
 /// no `rdf:type`, or a type no shape of the layer targets; an `ik:addressedTo` or an

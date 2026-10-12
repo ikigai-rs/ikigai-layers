@@ -1838,7 +1838,10 @@ impl Endpoint for CollabParticipants {
         Description::new("collab-participants")
             .title("Collaboration participants")
             .summary(
-                "Who takes part in one collaboration: each participant its manifest grants                  anything, as the participants graph describes it (a person, an agent and for                  whom it acts, or a machine). Needs the manifest's own                  urn:cap:collab:read:{name}",
+                "Who takes part in one collaboration: each participant its manifest grants \
+                 anything, as the participants graph describes it (a person, an agent and for \
+                 whom it acts, or a machine). Needs the manifest's own \
+                 urn:cap:collab:read:{name}",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)

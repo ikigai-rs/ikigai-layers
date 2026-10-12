@@ -22,7 +22,10 @@ pub const HOST_CLIENT_PREFIX: &str = "urn:iki:host:";
 pub const MAX_SHORT_NAME: usize = 48;
 
 /// A word in the `[a-z0-9-]` alphabet, starting with a letter or digit and not ending with a
-/// hyphen. The ledger's rule for names, used for layers, collaborations and participants.
+/// hyphen, and no Windows device name ([`is_windows_device`]). The ledger's rule for names,
+/// used for layers, collaborations and participants; a layer's name is joined to the state
+/// directory and a participant's to its layers' `graphs/`, so a name is also a path segment
+/// on every platform (ledger #1307).
 fn is_word(name: &str, max: usize) -> bool {
     !name.is_empty()
         && name.len() <= max
@@ -31,10 +34,74 @@ fn is_word(name: &str, max: usize) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         && !name.starts_with('-')
         && !name.ends_with('-')
+        && !is_windows_device(name)
+}
+
+/// Whether Windows reads `name` as a device rather than a file: `con`, `prn`, `aux`, `nul`,
+/// `com0`..`com9`, `lpt0`..`lpt9` (and their superscript-digit spellings), `conin$` and
+/// `conout$`, in any case, with or without an extension (Windows matches the part before the
+/// first dot, ignoring trailing spaces). On Windows `<state>\nul` is the null device, never a
+/// directory (ledger #1307).
+///
+/// ```
+/// use ikigai_layers::name::is_windows_device;
+///
+/// assert!(is_windows_device("nul"));
+/// assert!(is_windows_device("COM1"));
+/// assert!(is_windows_device("aux.ttl"));
+/// assert!(!is_windows_device("nullable"));
+/// assert!(!is_windows_device("com10"));
+/// ```
+pub fn is_windows_device(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ');
+    let lower = stem.to_lowercase();
+    if matches!(
+        lower.as_str(),
+        "con" | "prn" | "aux" | "nul" | "conin$" | "conout$"
+    ) {
+        return true;
+    }
+    let mut chars = lower.chars();
+    let prefix: String = chars.by_ref().take(3).collect();
+    let rest: Vec<char> = chars.collect();
+    (prefix == "com" || prefix == "lpt")
+        && rest.len() == 1
+        && (rest[0].is_ascii_digit() || matches!(rest[0], '\u{b9}' | '\u{b2}' | '\u{b3}'))
+}
+
+/// Whether `name` is one plain file name, safe to join to a directory on every platform:
+/// not empty, not starting with a dot (so never `.` or `..`), no `/`, `\`, `:` (a Windows
+/// drive prefix, `C:x`, makes `Path::join` REPLACE the base), no character Windows refuses in a
+/// file name (`<>"|?*` and control characters), not ending in a dot or a space (Windows drops
+/// them, so the name would read another file), and no Windows device name (ledger #1307).
+///
+/// ```
+/// use ikigai_layers::name::is_plain_file_name;
+///
+/// assert!(is_plain_file_name("talk.shapes.ttl"));
+/// assert!(!is_plain_file_name("C:talk.shapes.ttl"));
+/// assert!(!is_plain_file_name("../talk.shapes.ttl"));
+/// assert!(!is_plain_file_name("con.ttl"));
+/// assert!(!is_plain_file_name("talk.ttl."));
+/// ```
+pub fn is_plain_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.ends_with('.')
+        && !name.ends_with(' ')
+        && !name.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
+        && !is_windows_device(name)
 }
 
 /// Whether `name` is a usable layer name: lowercase `[a-z0-9-]`, at most
-/// [`MAX_LAYER_NAME`] characters, no leading or trailing hyphen.
+/// [`MAX_LAYER_NAME`] characters, no leading or trailing hyphen, and no Windows device name
+/// ([`is_windows_device`]).
 ///
 /// ```
 /// use ikigai_layers::name::is_layer_name;
@@ -46,6 +113,7 @@ fn is_word(name: &str, max: usize) -> bool {
 /// assert!(!is_layer_name("Talk"));
 /// assert!(!is_layer_name("talk:x"));
 /// assert!(!is_layer_name("-talk"));
+/// assert!(!is_layer_name("nul"));
 /// ```
 pub fn is_layer_name(name: &str) -> bool {
     is_word(name, MAX_LAYER_NAME)
@@ -131,7 +199,7 @@ impl Participant {
             if !is_short_name(slug) {
                 return Err(format!(
                     "`{iri}`: a participant's short name is lowercase [a-z0-9-], at most \
-                     {MAX_SHORT_NAME} characters"
+                     {MAX_SHORT_NAME} characters, and no Windows device name"
                 ));
             }
             return Ok(Participant {
