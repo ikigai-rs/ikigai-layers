@@ -74,6 +74,13 @@ toml = "0.8"
 # (validation on a sized pool, ledger #1102); a host linking ikigai-shacl itself (cli does)
 # unifies with it. ⚠ `"0.3.3"` is `<0.4.0`.
 ikigai-shacl = "0.3.3"
+# The JSON-LD faces (ledger #1371): every graph answer `as=application/ld+json` is the layer's
+# egress context, pruned and compacted by `urn:jsonld:prune`, which the host evaluates in a
+# kernel of its OWN (`json::Egress`) and binds into no space a door serves: the prune declares
+# no capability, so bound in a door it would be offered to every participant (ledger #1266's
+# shape). 0.2.2 is the first with `prune` and the line every test here ran against.
+# ⚠ `"0.2.2"` is `<0.3.0`.
+ikigai-jsonld = "0.2.2"
 # Turtle and JSON-LD in (`say`'s content, the shapes and the participants graph), Turtle out.
 # 0.3.4 / 0.2.4 / 0.2.6 are the model, serializer and parser oxigraph 0.5.11 uses, so the
 # graph carries one of each beside ikigai-shacl in a host. oxrdfio's JSON-LD parser has no

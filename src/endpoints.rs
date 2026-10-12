@@ -24,6 +24,8 @@
 //!
 //! A channel layer binds `say`, `entries`, `entry`, `graph` and `latest`; a tuplespace layer
 //! binds `tuples` and `receipt`; every layer binds its definition, shapes, context and feed.
+//! Each declares its JSON face in its `as` argument ([`crate::json`]): `application/ld+json`
+//! for a graph, `application/json` for a list or a write's answer.
 //!
 //! **Why exact, and why per layer.** Core's selection matches a declared scope EXACTLY
 //! unless it ends in `*`, and then it prefix-tests what is held after stripping the `*`
@@ -243,6 +245,25 @@ fn turtle(text: String) -> Representation {
     Representation::new(ReprType::new(TURTLE), text.into_bytes())
 }
 
+fn json_repr(body: serde_json::Value) -> Representation {
+    Representation::new(ReprType::new(JSON), body.to_string().into_bytes())
+}
+
+/// A write's answer: the IRI it named, as text or as `{"@id": …}`.
+fn named(iri: &str, as_json: bool) -> Representation {
+    if as_json {
+        json_repr(serde_json::json!({ "@id": iri }))
+    } else {
+        Representation::new(ReprType::new(TEXT), iri.as_bytes().to_vec())
+    }
+}
+
+/// The faces of a graph answer: Turtle, as stored, or JSON-LD (see [`crate::json`]).
+const GRAPH_FACES: [&str; 2] = [TURTLE, JSON_LD];
+
+/// `rd`'s faces: the list as text (the default) or JSON, the graphs as Turtle or JSON-LD.
+const RD_FACES: [&str; 4] = [TEXT, TURTLE, JSON, JSON_LD];
+
 /// One layer action. Each is its own endpoint, with its own id and exact capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
@@ -355,6 +376,32 @@ impl LayerEndpoint {
     fn not_found(&self, inv: &Invocation<'_>, what: String) -> Error {
         inv.depends_on(self.say_thread());
         Error::NotFound(what)
+    }
+
+    /// A graph answer in the face asked for: the stored Turtle, or the layer's egress context
+    /// pruned and compacted by the host's own processor ([`crate::json`]).
+    async fn graph_face(&self, text: String, as_ld: bool) -> Result<Representation> {
+        if !as_ld {
+            return Ok(turtle(text));
+        }
+        let triples = rdf::parse_turtle(&text).map_err(|e| {
+            Error::Endpoint(format!(
+                "layer `{}`: a stored graph does not parse: {e}",
+                self.layer()
+            ))
+        })?;
+        let doc = self
+            .host
+            .json()
+            .compact(&self.state.egress, &triples)
+            .await
+            .map_err(|e| {
+                Error::Endpoint(format!("layer `{}`: its JSON-LD face: {e}", self.layer()))
+            })?;
+        Ok(Representation::new(
+            ReprType::new(JSON_LD),
+            doc.to_string().into_bytes(),
+        ))
     }
 
     fn definition(&self) -> Representation {
@@ -501,6 +548,9 @@ impl LayerEndpoint {
     }
 
     async fn say(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        // The face first: a write answered in a face nobody offers is refused before it is
+        // stored, never after.
+        let as_json = face(inv, &[TEXT, JSON])? == JSON;
         let (author, _) = self.attributed(inv, "say")?;
         let draft = channel::draft(self.def(), inv.inline_arg("content")?)?;
         // From here to the feed append is one step per layer: the sequence number is
@@ -543,7 +593,7 @@ impl LayerEndpoint {
             )));
         }
         self.host.notify().bump();
-        Ok(Representation::new(ReprType::new(TEXT), iri.into_bytes()))
+        Ok(named(&iri, as_json))
     }
 
     fn page(&self, inv: &Invocation<'_>) -> Result<(u64, u64)> {
@@ -559,27 +609,35 @@ impl LayerEndpoint {
     }
 
     /// The entries the filter keeps, as one Turtle document (each entry is stored as its
-    /// own Turtle document, and Turtle documents concatenate).
-    fn entries_where(
+    /// own Turtle document, and Turtle documents concatenate), or as JSON-LD.
+    async fn entries_where(
         &self,
         inv: &Invocation<'_>,
         keep: impl Fn(&channel::EntryMeta) -> bool,
     ) -> Result<Representation> {
+        let as_ld = face(inv, &GRAPH_FACES)? == JSON_LD;
         let (after, limit) = self.page(inv)?;
-        let channel = self.state.channel().read().expect("channel lock");
-        let mut text = String::new();
-        for meta in channel
-            .entries()
-            .iter()
-            .filter(|m| m.seq > after && keep(m))
-            .take(limit as usize)
-        {
-            text.push_str(&channel.turtle(meta).map_err(Error::Endpoint)?);
-        }
-        Ok(turtle(text).cacheable().depends_on(self.say_thread()))
+        let text = {
+            let channel = self.state.channel().read().expect("channel lock");
+            let mut text = String::new();
+            for meta in channel
+                .entries()
+                .iter()
+                .filter(|m| m.seq > after && keep(m))
+                .take(limit as usize)
+            {
+                text.push_str(&channel.turtle(meta).map_err(Error::Endpoint)?);
+            }
+            text
+        };
+        Ok(self
+            .graph_face(text, as_ld)
+            .await?
+            .cacheable()
+            .depends_on(self.say_thread()))
     }
 
-    fn entries(&self, inv: &Invocation<'_>) -> Result<Representation> {
+    async fn entries(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let from = match optional_str(inv, "from")? {
             None => None,
             Some(iri) => Some(
@@ -597,30 +655,47 @@ impl LayerEndpoint {
             from.as_ref().is_none_or(|a| &m.author == a)
                 && class.as_ref().is_none_or(|c| m.types.contains(c))
         })
+        .await
     }
 
-    fn entry(&self, inv: &Invocation<'_>) -> Result<Representation> {
+    async fn entry(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let as_ld = face(inv, &GRAPH_FACES)? == JSON_LD;
         let id = inv.bindings.get("id").unwrap_or_default();
-        let channel = self.state.channel().read().expect("channel lock");
-        match channel.get(id) {
+        let found = {
+            let channel = self.state.channel().read().expect("channel lock");
+            match channel.get(id) {
+                Some(meta) => Some(channel.turtle(meta).map_err(Error::Endpoint)?),
+                None => None,
+            }
+        };
+        match found {
             // An entry never changes: cacheable for as long as the layer exists.
-            Some(meta) => Ok(turtle(channel.turtle(meta).map_err(Error::Endpoint)?).cacheable()),
+            Some(text) => Ok(self.graph_face(text, as_ld).await?.cacheable()),
             None => {
                 Err(self.not_found(inv, format!("no entry `{id}` in layer `{}`", self.layer())))
             }
         }
     }
 
-    fn graph(&self, inv: &Invocation<'_>) -> Result<Representation> {
+    async fn graph(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let slug = inv.bindings.get("slug").unwrap_or_default().to_string();
-        self.entries_where(inv, |m| m.slug == slug)
+        self.entries_where(inv, |m| m.slug == slug).await
     }
 
-    fn latest(&self, inv: &Invocation<'_>) -> Result<Representation> {
+    async fn latest(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let as_ld = face(inv, &GRAPH_FACES)? == JSON_LD;
         let about = inv.inline_str("about")?;
-        let channel = self.state.channel().read().expect("channel lock");
-        match channel.latest(about) {
-            Some(meta) => Ok(turtle(channel.turtle(meta).map_err(Error::Endpoint)?)
+        let found = {
+            let channel = self.state.channel().read().expect("channel lock");
+            match channel.latest(about) {
+                Some(meta) => Some(channel.turtle(meta).map_err(Error::Endpoint)?),
+                None => None,
+            }
+        };
+        match found {
+            Some(text) => Ok(self
+                .graph_face(text, as_ld)
+                .await?
                 .cacheable()
                 .depends_on(self.say_thread())),
             None => Err(self.not_found(
@@ -649,6 +724,8 @@ impl LayerEndpoint {
     /// `out`: drop one tuple, named by its one subject, stamped, admitted by the layer's
     /// closed shapes; answers its subject.
     async fn out(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        // The face first, as for `say`.
+        let as_json = face(inv, &[TEXT, JSON])? == JSON;
         let (dropper, participants) = self.attributed(inv, "out")?;
         let draft = tuplespace::draft(self.def(), inv.inline_arg("content")?)?;
         if let Some(to) = draft.addressed_to.iter().find(|p| !participants.names(p)) {
@@ -661,8 +738,7 @@ impl LayerEndpoint {
             });
         }
         let space = self.state.tuplespace();
-        let answer =
-            |subject: &str| Representation::new(ReprType::new(TEXT), subject.as_bytes().to_vec());
+        let answer = |subject: &str| named(subject, as_json);
         // From here to the feed append is one step per layer, as for `say`.
         let _write = self.state.write.lock().await;
         {
@@ -736,6 +812,8 @@ impl LayerEndpoint {
     /// `take`: remove one pending tuple, by its subject, atomically; the receipt naming the
     /// taker is committed before the reply. Answers the tuple as it was taken.
     async fn take(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        // The face first: a take answered in a face nobody offers is refused before it takes.
+        let as_ld = face(inv, &GRAPH_FACES)? == JSON_LD;
         let (taker, _) = self.attributed(inv, "take")?;
         let subject = take_subject(inv)?;
         let space = self.state.tuplespace();
@@ -836,7 +914,9 @@ impl LayerEndpoint {
             )));
         }
         self.host.notify().bump();
-        Ok(turtle(text))
+        // The take stands whatever this answers: a JSON-LD face that failed here (its context
+        // was checked when the host opened) leaves the taker reading it back from its receipt.
+        self.graph_face(text, as_ld).await
     }
 
     /// `rd match=` on a layer whose definition does not say `match = true` (ledger #1327).
@@ -864,6 +944,11 @@ impl LayerEndpoint {
     }
 
     /// `rd`: list or read the pending tuples (or, with `state=taken`, the receipts).
+    ///
+    /// Four faces: `text/plain` and `application/json` LIST (one line, or one JSON object,
+    /// per tuple or receipt); `text/turtle` and `application/ld+json` are the GRAPHS. One
+    /// tuple (`tuple=`) is always a graph: Turtle under either text face, as before, and
+    /// refused as `application/json`, which is a list's face.
     async fn rd(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let state = optional_str(inv, "state")?.unwrap_or("pending");
         let taken = match state {
@@ -876,7 +961,7 @@ impl LayerEndpoint {
                 })
             }
         };
-        let as_turtle = face(inv, &[TEXT, TURTLE])? == TURTLE;
+        let asked = face(inv, &RD_FACES)?;
         let (after, limit) = self.page(inv)?;
         let tuple = optional_str(inv, "tuple")?;
         let template = optional_str(inv, "match")?;
@@ -892,6 +977,16 @@ impl LayerEndpoint {
             });
         }
         if let Some(subject) = tuple {
+            if asked == JSON {
+                return Err(Error::InvalidArgument {
+                    name: "as".into(),
+                    detail: format!(
+                        "tuple= answers one graph, as {TURTLE} or {JSON_LD}; {JSON} is the \
+                         face of a list (rd without tuple=)"
+                    ),
+                });
+            }
+            let as_ld = asked == JSON_LD;
             let found = {
                 let index = space.index.read().expect("tuplespace lock");
                 match (taken, index.lookup(subject)) {
@@ -914,25 +1009,31 @@ impl LayerEndpoint {
                 }
             };
             return match found {
-                Ok(Ok(receipt_id)) => answer(turtle(
-                    space
+                Ok(Ok(receipt_id)) => {
+                    let text = space
                         .store
                         .receipt_text(&receipt_id)
-                        .map_err(|e| self.space_error(e))?,
-                )),
+                        .map_err(|e| self.space_error(e))?;
+                    answer(self.graph_face(text, as_ld).await?)
+                }
                 Ok(Err(cid)) => match space
                     .store
                     .read(&cid)
                     .await
                     .map_err(|e| self.space_error(e))?
                 {
-                    Some(bytes) => answer(Representation::new(ReprType::new(TURTLE), bytes)),
+                    Some(bytes) => {
+                        let text = String::from_utf8(bytes)
+                            .map_err(|_| self.space_error(format!("tuple {cid} is not UTF-8")))?;
+                        answer(self.graph_face(text, as_ld).await?)
+                    }
                     // Taken a moment ago: the take's own cut ends this answer.
                     None => Err(self.not_found_tuple(inv, format!("<{subject}> was just taken"))),
                 },
                 Err(why) => Err(self.not_found_tuple(inv, why)),
             };
         }
+        let graph_face = asked == TURTLE || asked == JSON_LD;
         if taken {
             if template.is_some() {
                 return Err(Error::InvalidArgument {
@@ -952,9 +1053,24 @@ impl LayerEndpoint {
                 .take(limit as usize)
                 .cloned()
                 .collect();
+            if asked == JSON {
+                let listed: Vec<serde_json::Value> = receipts
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "seq": r.seq, "time": r.time, "subject": r.tuple.subject,
+                            "taker": r.taker, "receipt": r.iri,
+                        })
+                    })
+                    .collect();
+                return answer(json_repr(serde_json::json!({
+                    "layer": self.layer(),
+                    "receipts": listed,
+                })));
+            }
             let mut out = String::new();
             for r in &receipts {
-                if as_turtle {
+                if graph_face {
                     out.push_str(
                         &space
                             .store
@@ -968,8 +1084,8 @@ impl LayerEndpoint {
                     ));
                 }
             }
-            return answer(if as_turtle {
-                turtle(out)
+            return answer(if graph_face {
+                self.graph_face(out, asked == JSON_LD).await?
             } else {
                 Representation::new(ReprType::new(TEXT), out.into_bytes())
             });
@@ -988,9 +1104,25 @@ impl LayerEndpoint {
             .take(limit as usize)
             .cloned()
             .collect();
+        if asked == JSON {
+            // The list, mirroring the feed's JSON: what the text face says, one object a line.
+            let listed: Vec<serde_json::Value> = pending
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "seq": m.seq, "created": m.created, "subject": m.subject,
+                        "dropper": m.dropper,
+                    })
+                })
+                .collect();
+            return answer(json_repr(serde_json::json!({
+                "layer": self.layer(),
+                "tuples": listed,
+            })));
+        }
         let mut out = String::new();
         for meta in &pending {
-            if as_turtle {
+            if graph_face {
                 // A tuple taken between the index read and here is simply not listed: the
                 // take's cut ends this answer.
                 if let Some(bytes) = space
@@ -1008,8 +1140,8 @@ impl LayerEndpoint {
                 ));
             }
         }
-        answer(if as_turtle {
-            turtle(out)
+        answer(if graph_face {
+            self.graph_face(out, asked == JSON_LD).await?
         } else {
             Representation::new(ReprType::new(TEXT), out.into_bytes())
         })
@@ -1021,7 +1153,8 @@ impl LayerEndpoint {
         Error::NotFound(what)
     }
 
-    fn receipt(&self, inv: &Invocation<'_>) -> Result<Representation> {
+    async fn receipt(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let as_ld = face(inv, &GRAPH_FACES)? == JSON_LD;
         let id = inv.bindings.get("id").unwrap_or_default();
         let space = self.state.tuplespace();
         let found = space
@@ -1032,13 +1165,13 @@ impl LayerEndpoint {
             .map(|r| r.id.clone());
         match found {
             // A receipt never changes: cacheable for as long as the layer exists.
-            Some(id) => Ok(turtle(
-                space
+            Some(id) => {
+                let text = space
                     .store
                     .receipt_text(&id)
-                    .map_err(|e| self.space_error(e))?,
-            )
-            .cacheable()),
+                    .map_err(|e| self.space_error(e))?;
+                Ok(self.graph_face(text, as_ld).await?.cacheable())
+            }
             None => Err(self.not_found_tuple(
                 inv,
                 format!("no receipt `{id}` in layer `{}`", self.layer()),
@@ -1229,10 +1362,10 @@ impl Endpoint for LayerEndpoint {
             .cacheable()),
             Action::Feed => self.read_feed(inv).await,
             Action::Say => self.say(inv).await,
-            Action::Entries => self.entries(inv),
-            Action::Entry => self.entry(inv),
-            Action::Graph => self.graph(inv),
-            Action::Latest => self.latest(inv),
+            Action::Entries => self.entries(inv).await,
+            Action::Entry => self.entry(inv).await,
+            Action::Graph => self.graph(inv).await,
+            Action::Latest => self.latest(inv).await,
             Action::Tuples => match inv.request.verb {
                 Verb::Sink => self.out(inv).await,
                 Verb::Source => self.rd(inv).await,
@@ -1242,7 +1375,7 @@ impl Endpoint for LayerEndpoint {
                      {other:?}"
                 ))),
             },
-            Action::Receipt => self.receipt(inv),
+            Action::Receipt => self.receipt(inv).await,
         }
     }
 
@@ -1313,7 +1446,9 @@ impl Endpoint for LayerEndpoint {
                         )
                         .class(xsd("string")),
                 )
-                .output(TEXT),
+                .input(as_spec(&[TEXT, JSON]))
+                .output(TEXT)
+                .output(JSON),
             Action::Entries => base
                 .title(format!("Layer {layer}: entries"))
                 .summary(format!(
@@ -1337,7 +1472,9 @@ impl Endpoint for LayerEndpoint {
                         .optional(),
                 )
                 .input(limit_spec())
-                .output(TURTLE),
+                .input(as_spec(&GRAPH_FACES))
+                .output(TURTLE)
+                .output(JSON_LD),
             Action::Entry => base
                 .title(format!("Layer {layer}: entry"))
                 .summary(format!(
@@ -1350,7 +1487,9 @@ impl Endpoint for LayerEndpoint {
                         .class(xsd("string"))
                         .binding(),
                 )
-                .output(TURTLE),
+                .input(as_spec(&GRAPH_FACES))
+                .output(TURTLE)
+                .output(JSON_LD),
             Action::Graph => base
                 .title(format!("Layer {layer}: author graph"))
                 .summary(format!(
@@ -1370,7 +1509,9 @@ impl Endpoint for LayerEndpoint {
                     after_spec("answer entries after this ik:seq (default 0)").default_value("0"),
                 )
                 .input(limit_spec())
-                .output(TURTLE),
+                .input(as_spec(&GRAPH_FACES))
+                .output(TURTLE)
+                .output(JSON_LD),
             Action::Latest => base
                 .title(format!("Layer {layer}: latest"))
                 .summary(format!(
@@ -1384,7 +1525,9 @@ impl Endpoint for LayerEndpoint {
                         .summary("the IRI the entry is about")
                         .class(xsd("anyURI")),
                 )
-                .output(TURTLE),
+                .input(as_spec(&GRAPH_FACES))
+                .output(TURTLE)
+                .output(JSON_LD),
             Action::Tuples => {
                 let addressed = if self.def().addressed {
                     " This layer is addressed: a tuple carrying ik:addressedTo is taken only by \
@@ -1426,8 +1569,10 @@ impl Endpoint for LayerEndpoint {
                             .fold(
                                 ActionSpec::new(Verb::Source).summary(format!(
                                     "rd: the pending tuples in the order they were dropped (one \
-                                     line each, `seq time subject dropper`, or as Turtle), one \
-                                     by tuple={matching}; with state=taken, the receipts instead"
+                                     line each, `seq time subject dropper`; as=application/json \
+                                     the same list as JSON; as=text/turtle or \
+                                     application/ld+json the tuples themselves), one by \
+                                     tuple={matching}; with state=taken, the receipts instead"
                                 )),
                                 ActionSpec::input,
                             )
@@ -1457,9 +1602,11 @@ impl Endpoint for LayerEndpoint {
                                     .class(xsd("nonNegativeInteger"))
                                     .default_value(DEFAULT_LIMIT.to_string()),
                             )
-                            .input(as_spec(&[TEXT, TURTLE]))
+                            .input(as_spec(&RD_FACES))
                             .output(TEXT)
                             .output(TURTLE)
+                            .output(JSON)
+                            .output(JSON_LD)
                             .requires(layer_cap("read", layer)),
                     )
                     .action(
@@ -1481,7 +1628,9 @@ impl Endpoint for LayerEndpoint {
                                     )
                                     .class(xsd("string")),
                             )
+                            .input(as_spec(&[TEXT, JSON]))
                             .output(TEXT)
+                            .output(JSON)
                             .requires(layer_cap("out", layer)),
                     )
                     .action(
@@ -1507,7 +1656,9 @@ impl Endpoint for LayerEndpoint {
                                     .class(xsd("string"))
                                     .optional(),
                             )
+                            .input(as_spec(&GRAPH_FACES))
                             .output(TURTLE)
+                            .output(JSON_LD)
                             .requires(layer_cap("take", layer)),
                     )
             }
@@ -1524,7 +1675,9 @@ impl Endpoint for LayerEndpoint {
                         .class(xsd("string"))
                         .binding(),
                 )
-                .output(TURTLE),
+                .input(as_spec(&GRAPH_FACES))
+                .output(TURTLE)
+                .output(JSON_LD),
         }
     }
 }

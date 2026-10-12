@@ -58,6 +58,7 @@ holds and nothing more.
 
 A channel layer binds `say`, `entries`, `entry`, `graph` and `latest`; a tuplespace layer
 binds `tuples` and `receipt`; every layer binds its definition, shapes, context and feed.
+Every answer a participant reads also comes as JSON: see [JSON faces](#json-faces).
 
 Endpoint ids are `layer-{layer}-{action}` (`layer-talk-say`), so MCP tools are
 `layer-talk-say__sink`, `layer-tasks-bobby-tuples__delete` and so on. Layer names are
@@ -253,6 +254,175 @@ addressed layer only when it is addressed to that offer's offerer alone, and the
 addressee can take it. The feed records `out` and `taken`
 events, with the tuple's subject and who did it.
 
+## JSON faces
+
+Every answer a participant reads also comes as JSON, so a participant with only an HTTP client
+and a JSON parser can take part: no RDF parser is needed on its side. Each face is declared in
+the resource's description (its `as` argument and outputs), so a door over QUIC, an HTTP
+front, MCP and the action manifold all offer the same ones.
+
+| answer | `as=` | body |
+| --- | --- | --- |
+| `entries`, `entry:{id}`, `graph:{slug}`, `latest` | `application/ld+json` | the entries, a graph (below) |
+| `tuples` Source with `tuple=` or listing, `state=taken` too | `application/ld+json` | the tuples or receipts, a graph |
+| `tuples` Delete (take) | `application/ld+json` | the tuple as taken, a graph |
+| `receipt:{id}` | `application/ld+json` | the receipt, a graph |
+| `tuples` Source listing | `application/json` | `{"layer", "tuples": [{"seq", "created", "subject", "dropper"}]}`, the text face's lines as objects; with `state=taken`, `{"layer", "receipts": [{"seq", "time", "subject", "taker", "receipt"}]}` |
+| `say`, `tuples` Sink (out) | `application/json` | `{"@id": "<the IRI the write named>"}` |
+| `feed`, `urn:layers:feed`, `urn:layers:me`, `urn:collab:{name}` | `application/json` | as before |
+
+A face a resource does not offer is refused (`invalid-argument` on `as`), never answered in
+another. One tuple (`tuple=`) is a graph, so it is refused as `application/json`, a list's
+face. In the lists, `seq` is a JSON number, as in the feed.
+
+**A graph** is the layer's egress context, PRUNED and compacted: the stored graph is
+expanded, everything the context does not define is removed (a property, a type, a datatype;
+a prefix is not a term), and the rest is compacted with that context. The host does this with
+[ikigai-jsonld](https://crates.io/crates/ikigai-jsonld)'s prune, in a kernel of its own that
+no door binds, so no participant can call the pruner. Its shape is fixed:
+
+- one object with exactly two members: `@context` (the context it was compacted with) and
+  `@graph`, an ARRAY of node objects in the answer's order (feed order for a list), so one
+  node and many look the same, and none is an empty array;
+- in each node, `@id` is the node's whole IRI, and `@type` a term of the context (a string
+  for one type, an array for several); every other key is a term of the context, never a
+  full IRI, and a property the context does not define is absent;
+- a property with one value is that value, with several an array (a term defined with
+  `"@container": "@set"` is always an array);
+- an IRI value is a string when its term says `"@type": "@id"`, otherwise `{"@id": …}`;
+- a typed literal whose term declares its datatype is its LEXICAL STRING: `"seq": "3"`,
+  `"created": "2026-10-10T00:00:01.000Z"`, `"bytes": "aGVsbG8="` (base64 text). A datatype no
+  term declares is removed with its value.
+
+**The host's stamps always cross**, whatever the layer's context names: the host merges its
+own terms into every layer's context for these faces.
+
+| term | meaning | value |
+| --- | --- | --- |
+| `attributedTo` | `prov:wasAttributedTo`: who said or dropped it | the participant's IRI |
+| `created` | `dcterms:created`: when, by the kernel clock | an `xsd:dateTime`, as a string |
+| `seq` | `ik:seq`: its place in the layer's feed | an `xsd:integer`, as a string |
+| `Activity` | `prov:Activity`: a receipt's type | |
+| `used` | `prov:used`: the tuple a take removed | its IRI |
+| `associatedWith` | `prov:wasAssociatedWith`: the taker | the participant's IRI |
+| `endedAt` | `prov:endedAtTime`: when the take happened | an `xsd:dateTime`, as a string |
+
+A receipt is a graph of two nodes: the `Activity` and the tuple as taken. A layer context may
+define these terms only as the host does (the shipped contexts do, word for word); one that
+defines one differently, maps one of these IRIs under another name (compaction would prefer
+it), has a prefix that would shorten the IRIs the host names, or has a scoped `@context` (the
+prune reads one set of terms) stops the host at open, naming the term.
+
+```rust
+use std::sync::Arc;
+use futures::executor::block_on;
+use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, SystemClock, Verb};
+use serde_json::Value;
+
+# let dir = std::env::temp_dir().join(format!("ikigai-layers-readme-json-{}", std::process::id()));
+# let (config, state) = (dir.join("config"), dir.join("state"));
+# let _ = std::fs::remove_dir_all(&dir);
+# std::fs::create_dir_all(config.join("layers")).unwrap();
+# std::fs::create_dir_all(config.join("collabs")).unwrap();
+# let write = |path: &str, text: &str| std::fs::write(config.join(path), text).unwrap();
+# let prefixes = [
+#     "@prefix sh: <http://www.w3.org/ns/shacl#> .",
+#     "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .",
+#     "@prefix ik: <https://ikigai-rs.dev/ns#> .",
+#     "@prefix prov: <http://www.w3.org/ns/prov#> .",
+#     "@prefix dcterms: <http://purl.org/dc/terms/> .",
+#     "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .",
+# ].join("\n");
+# let stamps = "[ sh:path prov:wasAttributedTo ; sh:nodeKind sh:IRI ] , \
+#     [ sh:path dcterms:created ; sh:datatype xsd:dateTime ] , [ sh:path ik:seq ; sh:datatype xsd:integer ]";
+# write("layers/msg.shapes.ttl", &format!("{prefixes}\n<urn:example:shape:message> a sh:NodeShape ; \
+#     sh:targetClass ik:Message ; sh:closed true ; sh:ignoredProperties ( rdf:type ) ; sh:property \
+#     [ sh:path ik:body ; sh:minCount 1 ; sh:datatype xsd:string ] , \
+#     [ sh:path dcterms:subject ; sh:nodeKind sh:IRI ] , {stamps} ."));
+# write("layers/tasks.shapes.ttl", &format!("{prefixes}\n<urn:example:shape:offer> a sh:NodeShape ; \
+#     sh:targetClass ik:Offer ; sh:closed true ; sh:ignoredProperties ( rdf:type ) ; sh:property \
+#     [ sh:path dcterms:title ; sh:minCount 1 ; sh:datatype xsd:string ] , {stamps} ."));
+# write("layers/msg.context.jsonld",
+#     r#"{ "@context": { "ik": "https://ikigai-rs.dev/ns#", "Message": "ik:Message", "body": "ik:body" } }"#);
+# write("layers/tasks.context.jsonld", r#"{ "@context": { "ik": "https://ikigai-rs.dev/ns#",
+#     "dcterms": "http://purl.org/dc/terms/", "Offer": "ik:Offer", "title": "dcterms:title" } }"#);
+# write("layers/talk.toml", "model = \"channel\"\nshapes = \"msg.shapes.ttl\"\ncontext = \"msg.context.jsonld\"\n");
+# write("layers/tasks.toml", "model = \"tuplespace\"\nshapes = \"tasks.shapes.ttl\"\ncontext = \"tasks.context.jsonld\"\n");
+# write("participants.ttl", "<urn:collab:participant:brian> a <http://xmlns.com/foaf/0.1/Person> .\n");
+# write("collabs/team.toml", "[[mount]]\nlayer = \"talk\"\nbrian = [\"read\", \"say\"]\n\n\
+#     [[mount]]\nlayer = \"tasks\"\nbrian = [\"read\", \"out\", \"take\"]\n");
+let host = ikigai_layers::Host::open(&config, &state).expect("a configuration that checks");
+let kernel = Kernel::new(Arc::new(ikigai_layers::space(&host))).with_clock(Arc::new(SystemClock));
+// What a door mints for a participant holding these grants.
+let brian = Capability::scoped([
+    "urn:cap:layer:say:talk", "urn:cap:layer:read:talk",
+    "urn:cap:layer:out:tasks", "urn:cap:layer:read:tasks", "urn:cap:layer:take:tasks",
+].map(String::from))
+.with_principal("urn:collab:participant:brian")
+.unwrap();
+let call = |verb: Verb, iri: &str, args: &[(&str, &str)]| -> Value {
+    let mut request = Request::new(verb, Iri::parse(iri).unwrap());
+    for (name, value) in args {
+        request = request.with_arg(*name, ArgRef::Inline(value.as_bytes().to_vec()));
+    }
+    let answer = block_on(kernel.issue(request, &brian)).unwrap();
+    serde_json::from_slice(&answer.bytes).unwrap()
+};
+
+// say, answered as JSON: the IRI the host named.
+let note = "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
+            <urn:layer:new> a ik:Message ; ik:body \"Next: JSON.\" ;\n\
+            <http://purl.org/dc/terms/subject> <urn:example:topic> .";
+let said = call(Verb::Sink, "urn:layer:talk:say", &[("content", note), ("as", "application/json")]);
+let iri = said["@id"].as_str().unwrap().to_string();
+assert!(iri.starts_with("urn:layer:talk:entry:"));
+
+// The entries, as JSON-LD: always a top-level @graph array.
+let doc = call(Verb::Source, "urn:layer:talk:entries", &[("as", "application/ld+json")]);
+let entries = doc["@graph"].as_array().unwrap();
+assert_eq!(entries.len(), 1);
+let entry = &entries[0];
+assert_eq!(entry["@id"], iri.as_str());
+assert_eq!(entry["@type"], "Message");
+assert_eq!(entry["body"], "Next: JSON.");
+assert_eq!(entry["attributedTo"], "urn:collab:participant:brian");
+assert_eq!(entry["seq"], "1"); // a lexical string, not a number
+assert!(entry["created"].as_str().unwrap().ends_with('Z'));
+// The context does not define dcterms:subject, so it did not cross.
+assert!(entry.get("subject").is_none());
+assert!(!doc.to_string().contains("urn:example:topic"));
+
+// out, answered as JSON; rd's list as JSON; take as JSON-LD.
+let offer = "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
+             <urn:layer:tasks:offer:1> a ik:Offer ; <http://purl.org/dc/terms/title> \"JSON faces\" .";
+let dropped = call(Verb::Sink, "urn:layer:tasks:tuples", &[("content", offer), ("as", "application/json")]);
+assert_eq!(dropped["@id"], "urn:layer:tasks:offer:1");
+let pending = call(Verb::Source, "urn:layer:tasks:tuples", &[("as", "application/json")]);
+assert_eq!(pending["layer"], "tasks");
+assert_eq!(pending["tuples"][0]["seq"], 1); // a list's seq is a number, as in the feed
+assert_eq!(pending["tuples"][0]["subject"], "urn:layer:tasks:offer:1");
+assert_eq!(pending["tuples"][0]["dropper"], "urn:collab:participant:brian");
+assert!(pending["tuples"][0]["created"].is_string());
+let taken = call(Verb::Delete, "urn:layer:tasks:tuples",
+                 &[("tuple", "urn:layer:tasks:offer:1"), ("as", "application/ld+json")]);
+assert_eq!(taken["@graph"][0]["title"], "JSON faces");
+
+// A taker whose reply was lost reads the take back from its receipt: two nodes.
+let receipt = call(Verb::Source, "urn:layer:tasks:tuples", &[
+    ("state", "taken"), ("tuple", "urn:layer:tasks:offer:1"), ("as", "application/ld+json"),
+]);
+let nodes = receipt["@graph"].as_array().unwrap();
+let activity = nodes.iter().find(|n| n["@type"] == "Activity").unwrap();
+assert_eq!(activity["used"], "urn:layer:tasks:offer:1");
+assert_eq!(activity["associatedWith"], "urn:collab:participant:brian");
+assert_eq!(activity["seq"], "2");
+assert!(activity["endedAt"].is_string());
+assert!(nodes.iter().any(|n| n["@type"] == "Offer" && n["seq"] == "1"));
+# drop(kernel);
+# drop(host);
+# std::fs::remove_dir_all(&dir).unwrap();
+```
+
 ## A gateway between kernels
 
 One kernel asks another to resolve a resource and gets the answer back, through layers, with
@@ -312,22 +482,25 @@ An asker, on its own layer:
 
 | step | request | answer |
 | --- | --- | --- |
-| ask | `Sink urn:layer:{layer}:tuples content=<gw:Request>` | `text/plain`: the request's subject. `invalid-argument` (`content`) when the shapes refuse it; `conflict` when the correlation id was used before (the same request again is a replay, answered the same) |
+| ask | `Sink urn:layer:{layer}:tuples content=<gw:Request>` | `text/plain`: the request's subject (`as=application/json`: `{"@id": …}`). `invalid-argument` (`content`) when the shapes refuse it; `conflict` when the correlation id was used before (the same request again is a replay, answered the same) |
 | wait | `Source urn:layer:{layer}:feed after=<cursor> wait=<seconds, at most 60> as=application/json` | `{"layer", "last", "events": [{"seq", "time", "kind", "iri", "by"}]}`: wakes on any event; the next cursor is `last` |
-| take the answer | `Delete urn:layer:{layer}:tuples tuple=<urn:layer:{layer}:reply:{correlation}>` | `text/turtle`: the `gw:Reply` or `gw:Failure`, stamped. `not-found` while there is none; `conflict` once taken (a take whose reply was lost: read it back with `Source …:tuples state=taken tuple=<reply>`, the receipt holding it) |
+| take the answer | `Delete urn:layer:{layer}:tuples tuple=<urn:layer:{layer}:reply:{correlation}>` | `text/turtle`: the `gw:Reply` or `gw:Failure`, stamped (`as=application/ld+json`: the same under the layer's context, see [JSON faces](#json-faces)). `not-found` while there is none; `conflict` once taken (a take whose reply was lost: read it back with `Source …:tuples state=taken tuple=<reply>`, the receipt holding it) |
 | withdraw at the deadline | `Delete urn:layer:{layer}:tuples tuple=<the request>` | the request, when nobody took it; `conflict` naming the resolver that did |
 
 A resolver, on each layer it serves:
 
 | step | request | answer |
 | --- | --- | --- |
-| find requests | `Source urn:layer:{layer}:tuples after=<seq>`, or follow the feed's `out` events whose IRI is under `…:request:` | `text/plain`, a line per pending tuple: `seq created subject dropper` |
-| take one | `Delete urn:layer:{layer}:tuples tuple=<request>` | `text/turtle`: the request, stamped with its asker. `conflict` naming the winner when another resolver took it; `denied` when it is addressed to another |
+| find requests | `Source urn:layer:{layer}:tuples after=<seq>`, or follow the feed's `out` events whose IRI is under `…:request:` | `text/plain`, a line per pending tuple: `seq created subject dropper` (`as=application/json`: `{"layer", "tuples": [{"seq", "created", "subject", "dropper"}]}`) |
+| take one | `Delete urn:layer:{layer}:tuples tuple=<request>` | `text/turtle` (or `as=application/ld+json`): the request, stamped with its asker. `conflict` naming the winner when another resolver took it; `denied` when it is addressed to another |
 | answer | `Sink urn:layer:{layer}:tuples content=<gw:Reply or gw:Failure>` | `text/plain`: the answer's subject |
 | say what changed | `Sink urn:layer:gateway-events-{owner}:say content=<gw:Invalidation>` | `text/plain`: the entry's IRI |
 
 What crosses, Turtle or JSON-LD under the layer's own context (`Source
-urn:layer:{layer}:context`); answers come back as Turtle:
+urn:layer:{layer}:context`); answers come back as Turtle, or, asked `as=application/ld+json`,
+as that context compacted (the reply below as `{"@context": …, "@graph": [{"@id": …,
+"@type": "Reply", "offer": …, "mediaType": "text/plain", "bytes": "aGVsbG8=", "seq": "3",
+…}]}`), which a participant with no RDF parser reads as plain JSON:
 
 ```json
 { "@context": { "…": "the layer's context, inline" },
