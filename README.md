@@ -51,8 +51,9 @@ holds and nothing more.
 | `urn:layer:{layer}:receipt:{id}` | Source | one take: who, when, and the tuple as taken (never changes) | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:feed` | Source | events `after=` a sequence, `wait=` up to 60 s | `urn:cap:layer:feed:{layer}` |
 | `urn:layers:feed` | Source | one wait over several feeds, `after=talk:12,notes:3` | `urn:cap:layer:feed:{each}` |
-| `urn:layers:participants` | Source | who each principal is | `urn:cap:layers:read:participants` |
+| `urn:layers:participants` | Source | who each principal is, across the host (the operator's) | `urn:cap:layers:read:participants` |
 | `urn:collab:{name}` | Source | a collaboration's manifest | `urn:cap:collab:read:{name}` |
+| `urn:collab:{name}:participants` | Source | who takes part in that collaboration: each participant its manifest grants anything, as the participants graph describes it | `urn:cap:collab:read:{name}` |
 
 A channel layer binds `say`, `entries`, `entry`, `graph` and `latest`; a tuplespace layer
 binds `tuples` and `receipt`; every layer binds its definition, shapes, context and feed.
@@ -219,11 +220,23 @@ events, with the tuple's subject and who did it.
 ## Hosting it
 
 A host library: a host (ikigai-cli's `serve`) opens a `Host` over its configuration and
-state directories and binds `ikigai_layers::space(&host)` beside `ikigai-shacl` (admission
-composes `urn:shacl:validate`) on a kernel with a clock. State is plain files: each entry is
-written once to `<state>/{layer}/graphs/{author}/{id}.ttl`, and each feed is
-`<state>/{layer}/feed.log`; one host process per state directory. Admission fails closed:
-without a validator bound, nothing is admitted.
+state directories and binds `ikigai_layers::space(&host)`, alone, on a kernel with a clock.
+State is plain files: each entry is written once to
+`<state>/{layer}/graphs/{author}/{id}.ttl`, and each feed is `<state>/{layer}/feed.log`.
+
+- **One host per state directory.** The host holds `<state>/host.lock` exclusively while it
+  lives; a second host over the same directory, in this process or another, is refused with
+  the holder's pid. The operating system releases the lock when the holder exits, however it
+  exits.
+- **Admission is the host's own call.** The host links
+  [ikigai-shacl](https://crates.io/crates/ikigai-shacl) and validates every write itself,
+  so a door binds no `urn:shacl:validate`: that endpoint declares no capability, and bound
+  in a door it would be offered to every participant. A layer whose shapes the validator
+  cannot compile stops the host at open.
+- **Who a participant can learn about.** `urn:layers:participants` is the whole host's
+  roster and no generated grant reads it; each participant reads
+  `urn:collab:{name}:participants` for its own collaborations, under the
+  `urn:cap:collab:read:{name}` its grant already carries.
 
 A tuplespace layer fronts an [ikigai-intray](https://crates.io/crates/ikigai-intray) space
 at `<state>/{layer}/tuples/`, which the host links and calls under its own

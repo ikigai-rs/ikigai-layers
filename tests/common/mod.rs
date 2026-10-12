@@ -1,7 +1,6 @@
 //! The fixture every suite shares: a configuration directory with three channel layers and
 //! one tuplespace layer, two collaborations, seven participants and their certificates; a
-//! kernel binding the layer space beside the real `urn:shacl:validate`, with a JSON Meta face
-//! and a clock.
+//! kernel binding the layer space alone (as a door does), with a JSON Meta face and a clock.
 
 #![allow(dead_code)] // each suite uses a different subset of these helpers
 
@@ -283,11 +282,10 @@ pub struct Fixture {
     pub kernel: Kernel,
 }
 
-pub fn kernel_over(host: &Arc<Host>, with_validator: bool) -> Kernel {
-    let mut spaces: Vec<Arc<dyn Space>> = vec![Arc::new(ikigai_layers::space(host))];
-    if with_validator {
-        spaces.push(Arc::new(ikigai_shacl::space()));
-    }
+/// A kernel binding the layer space ALONE, as a door does: admission is the host's own call
+/// to the validator, so nothing else is needed (ledger #1266).
+pub fn kernel_over(host: &Arc<Host>) -> Kernel {
+    let spaces: Vec<Arc<dyn Space>> = vec![Arc::new(ikigai_layers::space(host))];
     Kernel::with_meta_renderer(
         Arc::new(Fallback::new(spaces)),
         Arc::new(ikigai_vocab::TurtleRenderer),
@@ -300,7 +298,7 @@ pub fn fixture() -> Fixture {
     write_config(&config);
     let state = Scratch::new("state");
     let host = Host::open(config.path(), state.path()).expect("the fixture configuration");
-    let kernel = kernel_over(&host, true);
+    let kernel = kernel_over(&host);
     Fixture {
         config,
         state,
@@ -310,10 +308,17 @@ pub fn fixture() -> Fixture {
 }
 
 impl Fixture {
-    /// Open the host again over the same directories (a restart).
+    /// Open the host again over the same directories (a restart). The old host goes FIRST:
+    /// it holds the state directory's lock until it is dropped, as a process holds it until
+    /// it exits, so it is swapped for an empty host over a scratch directory before the new
+    /// one opens.
     pub fn reopen(&mut self) {
+        let between = Scratch::new("between");
+        let empty = Host::open(between.path(), between.path().join("state")).expect("empty");
+        self.kernel = kernel_over(&empty);
+        self.host = empty;
         self.host = Host::open(self.config.path(), self.state.path()).expect("reopen");
-        self.kernel = kernel_over(&self.host, true);
+        self.kernel = kernel_over(&self.host);
     }
 }
 

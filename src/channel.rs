@@ -12,7 +12,7 @@
 //!   `ik:supersedes` the old one (the same author's, in the same layer).
 //!
 //! This module holds the entries and their index; the endpoints in [`crate::endpoints`]
-//! compose admission (the sub-request to `urn:shacl:validate`) around it.
+//! compose admission (the host's own call to ikigai-shacl's validator) around it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::OpenOptions;

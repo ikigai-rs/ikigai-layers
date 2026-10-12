@@ -1,6 +1,8 @@
 //! The host: the configuration it was opened with, and each layer's state.
 
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -66,12 +68,20 @@ impl LayerState {
     }
 }
 
+/// The file in a state directory that its one host holds locked: [`Host::open`] takes it,
+/// and the host's drop (or its process's exit, however it ends) releases it. It holds the
+/// holder's process id, for the refusal a second opener reads.
+pub const LOCK_FILE: &str = "host.lock";
+
 /// A layer host: what [`crate::space`] binds.
 ///
 /// Opened over two directories: the CONFIG directory (definitions, shapes, contexts,
 /// participants, manifests: the operator's, read-only here) and the STATE directory (each
-/// layer's entries and feed, `<state>/{layer}/`, written only by this host). One host
-/// process per state directory: the write lock that keeps a feed gapless is in-process.
+/// layer's entries and feed, `<state>/{layer}/`, written only by this host). **One host per
+/// state directory**: the write lock that keeps a feed gapless is in-process, so the host
+/// holds [`LOCK_FILE`] in the state directory exclusively for as long as it lives, and a
+/// second host (another door, or another `Host::open` in the same process) is refused
+/// naming the holder's pid (ledger #1267).
 ///
 /// Definitions are read once, at open, because each layer binds its own endpoints; adding
 /// or changing a layer means opening the host again. Participants and manifests are read
@@ -81,18 +91,26 @@ pub struct Host {
     config_dir: PathBuf,
     layers: BTreeMap<String, Arc<LayerState>>,
     notify: Arc<Notify>,
+    /// Held, never read: the state directory's lock lives exactly as long as the host.
+    _lock: File,
 }
 
 impl Host {
     /// Open a host: check the whole configuration (a manifest that breaks the isolation
-    /// rule stops the host here, not at its first read), then open every layer's state,
-    /// repairing a feed that lost the event of an entry stored just before a crash.
+    /// rule stops the host here, not at its first read, and so do shapes the validator cannot
+    /// compile), take the state directory's lock (refused, naming the holder's pid, when
+    /// another host holds it), then open every layer's state, repairing a feed that lost the
+    /// event of an entry stored just before a crash.
     pub fn open(
         config_dir: impl AsRef<Path>,
         state_dir: impl AsRef<Path>,
     ) -> Result<Arc<Host>, ConfigError> {
         let config = Config::load(&config_dir)?;
+        for (name, def) in &config.layers {
+            compile_shapes(def).map_err(|e| ConfigError(format!("layer `{name}`: {e}")))?;
+        }
         let state_dir = state_dir.as_ref();
+        let lock = lock_state(state_dir).map_err(ConfigError)?;
         let mut layers = BTreeMap::new();
         for (name, def) in config.layers {
             let dir = state_dir.join(&name);
@@ -104,6 +122,7 @@ impl Host {
             config_dir: config.dir,
             layers,
             notify: Arc::new(Notify::default()),
+            _lock: lock,
         }))
     }
 
@@ -129,13 +148,75 @@ impl Host {
 
     /// The manifests, read now and checked against this host's layers.
     pub fn collabs(&self) -> Result<BTreeMap<String, config::Manifest>, ConfigError> {
+        self.collabs_with(&self.participants()?)
+    }
+
+    /// The manifests, read now and checked against this host's layers and `participants`
+    /// (one reading of the participants graph, for a caller that also serves it).
+    pub(crate) fn collabs_with(
+        &self,
+        participants: &Participants,
+    ) -> Result<BTreeMap<String, config::Manifest>, ConfigError> {
         let defs: BTreeMap<String, LayerDef> = self
             .layers
             .iter()
             .map(|(name, state)| (name.clone(), state.def.clone()))
             .collect();
-        config::load_collabs(&self.config_dir, &defs, &self.participants()?)
+        config::load_collabs(&self.config_dir, &defs, participants)
     }
+}
+
+/// Compile a layer's shapes the way admission will use them, by validating an empty graph
+/// against them: shapes the validator cannot compile would admit nothing, so they stop the
+/// host at open rather than refusing every write later.
+fn compile_shapes(def: &LayerDef) -> Result<(), String> {
+    ikigai_shacl::validate_report("", &def.shapes)
+        .map(|_| ())
+        .map_err(|e| format!("the validator cannot compile its shapes ({e})"))
+}
+
+/// Take `<state>/`[`LOCK_FILE`] exclusively, creating the directory and the file as needed,
+/// and write this process's id into it. The lock is advisory and released by the operating
+/// system when the file is closed, so a crashed host never leaves a directory locked: the
+/// file it leaves behind is only a stale pid, overwritten by the next host.
+fn lock_state(state_dir: &Path) -> Result<File, String> {
+    std::fs::create_dir_all(state_dir)
+        .map_err(|e| format!("create {}: {e}", state_dir.display()))?;
+    let path = state_dir.join(LOCK_FILE);
+    // Never truncated on open: until the lock is ours, the pid in it is the holder's.
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            let mut held = String::new();
+            let holder = match file.read_to_string(&mut held) {
+                Ok(_) if !held.trim().is_empty() => format!("pid {}", held.trim()),
+                // The holder has not written its pid yet, or the platform's lock is
+                // mandatory and refuses the read.
+                _ => "a pid it has not written".to_string(),
+            };
+            return Err(format!(
+                "state directory {} is held by another layer host ({holder}, {}): one host per                  state directory, since the lock that keeps each feed gapless is in-process",
+                state_dir.display(),
+                path.display()
+            ));
+        }
+        Err(TryLockError::Error(e)) => {
+            return Err(format!("lock {}: {e}", path.display()));
+        }
+    }
+    file.set_len(0)
+        .and_then(|()| file.seek(SeekFrom::Start(0)))
+        .and_then(|_| writeln!(file, "{}", std::process::id()))
+        .and_then(|()| file.flush())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(file)
 }
 
 fn open_layer(def: LayerDef, dir: &Path) -> Result<LayerState, String> {

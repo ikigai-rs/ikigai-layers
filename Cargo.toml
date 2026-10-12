@@ -46,12 +46,20 @@ futures = "0.3"
 # ⚠ `"3"` is `>=3, <4`.
 futures-timer = "3"
 # Layer definitions, manifests and enrollment are TOML (the config home's language); the
-# feed's JSON face, the enrollment the generator writes and the validation report read back
-# from `urn:shacl:validate` are JSON.
+# feed's JSON face, the enrollment the generator writes and the validation report admission
+# reads are JSON.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # ⚠ `"0.8"` is `<0.9`. 0.8.23 is the line the ecosystem's other TOML readers hold.
 toml = "0.8"
+# Admission's validator, LINKED and called by the host itself (`validate_report`), never a
+# sub-request to `urn:shacl:validate`: a door that bound the validator for admission's sake
+# offered it to every enrolled participant, since it declares no capability (ledger #1266).
+# Linked, the door binds the layer space alone and nothing reaches the validator but a write
+# the host is admitting. 0.3.3 is the current line and the one every test here ran against
+# (validation on a sized pool, ledger #1102); a host linking ikigai-shacl itself (cli does)
+# unifies with it. ⚠ `"0.3.3"` is `<0.4.0`.
+ikigai-shacl = "0.3.3"
 # Turtle and JSON-LD in (`say`'s content, the shapes and the participants graph), Turtle out.
 # 0.3.4 / 0.2.4 / 0.2.6 are the model, serializer and parser oxigraph 0.5.11 uses, so the
 # graph carries one of each beside ikigai-shacl in a host. oxrdfio's JSON-LD parser has no
@@ -72,10 +80,6 @@ ikigai-conformance = "0.6.1"
 # first that defines the layer family these graphs use, so the dev pin is what makes the
 # vocabulary check judge against it (cargo unifies the conformance crate's own `0.1.91`).
 ikigai-vocab = "0.1.96"
-# The validator `say` composes, bound in the test kernels exactly as a host binds it. The
-# LIBRARY never links it: admission is a sub-request to `urn:shacl:validate`.
-# 0.3.3 is the current published line. ⚠ `"0.3.3"` is `<0.4.0`.
-ikigai-shacl = "0.3.3"
 
 [target.'cfg(unix)'.dev-dependencies]
 # `tests/partial_write.rs` injects a torn write from outside the library by lowering the
