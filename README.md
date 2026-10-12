@@ -82,6 +82,7 @@ One directory, the layer host's config home:
   participants.ttl           who each principal is
   collabs/bobby.toml         a collaboration's manifest
   enrollment.toml            certificate fingerprints (read by the generator only)
+  layers.toml                optional: the host's own options (the `match` budget, below)
 ```
 
 A layer:
@@ -110,16 +111,35 @@ match     = false                # optional; the default: `rd match=` is refused
 the other model is refused, like a misspelled key.
 
 **`match` is off by default.** A `match=` template is the caller's own SPARQL ASK,
-evaluated against every pending tuple, and nothing bounds how long that takes: the
-store's limits bound a query's size and nesting, and a cross join of triple patterns is a
-few hundred bytes and shallow, yet costs about 8x more for each pattern added: seconds on
-one tuple at eight patterns, minutes at ten, and again for every pending tuple (ledger
-#1327). So on a layer that does not say `match = true`, `rd match=` is refused
-(`InvalidArgument` on `match`, naming the option) and the tuples door does not declare
-`match` at all; `rd` without a template, `out` and `take` are unchanged. Turn it on only
-for a layer whose every reader you would hand a thread to. The time bound itself belongs
-in ikigai-store's evaluator, which intray uses; until it lands, this option decides who
-may send a template, not what one costs.
+evaluated against every pending tuple: the store's limits bound a query's size and
+nesting, and a cross join of triple patterns is a few hundred bytes and shallow, yet costs
+about 8x more for each pattern added: seconds on one tuple at eight patterns, minutes at
+ten, and again for every pending tuple (ledger #1327). So on a layer that does not say
+`match = true`, `rd match=` is refused (`InvalidArgument` on `match`, naming the option)
+and the tuples door does not declare `match` at all; `rd` without a template, `out` and
+`take` are unchanged. Turn it on only for a layer whose every reader you would hand a
+thread to.
+
+**A template runs within one time budget per host** (ikigai-intray 0.1.55's, from
+ikigai-store; ledger #1362). Its caller is answered with a `Timeout` at the budget; a
+template that cannot be stopped at once (oxigraph checks its cancellation only where it
+touches the data) goes on running and is counted as OVERDUE, and while `max_overdue` are,
+every new `rd match=` on ANY layer of the host is refused at once as `Unavailable`. The
+host builds the budget once and every tuplespace layer shares it, so the cap is the
+host's, not each layer's:
+
+```toml
+# layers.toml (optional; every key defaults)
+[match]
+budget_ms   = 2000   # default 5000
+max_overdue = 1      # default: a quarter of the machine's cores, at least 1
+```
+
+A template is evaluated under the host's own authority, so a `urn:cap:store:budget:<ms>`
+grant a participant holds does not raise it: `budget_ms` is what every caller gets. On a
+small machine the default cap can be 1, and then one abandoned template refuses every later
+one until it ends: size `max_overdue` (and `budget_ms`) deliberately before you turn
+`match` on. `Host::match_budget()` says how many are overdue now.
 
 Every node shape must be `sh:closed true` and the shapes must target at least one class;
 an entry must be typed with a targeted class and only those (SHACL answers "conforms" for

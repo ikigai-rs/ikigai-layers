@@ -907,10 +907,11 @@ fn matching_fixture() -> Fixture {
     f
 }
 
-/// Ledger #1327: `rd match=` evaluates the caller's ASK with no time bound, so a tuplespace
-/// layer refuses a template unless its definition says `match = true`, and names the option.
-/// Before this, the same request was ACCEPTED (asserted on an empty space, so the test stays
-/// fast: acceptance is decided before any tuple is read).
+/// Ledger #1327: `rd match=` evaluated the caller's ASK with no time bound (until intray
+/// 0.1.55), so a tuplespace layer refuses a template unless its definition says
+/// `match = true`, and names the option. Before this, the same request was ACCEPTED
+/// (asserted on an empty space, so the test stays fast: acceptance is decided before any
+/// tuple is read).
 #[test]
 fn a_template_is_refused_unless_the_layer_allows_it() {
     let f = fixture();
@@ -933,7 +934,7 @@ fn a_template_is_refused_unless_the_layer_allows_it() {
         assert!(
             matches!(&refused, Err(Error::InvalidArgument { name, detail })
                 if name == "match" && detail.contains("`match = true`")
-                    && detail.contains("no time bound")),
+                    && detail.contains("holds a core")),
             "{args:?}: {refused:?}"
         );
     }
@@ -947,9 +948,9 @@ fn a_template_is_refused_unless_the_layer_allows_it() {
     assert!(meta.contains("\"tuple\""), "{meta}");
 }
 
-/// Opted in, a template works, and the pathological one is still ACCEPTED: the option is a
-/// stopgap that decides WHO may send one, not a bound on what one costs (that belongs in
-/// ikigai-store's evaluator, ledger #1327).
+/// Opted in, a template works, and the pathological one is still ACCEPTED: the option decides
+/// WHO may send one; what one costs is bounded by the host's time budget
+/// (`tests/match_budget.rs`, ledger #1362), and on an empty space nothing is evaluated.
 #[test]
 fn an_opted_in_layer_takes_a_template_and_offers_it() {
     let f = matching_fixture();

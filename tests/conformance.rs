@@ -3,28 +3,23 @@
 //!
 //! # What the suite cannot say, and this file says instead
 //!
-//! - **`say` is probed under root, and root names nobody**, so every probe of it is a
-//!   `Denied` from the endpoint (an entry must be attributed). The suite cannot mint a
-//!   principal, so `OUTPUTS` is waived for the say doors with that reason, and
-//!   `tests/channel.rs` pins what `say` answers (`text/plain`, the entry's IRI) under a
-//!   principal.
+//! - **`say`, `out` and `urn:layers:me` are about their CALLER**: an entry and a tuple are
+//!   attributed to the principal the door minted, and `me` answers who that is. Root holds
+//!   every principal and names none, so under root each refuses every probe. Each is
+//!   probed instead AS a participant, through the grant the generator writes for it
+//!   (`Fixture::capability`, conformance 0.6.2, ledger #1321), and every check judges what
+//!   it served: nothing about them is waived any more.
 //! - **The definition, shapes and context are `pure`** for the life of the host: they are
 //!   read once, when the host opens, and a host that changes them opens again.
 //! - **An entry is `pure`**: it is named by an id minted once and never rewritten.
 //! - **The entries, author-graph and latest reads are cacheable on the `say` thread**: the
 //!   kernel cuts `urn:layer:{layer}:say` after every Sink through it, which is the only way
 //!   an entry is written. `tests/channel.rs` pins the cut.
-//! - **`urn:layers:me` is probed under root too**, which names nobody, so it refuses every
-//!   probe: the checks that need an answer are waived for it with that reason, and
-//!   `tests/me.rs` pins each of them under principals a door minted. It is not declared
-//!   `live` either: with CACHEABLE waived nothing would hold it to the declaration.
 //! - **Feeds, the participants graphs, `urn:layers:me` and manifests are live**: a feed waits on the next
 //!   event, and the config reads are re-read per request because enrollment is live.
-//! - **`out` is probed under root too**, so it refuses every probe the same way (a drop is
-//!   attributed): `OUTPUTS` is waived for the tuples door with that reason. **`take` is not
-//!   fired at all**: it is destructive, and would refuse under root for the same reason.
-//!   `tests/tuplespace.rs` pins `out`'s `text/plain` subject and `take`'s `text/turtle`
-//!   tuple under a principal, and both verbs' exact capabilities.
+//! - **`take` is not fired at all** (opted out): it is destructive, removing a tuple and
+//!   writing a receipt. `tests/tuplespace.rs` pins `take`'s `text/turtle` tuple under a principal, and both
+//!   verbs' exact capabilities.
 //! - **A receipt is `pure`** (minted once, never rewritten) and **`rd` is cacheable on the
 //!   `tuples` thread**, which the kernel cuts after every out and take through it.
 //! - **`space(&host)` is HOST-named** (`SPACE-NAME`, ledger #987): its doors are the layers
@@ -35,11 +30,41 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
-use ikigai_conformance::{Check, Fixture as Probe, Suite};
-use ikigai_core::Verb;
+use ikigai_conformance::{Fixture as Probe, Suite};
+use ikigai_core::{Capability, Verb};
+use ikigai_layers::grants::{generate, load_fingerprints};
+use ikigai_layers::Config;
 
 const SPACE_LABEL: &str = "ikigai_layers::space(&host)";
 const LAYERS: [&str; 3] = ["notes", "talk", "talk-bobby"];
+
+/// Who `say`s into each channel layer when the suite probes it: a participant whose
+/// generated grant holds `say` there (brian only reads `notes`).
+fn sayer(layer: &str) -> String {
+    participant(if layer == "notes" { "chris" } else { "brian" })
+}
+
+/// The capability a door mints for `principal`: its principal plus the grant the generator
+/// wrote for it over the fixture's own configuration, exactly what `tests/me.rs` and
+/// `tests/door.rs` resolve as. The suite probes an action about its caller AS this
+/// (`Fixture::capability`, conformance 0.6.2, ledger #1321) instead of under root.
+fn minted(f: &common::Fixture, principal: &str) -> Capability {
+    let loaded = Config::load(f.config.path()).expect("the fixture configuration");
+    let fingerprints = load_fingerprints(f.config.path(), &loaded).expect("enrollment.toml");
+    let e = generate(&loaded, &fingerprints).expect("an enrollment");
+    let client = e
+        .clients
+        .values()
+        .find(|c| c.principal == principal)
+        .unwrap_or_else(|| panic!("{principal} is enrolled"));
+    cap(
+        principal,
+        &e.grants[&client.grant]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    )
+}
 
 fn suite(f: &common::Fixture, entry_ids: &[(String, String)], receipt: &str) -> Suite {
     let mut suite = Suite::new()
@@ -47,40 +72,14 @@ fn suite(f: &common::Fixture, entry_ids: &[(String, String)], receipt: &str) -> 
         .fixture(Probe::new("collab", Verb::Source).binding("name", "bobby"))
         .fixture(Probe::new("collab-participants", Verb::Source).binding("name", "bobby"))
         .fixture(Probe::new("layers-feed", Verb::Source).arg("after", "talk:0"))
+        // Answered about its caller, so probed AS one: brian, through the grant his door
+        // mints (two collaborations), and every check judges what it served.
+        .fixture(Probe::new("layers-me", Verb::Source).capability(minted(f, &participant("brian"))))
         .live("layers-feed")
         .live("layers-participants")
         .live("collab")
-        .live("collab-participants");
-    // `urn:layers:me` answers who the door says the caller is, and the suite probes under
-    // root, which names nobody, so every probe is refused: the checks that need an answer
-    // are waived, and tests/me.rs pins each under principals a door minted.
-    for (check, pinned) in [
-        (
-            Check::Outputs,
-            "its text/turtle and application/json answers",
-        ),
-        (
-            Check::SkolemRdf,
-            "that its Turtle face carries no blank node",
-        ),
-        (
-            Check::Vocabulary,
-            "that every ik: term it emits is one the vocabulary defines",
-        ),
-        (
-            Check::Cacheable,
-            "that it is live: the participants graph is read per request",
-        ),
-    ] {
-        suite = suite.opt_out_check(
-            "layers-me",
-            check,
-            format!(
-                "the suite probes under root, which names no principal, so urn:layers:me \
-                 refuses every probe; tests/me.rs pins {pinned}"
-            ),
-        );
-    }
+        .live("collab-participants")
+        .live("layers-me");
     for layer in LAYERS {
         let id = |action: &str| format!("layer-{layer}-{action}");
         let entry = &entry_ids
@@ -89,18 +88,15 @@ fn suite(f: &common::Fixture, entry_ids: &[(String, String)], receipt: &str) -> 
             .expect("an entry per layer")
             .1;
         suite = suite
-            .fixture(Probe::new(id("say"), Verb::Sink).arg("content", message("probe")))
+            .fixture(
+                Probe::new(id("say"), Verb::Sink)
+                    .arg("content", message("probe"))
+                    .capability(minted(f, &sayer(layer))),
+            )
             .fixture(Probe::new(id("feed"), Verb::Source).arg("after", "0"))
             .fixture(Probe::new(id("entry"), Verb::Source).binding("id", entry))
             .fixture(Probe::new(id("graph"), Verb::Source).binding("slug", "bobby"))
             .fixture(Probe::new(id("latest"), Verb::Source).arg("about", "urn:example:topic"))
-            .opt_out_check(
-                id("say"),
-                Check::Outputs,
-                "the suite probes under root, which names no principal, so `say` refuses \
-                 every probe (an entry is attributed); tests/channel.rs pins its text/plain \
-                 answer under a principal",
-            )
             .pure(id("definition"))
             .pure(id("shapes"))
             .pure(id("context"))
@@ -112,7 +108,11 @@ fn suite(f: &common::Fixture, entry_ids: &[(String, String)], receipt: &str) -> 
     }
     let id = |action: &str| format!("layer-{TASKS}-{action}");
     suite
-        .fixture(Probe::new(id("tuples"), Verb::Sink).arg("content", offer("probe")))
+        .fixture(
+            Probe::new(id("tuples"), Verb::Sink)
+                .arg("content", offer("probe"))
+                .capability(minted(f, &gonk())),
+        )
         .fixture(Probe::new(id("feed"), Verb::Source).arg("after", "0"))
         .fixture(Probe::new(id("receipt"), Verb::Source).binding("id", receipt))
         .opt_out(
@@ -121,13 +121,6 @@ fn suite(f: &common::Fixture, entry_ids: &[(String, String)], receipt: &str) -> 
             "take is destructive (it removes a tuple and writes a receipt), and under root, \
              which names no principal, it refuses every probe anyway (a take is attributed); \
              tests/tuplespace.rs pins its text/turtle answer, its capability and its races",
-        )
-        .opt_out_check(
-            id("tuples"),
-            Check::Outputs,
-            "the suite probes under root, which names no principal, so `out` refuses every \
-             probe (a drop is attributed); tests/tuplespace.rs pins its text/plain answer under \
-             a principal",
         )
         .pure(id("definition"))
         .pure(id("shapes"))
