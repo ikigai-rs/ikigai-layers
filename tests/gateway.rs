@@ -1,8 +1,8 @@
 //! The gateway between kernels (ledger #1370), proven ikigai-to-ikigai: an asker and its
 //! resolvers on a scratch layer host, each resolver resolving in its OWN kernel, with the
-//! shipped shapes and contexts. Phase 2 puts an HTTP front on the same layers and phase 3 a
-//! NetKernel participant behind it; nothing here may depend on either side being ikigai except
-//! the reference participant itself.
+//! shipped shapes and contexts. An HTTP front on the same layers will let a participant that is
+//! not ikigai take either end; nothing here may depend on either side being ikigai except the
+//! reference participant itself.
 
 mod common;
 
@@ -449,7 +449,7 @@ fn a_request_the_shapes_refuse_is_refused_at_admission() {
     assert!(g.feed_kinds(LAYER).is_empty());
 }
 
-/// What a NetKernel participant will send through the HTTP front: JSON-LD under the layer's
+/// What a remote participant will send through an HTTP front: JSON-LD under the layer's
 /// own context. Admitted exactly as Turtle is, and served the same.
 #[test]
 fn a_json_ld_request_under_the_layer_context_is_admitted_and_answered() {
@@ -814,9 +814,9 @@ fn the_shipped_example_configuration_opens() {
         "layers/gateway-events.shapes.ttl",
         "layers/gateway-events.context.jsonld",
         "layers/gateway-plasma.toml",
-        "layers/gateway-netkernel.toml",
+        "layers/gateway-remote.toml",
         "layers/gateway-events-plasma.toml",
-        "layers/gateway-events-netkernel.toml",
+        "layers/gateway-events-remote.toml",
     ] {
         config.write(rel, &std::fs::read_to_string(root.join(rel)).unwrap());
     }
@@ -831,10 +831,10 @@ fn the_shipped_example_configuration_opens() {
     assert_eq!(
         names,
         [
-            "gateway-events-netkernel",
             "gateway-events-plasma",
-            "gateway-netkernel",
-            "gateway-plasma"
+            "gateway-events-remote",
+            "gateway-plasma",
+            "gateway-remote"
         ]
     );
     let loaded = Config::load(config.path()).unwrap();
@@ -843,10 +843,10 @@ fn the_shipped_example_configuration_opens() {
         .grants;
     let plasma = &grants["plasma"];
     assert!(plasma.contains(&"urn:cap:layer:say:gateway-events-plasma".to_string()));
-    assert!(!plasma.contains(&"urn:cap:layer:say:gateway-events-netkernel".to_string()));
-    let netkernel = &grants["netkernel"];
-    assert!(netkernel.contains(&"urn:cap:layer:say:gateway-events-netkernel".to_string()));
-    assert!(!netkernel.contains(&"urn:cap:layer:say:gateway-events-plasma".to_string()));
+    assert!(!plasma.contains(&"urn:cap:layer:say:gateway-events-remote".to_string()));
+    let remote = &grants["remote"];
+    assert!(remote.contains(&"urn:cap:layer:say:gateway-events-remote".to_string()));
+    assert!(!remote.contains(&"urn:cap:layer:say:gateway-events-plasma".to_string()));
     // The shipped files ARE the module's constants.
     for (rel, constant) in [
         ("layers/gateway.shapes.ttl", SHAPES),

@@ -1,5 +1,5 @@
-# A GATEWAY ask layer (ledger #1370), served as urn:layer:gateway-netkernel: where the kernel
-# `netkernel` asks, and whoever resolves for it answers. One ask layer PER ASKER, because the layer
+# A GATEWAY ask layer (ledger #1370), served as urn:layer:gateway-remote: where the kernel
+# `remote` asks, and whoever resolves for it answers. One ask layer PER ASKER, because the layer
 # is the read boundary (whoever holds `read` on a layer reads all of it): an asker's requests and
 # replies are visible to that asker and to the resolvers serving it, and to no other asker.
 #
@@ -11,7 +11,7 @@
 # entry_max is the bound on ONE tuple, so on the representation a reply can carry (base64 costs a
 # third): a resolver whose answer does not fit sends a gw:Failure instead.
 model     = "tuplespace"
-label     = "Gateway: NetKernel asks"
+label     = "Gateway: the remote kernel asks"
 shapes    = "gateway.shapes.ttl"
 context   = "gateway.context.jsonld"
 addressed = true

@@ -257,9 +257,8 @@ events, with the tuple's subject and who did it.
 
 One kernel asks another to resolve a resource and gets the answer back, through layers, with
 neither resolving into the other and neither adopting the other's wire, cache or security
-model (ledger #1370; the first step of a gateway between ikigai and NetKernel). It is
-configuration: the example in [`gateway/`](gateway/) is two kernels, `plasma` and
-`netkernel`, each asking the other.
+model (ledger #1370). It is configuration: the example in [`gateway/`](gateway/) is two
+kernels, `plasma` and `remote`, each asking the other.
 
 - **An ask layer per asker** (`gateway-plasma`): a tuplespace, `addressed = true`. The layer
   is the read boundary (whoever holds `read` on a layer reads all of it), so an asker's
@@ -302,7 +301,7 @@ representation larger than the layer's `entry_max` (base64 costs a third) is ans
 ### The wire contract a participant carries
 
 Every step is an ordinary request at the layer host, so this is also what an HTTP front for
-non-ikigai participants (phase 2, for NetKernel) must carry: a verb, an IRI and named
+non-ikigai participants (not built yet) must carry: a verb, an IRI and named
 arguments in; a media type and bytes out; and for an error, its KIND and message and, for
 `missing-argument` and `invalid-argument`, the argument's name, because a participant
 branches on them (a `conflict` on a take is a lost race, a `not-found` is an answer not there
@@ -335,7 +334,7 @@ urn:layer:{layer}:context`); answers come back as Turtle:
   "@id": "urn:layer:gateway-plasma:request:01m4rjm4zt",
   "@type": "Request",
   "correlation": "01m4rjm4zt",
-  "resource": "res:/demo/hello",
+  "resource": "urn:example:hello",
   "verb": "Source",
   "argument": ["as=text/plain"] }
 ```
@@ -347,7 +346,7 @@ urn:layer:{layer}:context`); answers come back as Turtle:
     gw:correlation "01m4rjm4zt" ;
     ik:mediaType "text/plain" ;
     gw:bytes "aGVsbG8="^^xsd:base64Binary ;
-    prov:wasAttributedTo <urn:collab:participant:netkernel> ;
+    prov:wasAttributedTo <urn:collab:participant:remote> ;
     dcterms:created "2026-10-12T18:00:01.000Z"^^xsd:dateTime ;
     ik:seq 3 .
 ```

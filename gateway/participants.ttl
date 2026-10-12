@@ -1,8 +1,9 @@
 # The participants of the example gateway (ledger #1370): two kernels, each asking the other.
 # A kernel is a machine; the door names an enrolled machine either by a participant name
 # (enrollment.toml maps its certificate fingerprint to it) or as
-# urn:iki:host:{host}:client:<fingerprint>. NetKernel's identity at the layer (a client certificate,
-# or a token the layer host binds to a participant) is phase 2's decision.
+# urn:iki:host:{host}:client:<fingerprint>. A participant that is not ikigai
+# reaches the layer through an HTTP front (not built); its identity there (a client certificate, or
+# a token the layer host binds to a participant) is that front's decision.
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix prov: <http://www.w3.org/ns/prov#> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
@@ -10,5 +11,5 @@
 <urn:collab:participant:brian>     a foaf:Person ; rdfs:label "Brian" .
 <urn:collab:participant:plasma>    a ik:Machine ; rdfs:label "plasma's ikigai kernel" ;
                                    prov:actedOnBehalfOf <urn:collab:participant:brian> .
-<urn:collab:participant:netkernel> a ik:Machine ; rdfs:label "a NetKernel instance" ;
+<urn:collab:participant:remote>    a ik:Machine ; rdfs:label "another kernel" ;
                                    prov:actedOnBehalfOf <urn:collab:participant:brian> .

@@ -1,32 +1,32 @@
 # The example gateway collaboration (ledger #1370), served as urn:collab:gateway: two kernels,
-# `plasma` (ikigai) and `netkernel`, each asking the other to resolve a resource. The authoring
+# `plasma` and `remote`, each asking the other to resolve a resource. The authoring
 # form of the door's enrollment: `ikigai-layers grants <config dir>` derives grants.json from it.
 #
 # The LAYER is the read boundary, so each asker has its own ask layer and each owner its own event
 # channel. In an ask layer the asker and its resolvers hold the same four verbs, and the roles are
 # the host's to enforce, not the grant's: a reply is admitted only from the request's taker,
 # addressed to the asker alone, and only the asker can take it.
-label = "Gateway: plasma and NetKernel"
+label = "Gateway: plasma and a remote kernel"
 
-# plasma asks; NetKernel resolves.
+# plasma asks; remote resolves.
 [[mount]]
 layer = "gateway-plasma"
 plasma    = ["read", "feed", "out", "take"]
-netkernel = ["read", "feed", "out", "take"]
+remote    = ["read", "feed", "out", "take"]
 
-# NetKernel asks; plasma resolves.
+# remote asks; plasma resolves.
 [[mount]]
-layer = "gateway-netkernel"
-netkernel = ["read", "feed", "out", "take"]
+layer = "gateway-remote"
+remote    = ["read", "feed", "out", "take"]
 plasma    = ["read", "feed", "out", "take"]
 
 # Each kernel says what changed among ITS resources; the other reads.
 [[mount]]
 layer = "gateway-events-plasma"
 plasma    = ["read", "feed", "say"]
-netkernel = ["read", "feed"]
+remote    = ["read", "feed"]
 
 [[mount]]
-layer = "gateway-events-netkernel"
-netkernel = ["read", "feed", "say"]
+layer = "gateway-events-remote"
+remote    = ["read", "feed", "say"]
 plasma    = ["read", "feed"]

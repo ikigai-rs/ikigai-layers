@@ -1,5 +1,5 @@
-# A GATEWAY event channel (ledger #1370), served as urn:layer:gateway-events-netkernel: where the
-# kernel `netkernel` says that one of ITS resources changed (gw:Invalidation: which resource, why),
+# A GATEWAY event channel (ledger #1370), served as urn:layer:gateway-events-remote: where the
+# kernel `remote` says that one of ITS resources changed (gw:Invalidation: which resource, why),
 # so a kernel that holds an answer it got through the gateway can drop it.
 #
 # One channel PER OWNER, and only the owner holds `say`: an event names a resource the sayer owns,
@@ -9,7 +9,7 @@
 # `about` is the predicate `latest about=` reads: `latest about=<resource>` is the newest
 # invalidation of that resource.
 model   = "channel"
-label   = "Gateway: NetKernel's invalidations"
+label   = "Gateway: the remote kernel's invalidations"
 shapes  = "gateway-events.shapes.ttl"
 context = "gateway-events.context.jsonld"
 about   = "urn:layers:gateway:resource"

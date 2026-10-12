@@ -1,8 +1,8 @@
 # What may be said on a gateway's EVENT channel (ledger #1370): an invalidation, CLOSED. The side
 # that owns a resource says that it changed (which resource, and why), so a kernel that holds an
-# answer it got through the gateway can drop it. How a golden-thread cut becomes one of these is
-# the research question of the NetKernel gateway design (devtools
-# claude/research/netkernel-gateway-2026-10-12.md); this is the shape it crosses in.
+# answer it got through the gateway can drop it. How a golden-thread cut becomes one of these
+# (cross-kernel cache invalidation through a feed) is an open question; this is the shape it
+# crosses in.
 #
 # An entry is written about <urn:layer:new>; the host names it and stamps the last three
 # properties (who said it, when, where in the feed).
