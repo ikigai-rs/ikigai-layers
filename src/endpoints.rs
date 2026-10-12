@@ -839,6 +839,20 @@ impl LayerEndpoint {
         Ok(turtle(text))
     }
 
+    /// `rd match=` on a layer whose definition does not say `match = true` (ledger #1327).
+    fn no_match(&self) -> Error {
+        Error::InvalidArgument {
+            name: "match".into(),
+            detail: format!(
+                "layer `{}` does not take match=: its definition does not set `match = true`. \
+                 A template is a SPARQL ASK evaluated against every pending tuple with no time \
+                 bound, so a layer opts in only when it trusts its readers with that; read the \
+                 pending tuples without one (rd, or rd tuple=) and select them yourself",
+                self.layer()
+            ),
+        }
+    }
+
     fn gone(&self, subject: &str) -> Error {
         Error::Conflict(format!(
             "<{subject}> left layer `{}`'s space without a take through this host, so there is \
@@ -864,6 +878,9 @@ impl LayerEndpoint {
         let (after, limit) = self.page(inv)?;
         let tuple = optional_str(inv, "tuple")?;
         let template = optional_str(inv, "match")?;
+        if template.is_some() && !self.def().matching {
+            return Err(self.no_match());
+        }
         let space = self.state.tuplespace();
         let answer = |r: Representation| Ok(r.cacheable().depends_on(self.tuples_thread()));
         if let (Some(_), Some(_)) = (tuple, template) {
@@ -1373,6 +1390,26 @@ impl Endpoint for LayerEndpoint {
                 } else {
                     ""
                 };
+                // `match=` is declared only where the definition allows it (`match = true`), so
+                // a layer that refuses it does not offer it (ledger #1327).
+                let mut selectors = vec![ArgSpec::new("tuple")
+                    .summary("read this tuple (or, with state=taken, its receipt), by its subject")
+                    .class(xsd("anyURI"))
+                    .optional()];
+                let matching = if self.def().matching {
+                    selectors.push(
+                        ArgSpec::new("match")
+                            .summary(
+                                "a SPARQL ASK (no SERVICE): list only the pending tuples whose \
+                                 graph satisfies it",
+                            )
+                            .class(xsd("string"))
+                            .optional(),
+                    );
+                    ", those a match= ASK holds for"
+                } else {
+                    ""
+                };
                 base.title(format!("Layer {layer}: tuples"))
                     .summary(format!(
                         "Layer `{layer}`'s tuplespace: out (Sink) drops a tuple named by its one \
@@ -1382,30 +1419,15 @@ impl Endpoint for LayerEndpoint {
                          it.{addressed}"
                     ))
                     .action(
-                        ActionSpec::new(Verb::Source)
-                            .summary(
-                                "rd: the pending tuples in the order they were dropped (one line \
-                                 each, `seq time subject dropper`, or as Turtle), one by \
-                                 tuple=, those a match= ASK holds for; with state=taken, the \
-                                 receipts instead",
-                            )
-                            .input(
-                                ArgSpec::new("tuple")
-                                    .summary(
-                                        "read this tuple (or, with state=taken, its receipt), \
-                                         by its subject",
-                                    )
-                                    .class(xsd("anyURI"))
-                                    .optional(),
-                            )
-                            .input(
-                                ArgSpec::new("match")
-                                    .summary(
-                                        "a SPARQL ASK (no SERVICE): list only the pending tuples \
-                                         whose graph satisfies it",
-                                    )
-                                    .class(xsd("string"))
-                                    .optional(),
+                        selectors
+                            .into_iter()
+                            .fold(
+                                ActionSpec::new(Verb::Source).summary(format!(
+                                    "rd: the pending tuples in the order they were dropped (one \
+                                     line each, `seq time subject dropper`, or as Turtle), one \
+                                     by tuple={matching}; with state=taken, the receipts instead"
+                                )),
+                                ActionSpec::input,
                             )
                             .input(
                                 ArgSpec::new("state")
