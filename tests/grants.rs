@@ -221,6 +221,7 @@ fn a_generated_grant_projects_exactly_its_layers() {
         "layer-talk-latest__source",
         "layers-feed__source",
         "collab__source",
+        "collab-participants__source",
     ]
     .into_iter()
     .map(String::from)
@@ -260,7 +261,9 @@ fn a_generated_grant_projects_exactly_its_layers() {
         .iter()
         .all(|a| !a.starts_with("layer-talk-") || a.starts_with("layer-talk-bobby-")));
 
-    // Nobody's generated grant reads the participants graph: that is the operator's.
+    // Nobody's generated grant reads the host-wide participants graph: that is the
+    // operator's. Each reads its own collaborations' slice instead (`collab-participants`,
+    // tests/door.rs).
     for name in e.grants.keys() {
         assert!(!manifold(&f.kernel, &grant(name)).contains("layers-participants__source"));
     }

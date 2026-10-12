@@ -30,32 +30,37 @@
 //! urn:layers:feed                   Source  one wait over several feeds       feed:{each layer}
 //! urn:layers:participants           Source  who each principal is             layers:read:participants
 //! urn:collab:{name}                 Source  a manifest                        collab:read:{name}
+//! urn:collab:{name}:participants    Source  who takes part in it              collab:read:{name}
 //! ```
 //!
 //! (Capabilities abbreviated: `read:{layer}` is `urn:cap:layer:read:{layer}`.)
 //!
 //! # A host library
 //!
-//! No binary serves anything: a host (ikigai-cli's `serve`, ledger #1189) opens a [`Host`]
-//! over its configuration and state directories and binds [`space`], beside
-//! `ikigai-shacl` (admission composes `urn:shacl:validate`) and with a clock (every entry
-//! is stamped with the kernel's time). The door mints each connection's principal; `say`,
-//! `out` and `take` refuse a request that carries none.
+//! No binary serves anything: a host (ikigai-cli's `serve`, ledger #1188) opens a [`Host`]
+//! over its configuration and state directories and binds [`space`] with a clock (every
+//! entry is stamped with the kernel's time). The door mints each connection's principal;
+//! `say`, `out` and `take` refuse a request that carries none.
+//!
+//! **The layer space is all a door binds.** Admission validates with ikigai-shacl, which
+//! this crate links and calls itself, so the door's kernel needs no `urn:shacl:validate`,
+//! and binding one beside would offer it to every participant: it declares no capability
+//! (ledger #1266). **One host per state directory**: [`Host::open`] locks it, and refuses
+//! while another host holds it (ledger #1267).
 //!
 //! ```
 //! use std::sync::Arc;
-//! use ikigai_core::{Fallback, Kernel, Space, SystemClock};
+//! use ikigai_core::{Kernel, SystemClock};
 //!
 //! # let dir = std::env::temp_dir().join(format!("ikigai-layers-doc-{}", std::process::id()));
 //! # let (config, state) = (dir.join("config"), dir.join("state"));
 //! # std::fs::create_dir_all(&config).unwrap();
 //! let host = ikigai_layers::Host::open(&config, &state).expect("a configuration that checks");
-//! let root = Fallback::new(vec![
-//!     Arc::new(ikigai_layers::space(&host)) as Arc<dyn Space>,
-//!     Arc::new(ikigai_shacl::space()) as Arc<dyn Space>,
-//! ]);
-//! let kernel = Kernel::new(Arc::new(root)).with_clock(Arc::new(SystemClock));
-//! # let _ = kernel;
+//! let kernel = Kernel::new(Arc::new(ikigai_layers::space(&host))).with_clock(Arc::new(SystemClock));
+//! // A second host over the same state directory is refused while this one lives.
+//! assert!(ikigai_layers::Host::open(&config, &state).is_err());
+//! # drop(kernel);
+//! # drop(host);
 //! # std::fs::remove_dir_all(&dir).unwrap();
 //! ```
 //!

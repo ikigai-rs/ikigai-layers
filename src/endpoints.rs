@@ -18,6 +18,7 @@
 //! urn:layers:feed                  Source  layers-feed               urn:cap:layer:feed:*  (+ exact per layer)
 //! urn:layers:participants          Source  layers-participants       urn:cap:layers:read:participants
 //! urn:collab:{name}                Source  collab                    urn:cap:collab:read:* (+ exact per manifest)
+//! urn:collab:{name}:participants   Source  collab-participants       urn:cap:collab:read:* (+ exact per manifest)
 //! ```
 //!
 //! A channel layer binds `say`, `entries`, `entry`, `graph` and `latest`; a tuplespace layer
@@ -30,9 +31,10 @@
 //! which is held as a literal string and allows only itself. Binding one endpoint per
 //! layer is what lets each declare its own exact token, so the manifold under a
 //! participant's grant, and the MCP tool list projected from it, is exactly the layers it
-//! holds. The two host-wide reads that span names (`urn:layers:feed`, `urn:collab:{name}`)
-//! must declare the family and check the exact token inside; they offer themselves to
-//! anyone holding some grant of the family, and refuse the rest by name.
+//! holds. The host-wide reads that span names (`urn:layers:feed`, `urn:collab:{name}` and
+//! `urn:collab:{name}:participants`) must declare the family and check the exact token
+//! inside; they offer themselves to anyone holding some grant of the family, and refuse the
+//! rest by name.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -40,8 +42,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ActionSpec, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
-    Iri, ReprType, Representation, Request, Result, UriTemplate, Verb,
+    ActionSpec, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, ReprType,
+    Representation, Result, UriTemplate, Verb,
 };
 use oxrdf::{Literal, Triple};
 
@@ -61,12 +63,17 @@ const JSON: &str = "application/json";
 const JSON_LD: &str = "application/ld+json";
 const TEXT: &str = "text/plain";
 
-/// The validator `say` composes for admission.
+/// ikigai-shacl's validator, by its resource name. **Admission no longer composes it**
+/// (since 0.2.1): the host links the validator and calls it itself, so a door binds the
+/// layer space ALONE and offers participants no validator (ledger #1266). Kept for hosts
+/// that name it, e.g. to check that a door they built does NOT bind it.
 pub const VALIDATE: &str = "urn:shacl:validate";
 
-/// The capability that reads the participants graph. Not generated for anyone: who takes
-/// part in OTHER collaborations is not a participant's business (isolation), so this is an
-/// operator's grant (and a mirror's, which needs a participant's kind).
+/// The capability that reads the WHOLE participants graph, `urn:layers:participants`. Not
+/// generated for anyone: who takes part in OTHER collaborations is not a participant's
+/// business (isolation), so this is the operator's (root's). A participant reads its own
+/// collaborations' participants at `urn:collab:{name}:participants`, under the
+/// `urn:cap:collab:read:{name}` every generated grant already carries (ledger #1282).
 pub const CAP_PARTICIPANTS: &str = "urn:cap:layers:read:participants";
 
 /// The family `urn:layers:feed` declares (and then checks exactly, per layer).
@@ -113,6 +120,14 @@ pub fn space(host: &Arc<Host>) -> EndpointSpace {
         .bind(
             Exact::new("urn:layers:participants"),
             ParticipantsEndpoint {
+                host: Arc::clone(host),
+            },
+        )
+        // Before `urn:collab:{name}`: the first binding that matches wins, and a final
+        // `{name}` captures the rest of the IRI, `bobby:participants` included.
+        .bind(
+            template("urn:collab:{name}:participants".into()),
+            CollabParticipants {
                 host: Arc::clone(host),
             },
         )
@@ -495,7 +510,7 @@ impl LayerEndpoint {
         );
         let created = xsd_date_time(now);
         let stamped = draft.stamp(&iri, &author, &created, seq);
-        admit(inv, self.def(), &stamped).await?;
+        admit(self.def(), &stamped)?;
         self.state
             .channel()
             .write()
@@ -669,7 +684,7 @@ impl LayerEndpoint {
         let now = self.now(inv)?;
         let created = xsd_date_time(now);
         let stamped = draft.stamp(&dropper, &created, seq);
-        admit(inv, self.def(), &stamped).await?;
+        admit(self.def(), &stamped)?;
         let cid = space
             .store
             .drop_tuple(rdf::to_turtle(&stamped).as_bytes())
@@ -1003,52 +1018,43 @@ impl LayerEndpoint {
     }
 }
 
-/// Admission: the stamped entry must conform to the layer's closed shapes, by a
-/// sub-request to `urn:shacl:validate` (composed, not linked).
+/// Admission: the stamped entry must conform to the layer's closed shapes, judged by
+/// ikigai-shacl's validator, which the host LINKS and calls itself (ledger #1266).
 ///
-/// - It answers `Ok` for data that does NOT conform (the report says `conforms: false`),
-///   so admission reads the report's `conforms`, never the `Ok`.
-/// - The shapes are passed INLINE, from the definition the host holds, so a writer needs no
-///   read grant on the shapes, and the check runs under an EMPTY capability: validation
-///   needs no authority, and the writer's is not lent to it.
-/// - Any failure of the validator itself (no validator bound, the operator's shapes do not
-///   compile) is the HOST's error, never the writer's bad argument, and nothing is admitted.
-async fn admit(inv: &Invocation<'_>, def: &LayerDef, stamped: &[Triple]) -> Result<()> {
-    let request = Request::new(Verb::Source, Iri::parse(VALIDATE).expect("a constant IRI"))
-        .with_arg("data", ArgRef::Inline(rdf::to_turtle(stamped).into_bytes()))
-        .with_arg("shapes", ArgRef::Inline(def.shapes.clone().into_bytes()))
-        .with_arg("as", ArgRef::Inline(JSON.as_bytes().to_vec()));
-    let report = match inv.issue_attenuated(request, Vec::<String>::new()).await {
-        Ok(report) => report,
-        Err(Error::Unresolved(_)) => {
-            return Err(Error::Endpoint(format!(
-                "layer `{}`: admission composes {VALIDATE}, which this host does not bind; \
-                 nothing is admitted without it",
-                def.name
-            )))
-        }
-        Err(e) => {
-            return Err(Error::Endpoint(format!(
+/// - Not a sub-request to `urn:shacl:validate`: that endpoint declares no capability, so a
+///   door that bound it for admission's sake offered it to every enrolled participant.
+///   Called here, it is the host's own step, the way a tuplespace's intray space is, and the
+///   door's kernel binds the layer space alone. Nothing reaches the validator but a write
+///   the host is admitting, and no authority is involved: validation needs none.
+/// - The validator answers a report for data that does NOT conform (`conforms: false`), so
+///   admission reads `conforms`, never the absence of an error.
+/// - The shapes are the ones the host holds, skolemized, which is exactly what
+///   `urn:layer:{layer}:shapes` serves, so the shapes a participant reads are the shapes
+///   that judged its entry. They compiled when the host opened ([`crate::Host::open`]).
+/// - A failure of the validator itself is the HOST's error, never the writer's bad
+///   argument, and nothing is admitted.
+fn admit(def: &LayerDef, stamped: &[Triple]) -> Result<()> {
+    let report =
+        ikigai_shacl::validate_report(&rdf::to_turtle(stamped), &def.shapes).map_err(|e| {
+            Error::Endpoint(format!(
                 "layer `{}`: admission could not run ({e}); the shapes are the operator's",
                 def.name
-            )))
-        }
-    };
-    let report: serde_json::Value = serde_json::from_slice(&report.bytes).map_err(|e| {
+            ))
+        })?;
+    if report.conforms {
+        return Ok(());
+    }
+    // The report's JSON face, the one `urn:shacl:validate` answers with `as=application/json`.
+    let report = serde_json::to_value(&report).map_err(|e| {
         Error::Endpoint(format!(
-            "{VALIDATE} answered a report that is not JSON: {e}"
+            "layer `{}`: the validation report did not serialize: {e}",
+            def.name
         ))
     })?;
-    match report.get("conforms").and_then(serde_json::Value::as_bool) {
-        Some(true) => Ok(()),
-        Some(false) => Err(Error::InvalidArgument {
-            name: "content".into(),
-            detail: violations(&def.name, &report),
-        }),
-        None => Err(Error::Endpoint(format!(
-            "{VALIDATE} answered a report with no `conforms`"
-        ))),
-    }
+    Err(Error::InvalidArgument {
+        name: "content".into(),
+        detail: violations(&def.name, &report),
+    })
 }
 
 /// At most 20 violations, and a count of the rest.
@@ -1627,6 +1633,76 @@ impl Endpoint for ParticipantsEndpoint {
             .verb(Verb::Source)
             .verb(Verb::Meta)
             .requires(CAP_PARTICIPANTS)
+            .output(TURTLE)
+    }
+}
+
+/// `urn:collab:{name}:participants`: who takes part in one collaboration, the participants
+/// graph restricted to the principals its manifest grants anything (ledger #1282).
+///
+/// The participants graph names every principal the host attributes, across every
+/// collaboration, so it is the operator's ([`CAP_PARTICIPANTS`]). This is the slice a
+/// participant may read: the same triples, about exactly the principals its own
+/// collaboration's manifest already names as contributors, under the manifest's own token.
+/// A mirror reads each participant's kind here, and an agent reads for whom it acts.
+struct CollabParticipants {
+    host: Arc<Host>,
+}
+
+#[async_trait]
+impl Endpoint for CollabParticipants {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let name = inv.bindings.get("name").unwrap_or_default();
+        // As `urn:collab:{name}`: the token is checked before anything is read, so an
+        // absent collaboration is refused like an unheld one and the refusal names nothing.
+        if !inv.capability.allows(&collab_cap(name)) {
+            return Err(Error::Denied(format!(
+                "reading collaboration `{name}`'s participants needs {}",
+                collab_cap(name)
+            )));
+        }
+        let participants = self.host.participants().map_err(host_error)?;
+        let collabs = self.host.collabs_with(&participants).map_err(host_error)?;
+        let manifest = collabs
+            .get(name)
+            .ok_or_else(|| Error::NotFound(format!("no collaboration `{name}`")))?;
+        let members: std::collections::BTreeSet<&str> = manifest
+            .mounts
+            .iter()
+            .flat_map(|m| m.grants.keys().map(Participant::iri))
+            .collect();
+        let slice: Vec<Triple> = participants
+            .triples
+            .iter()
+            .filter(|t| match &t.subject {
+                oxrdf::NamedOrBlankNode::NamedNode(n) => members.contains(n.as_str()),
+                _ => false,
+            })
+            .cloned()
+            .collect();
+        // Read from the files on every request (enrollment is live), so never cached.
+        Ok(turtle(rdf::to_turtle(&slice)))
+    }
+
+    fn name(&self) -> &str {
+        "collab-participants"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("collab-participants")
+            .title("Collaboration participants")
+            .summary(
+                "Who takes part in one collaboration: each participant its manifest grants                  anything, as the participants graph describes it (a person, an agent and for                  whom it acts, or a machine). Needs the manifest's own                  urn:cap:collab:read:{name}",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(CAP_COLLAB_FAMILY)
+            .input(
+                ArgSpec::new("name")
+                    .summary("the collaboration's name")
+                    .class(xsd("string"))
+                    .binding(),
+            )
             .output(TURTLE)
     }
 }

@@ -190,7 +190,7 @@ fn a_type_no_shape_targets_is_refused() {
 #[test]
 fn admission_reads_conforms_not_ok() {
     let f = fixture();
-    // No body: urn:shacl:validate answers Ok with `conforms: false`.
+    // No body: the validator answers a report with `conforms: false`, not an error.
     let bodiless = format!("@prefix ik: <{IK}> .\n<urn:layer:new> a ik:Message .\n");
     let detail = content_refusal(say(&f.kernel, "talk", &bobby(), &bodiless));
     assert!(detail.contains("does not conform"), "{detail}");
@@ -210,16 +210,22 @@ fn admission_reads_conforms_not_ok() {
     assert_eq!(feed, "");
 }
 
+/// Admission is the host's own call: a layer whose shapes the validator cannot compile would
+/// admit nothing, so it stops the host when it opens, never at the first write.
 #[test]
-fn without_a_validator_nothing_is_admitted() {
-    let f = fixture();
-    let bare = kernel_over(&f.host, false);
-    let refused = say(&bare, "talk", &bobby(), &message("x"));
-    assert!(
-        matches!(refused, Err(Error::Endpoint(ref m)) if m.contains("urn:shacl:validate")),
-        "{refused:?}"
+fn shapes_the_validator_cannot_compile_stop_the_host() {
+    let config = Scratch::new("bad-shapes");
+    write_config(&config);
+    config.write(
+        "layers/msg.shapes.ttl",
+        &SHAPES.replace("sh:maxLength 4000", "sh:maxLength \"long\""),
     );
-    assert_eq!(f.host.layer("talk").unwrap().last_seq(), 0);
+    let state = Scratch::new("bad-shapes-state");
+    let refused = ikigai_layers::Host::open(config.path(), state.path());
+    let Err(e) = refused else {
+        panic!("shapes the validator cannot compile opened a host");
+    };
+    assert!(e.to_string().contains("cannot compile"), "{e}");
 }
 
 #[test]

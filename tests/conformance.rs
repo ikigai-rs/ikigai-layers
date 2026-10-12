@@ -14,10 +14,8 @@
 //! - **The entries, author-graph and latest reads are cacheable on the `say` thread**: the
 //!   kernel cuts `urn:layer:{layer}:say` after every Sink through it, which is the only way
 //!   an entry is written. `tests/channel.rs` pins the cut.
-//! - **Feeds, the participants graph and manifests are live**: a feed waits on the next
-//!   event, and the two config reads are re-read per request because enrollment is live.
-//! - **`urn:shacl:validate` is in this kernel** because admission composes it; it is
-//!   ikigai-shacl's to conform, and its own suite does.
+//! - **Feeds, the participants graphs and manifests are live**: a feed waits on the next
+//!   event, and the config reads are re-read per request because enrollment is live.
 //! - **`out` is probed under root too**, so it refuses every probe the same way (a drop is
 //!   attributed): `OUTPUTS` is waived for the tuples door with that reason. **`take` is not
 //!   fired at all**: it is destructive, and would refuse under root for the same reason.
@@ -42,17 +40,13 @@ const LAYERS: [&str; 3] = ["notes", "talk", "talk-bobby"];
 fn suite(f: &common::Fixture, entry_ids: &[(String, String)], receipt: &str) -> Suite {
     let mut suite = Suite::new()
         .host_named_space(SPACE_LABEL, Arc::new(ikigai_layers::space(&f.host)))
-        .opt_out(
-            "shacl-validate",
-            None,
-            "ikigai-shacl's own conformance suite covers it; it is bound here only because \
-             admission composes it",
-        )
         .fixture(Probe::new("collab", Verb::Source).binding("name", "bobby"))
+        .fixture(Probe::new("collab-participants", Verb::Source).binding("name", "bobby"))
         .fixture(Probe::new("layers-feed", Verb::Source).arg("after", "talk:0"))
         .live("layers-feed")
         .live("layers-participants")
-        .live("collab");
+        .live("collab")
+        .live("collab-participants");
     for layer in LAYERS {
         let id = |action: &str| format!("layer-{layer}-{action}");
         let entry = &entry_ids
@@ -159,16 +153,12 @@ fn conforms() {
 fn the_walk_reaches_every_resource_this_crate_binds() {
     let (f, ids, receipt) = seeded();
     let report = suite(&f, &ids, &receipt).run_blocking(&f.kernel);
-    let mut walked: Vec<&str> = report
-        .walked
-        .iter()
-        .map(String::as_str)
-        .filter(|id| *id != "shacl-validate")
-        .collect();
+    let mut walked: Vec<&str> = report.walked.iter().map(String::as_str).collect();
     walked.sort_unstable();
     walked.dedup();
     let mut expected = vec![
         "collab".to_string(),
+        "collab-participants".to_string(),
         "layers-feed".to_string(),
         "layers-participants".to_string(),
     ];
