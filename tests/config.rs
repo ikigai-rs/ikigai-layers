@@ -32,6 +32,21 @@ fn the_fixture_loads() {
         ["bobby", "chris"]
     );
     assert_eq!(loaded.participants.members.len(), 7);
+    // `match` is off unless a definition turns it on (ledger #1327).
+    assert!(loaded.layers.values().all(|def| !def.matching));
+}
+
+/// `match = true` turns a tuplespace's templates on, and is read as written.
+#[test]
+fn match_is_a_tuplespace_option_off_by_default() {
+    let config = Scratch::new("cfg");
+    write_config(&config);
+    config.write("layers/extra.toml", &layer("tuplespace", "match = true\n"));
+    config.write("layers/quiet.toml", &layer("tuplespace", "match = false\n"));
+    let loaded = Config::load(config.path()).unwrap();
+    assert!(loaded.layers["extra"].matching);
+    assert!(!loaded.layers["quiet"].matching);
+    assert!(!loaded.layers["tasks-bobby"].matching);
 }
 
 /// Brian, 2026-10-10: a manifest naming a layer another manifest names is REFUSED unless
@@ -132,11 +147,13 @@ fn a_definition_may_not_say_what_it_does_not_mean() {
         (layer("channel", "shared = [\"Bob\"]\n"), "no collaboration name"),
         // An option of another model says something the layer does not mean.
         (layer("channel", "addressed = true\n"), "a tuplespace option"),
+        (layer("channel", "match = false\n"), "a tuplespace option"),
         (
             layer("tuplespace", "about = \"urn:example:p\"\n"),
             "a channel option",
         ),
         (layer("tuplespace", "addressed = \"yes\"\n"), "invalid type"),
+        (layer("tuplespace", "match = \"yes\"\n"), "invalid type"),
     ];
     for (text, says) in cases {
         let config = Scratch::new("cfg");

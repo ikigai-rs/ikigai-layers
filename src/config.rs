@@ -112,6 +112,15 @@ pub struct LayerDef {
     /// A tuplespace's only: whether a tuple carrying `ik:addressedTo` may be taken only by a
     /// participant it names (default `false`).
     pub addressed: bool,
+    /// A tuplespace's only: whether `rd` takes a `match=` template (default `false`).
+    ///
+    /// Off unless the definition says `match = true`, because a template is the CALLER's
+    /// SPARQL ASK, evaluated against every pending tuple with no bound on time: the store's
+    /// limits bound its size and nesting, and a cross join of a few triple patterns is small
+    /// and shallow and still runs for minutes (ledger #1327). So a layer whose readers include
+    /// anyone it would not hand a thread to keeps it off; `rd` without a template, `out` and
+    /// `take` are the same either way.
+    pub matching: bool,
     /// The collaborations this layer is declared shared with. `None` means private: at
     /// most one manifest may mount it.
     pub shared: Option<BTreeSet<String>>,
@@ -127,6 +136,8 @@ struct LayerToml {
     entry_max: Option<toml::Value>,
     about: Option<String>,
     addressed: Option<bool>,
+    #[serde(rename = "match")]
+    matching: Option<bool>,
     shared: Option<Vec<String>>,
 }
 
@@ -193,6 +204,12 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
                 "{at}: `addressed` is a tuplespace option; a channel has no take"
             ))
         }
+        Model::Channel if parsed.matching.is_some() => {
+            return err(format!(
+                "{at}: `match` is a tuplespace option (its `rd match=` template); a channel \
+                 has no rd"
+            ))
+        }
         Model::Tuplespace if parsed.about.is_some() => {
             return err(format!(
                 "{at}: `about` is a channel option (its `latest about=` read); a tuplespace \
@@ -247,6 +264,7 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         entry_max,
         about,
         addressed: parsed.addressed.unwrap_or(false),
+        matching: parsed.matching.unwrap_or(false),
         shared,
     })
 }

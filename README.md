@@ -46,7 +46,7 @@ holds and nothing more.
 | `urn:layer:{layer}:graph:{slug}` | Source | one author's entries | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:latest` | Source | the newest entry `about=` an IRI that nothing supersedes | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:tuples` | Sink | `out`: drop one tuple; answers its subject | `urn:cap:layer:out:{layer}` |
-| `urn:layer:{layer}:tuples` | Source | `rd`: the pending tuples (or one, or those a `match=` ASK holds for); `state=taken`: the receipts | `urn:cap:layer:read:{layer}` |
+| `urn:layer:{layer}:tuples` | Source | `rd`: the pending tuples (or one, or, where the layer sets `match = true`, those a `match=` ASK holds for); `state=taken`: the receipts | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:tuples` | Delete | `take`: remove one tuple by its subject, atomically | `urn:cap:layer:take:{layer}` |
 | `urn:layer:{layer}:receipt:{id}` | Source | one take: who, when, and the tuple as taken (never changes) | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:feed` | Source | events `after=` a sequence, `wait=` up to 60 s | `urn:cap:layer:feed:{layer}` |
@@ -103,10 +103,23 @@ model     = "tuplespace"
 shapes    = "tasks.shapes.ttl"
 context   = "tasks.context.jsonld"
 addressed = true                 # a tuple with ik:addressedTo is taken only by an addressee
+match     = false                # optional; the default: `rd match=` is refused
 ```
 
-`addressed` is a tuplespace's option and `about` a channel's; naming one on the other
-model is refused, like a misspelled key.
+`addressed` and `match` are a tuplespace's options and `about` a channel's; naming one on
+the other model is refused, like a misspelled key.
+
+**`match` is off by default.** A `match=` template is the caller's own SPARQL ASK,
+evaluated against every pending tuple, and nothing bounds how long that takes: the
+store's limits bound a query's size and nesting, and a cross join of triple patterns is a
+few hundred bytes and shallow, yet costs about 8x more for each pattern added: seconds on
+one tuple at eight patterns, minutes at ten, and again for every pending tuple (ledger
+#1327). So on a layer that does not say `match = true`, `rd match=` is refused
+(`InvalidArgument` on `match`, naming the option) and the tuples door does not declare
+`match` at all; `rd` without a template, `out` and `take` are unchanged. Turn it on only
+for a layer whose every reader you would hand a thread to. The time bound itself belongs
+in ikigai-store's evaluator, which intray uses; until it lands, this option decides who
+may send a template, not what one costs.
 
 Every node shape must be `sh:closed true` and the shapes must target at least one class;
 an entry must be typed with a targeted class and only those (SHACL answers "conforms" for

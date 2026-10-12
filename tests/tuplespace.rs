@@ -609,7 +609,7 @@ fn each_verb_needs_its_own_exact_capability() {
 
 #[test]
 fn rd_reads_by_template_and_pages_by_sequence() {
-    let f = fixture();
+    let f = matching_fixture();
     out(&f.kernel, &plasma(), &offer("a")).unwrap();
     let other = offer("b").replace(
         "https://github.com/ikigai-rs/ikigai-layers",
@@ -868,4 +868,99 @@ fn a_tuplespace_binds_its_own_doors_only() {
             "{absent}: {refused:?}"
         );
     }
+}
+
+/// A cross join of `k` triple patterns whose FILTER reads every variable: about 7.5x the work
+/// per pattern on a seven-triple tuple, ~300 bytes at k = 7 (ledger #1327). Nothing about its
+/// size or nesting is unusual, so the store's limits pass it.
+fn cross_join(k: usize) -> String {
+    let patterns: String = (0..k).map(|i| format!("?s{i} ?p{i} ?o{i} . ")).collect();
+    let all: Vec<String> = (0..k).map(|i| format!("STR(?o{i})")).collect();
+    format!(
+        "ASK {{ {patterns}FILTER(CONCAT({}) = \"never\") }}",
+        all.join(", ")
+    )
+}
+
+/// The tuples door's self-description, as JSON.
+fn meta(f: &Fixture) -> String {
+    text(
+        &issue(
+            &f.kernel,
+            Verb::Meta,
+            TUPLES,
+            &[("as", "application/json")],
+            &Capability::root(),
+        )
+        .expect("Meta"),
+    )
+}
+
+/// The fixture with `tasks-bobby` opted in to templates (`match = true`).
+fn matching_fixture() -> Fixture {
+    let mut f = fixture();
+    f.config.write(
+        "layers/tasks-bobby.toml",
+        "model = \"tuplespace\"\nlabel = \"Tasks for Bobby\"\nshapes = \"tasks.shapes.ttl\"\ncontext = \"tasks.context.jsonld\"\naddressed = true\nmatch = true\n",
+    );
+    f.reopen();
+    f
+}
+
+/// Ledger #1327: `rd match=` evaluates the caller's ASK with no time bound, so a tuplespace
+/// layer refuses a template unless its definition says `match = true`, and names the option.
+/// Before this, the same request was ACCEPTED (asserted on an empty space, so the test stays
+/// fast: acceptance is decided before any tuple is read).
+#[test]
+fn a_template_is_refused_unless_the_layer_allows_it() {
+    let f = fixture();
+    out(&f.kernel, &plasma(), &offer("a")).unwrap();
+    let template = cross_join(8);
+    assert!(template.len() < 400, "{}", template.len());
+    for args in [
+        vec![("match", template.as_str())],
+        vec![("match", "ASK { ?s ?p ?o }")],
+        vec![("match", "ASK { ?s ?p ?o }"), ("state", "taken")],
+        vec![("match", "ASK { ?s ?p ?o }"), ("tuple", &offer_iri("a"))],
+    ] {
+        let refused = issue(
+            &f.kernel,
+            Verb::Source,
+            TUPLES,
+            &args,
+            &tasker(&participant("bobby")),
+        );
+        assert!(
+            matches!(&refused, Err(Error::InvalidArgument { name, detail })
+                if name == "match" && detail.contains("`match = true`")
+                    && detail.contains("no time bound")),
+            "{args:?}: {refused:?}"
+        );
+    }
+    // Without a template, rd is unchanged: the list, one tuple, the receipts.
+    assert_eq!(rd(&f.kernel, &[]).lines().count(), 1);
+    assert!(rd(&f.kernel, &[("tuple", &offer_iri("a"))]).contains("Task a"));
+    assert_eq!(rd(&f.kernel, &[("state", "taken")]), "");
+    // And a layer that does not take a template does not offer one.
+    let meta = meta(&f);
+    assert!(!meta.contains("\"match\""), "{meta}");
+    assert!(meta.contains("\"tuple\""), "{meta}");
+}
+
+/// Opted in, a template works, and the pathological one is still ACCEPTED: the option is a
+/// stopgap that decides WHO may send one, not a bound on what one costs (that belongs in
+/// ikigai-store's evaluator, ledger #1327).
+#[test]
+fn an_opted_in_layer_takes_a_template_and_offers_it() {
+    let f = matching_fixture();
+    let answered = issue(
+        &f.kernel,
+        Verb::Source,
+        TUPLES,
+        &[("match", &cross_join(8))],
+        &tasker(&participant("bobby")),
+    );
+    assert!(answered.is_ok(), "{answered:?}");
+    let meta = meta(&f);
+    assert!(meta.contains("\"match\""), "{meta}");
 }
