@@ -98,6 +98,18 @@ pub const NS: &str = "urn:layers:gateway:";
 /// The closed shapes of an ask layer: `gw:Request`, `gw:Reply`, `gw:Failure`.
 pub const SHAPES: &str = include_str!("../gateway/layers/gateway.shapes.ttl");
 /// The egress context of an ask layer (no `@vocab`).
+///
+/// `argument` is the one term a request may carry more than once, so it is
+/// `"@container": "@set"`: in the JSON-LD face it is ALWAYS an array, one argument or
+/// several, and absent when there are none. Every other term is single-valued.
+///
+/// ```
+/// let context: serde_json::Value =
+///     serde_json::from_str(ikigai_layers::gateway::CONTEXT).unwrap();
+/// let argument = &context["@context"]["argument"];
+/// assert_eq!(argument["@id"], "gw:argument");
+/// assert_eq!(argument["@container"], "@set");
+/// ```
 pub const CONTEXT: &str = include_str!("../gateway/layers/gateway.context.jsonld");
 /// The closed shapes of an event channel: `gw:Invalidation`.
 pub const EVENT_SHAPES: &str = include_str!("../gateway/layers/gateway-events.shapes.ttl");

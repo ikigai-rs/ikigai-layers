@@ -1081,3 +1081,121 @@ fn an_asker_reading_only_json_crosses_the_gateway() {
     assert_eq!(activity["associatedWith"], participant("a"));
     assert_eq!(bytes_of(&reply_node(&receipt, &reply)), "THE VALUE OF X");
 }
+
+/// A request's `argument` has ONE JSON shape for a participant reading the JSON-LD face (ledger
+/// #1377): always an array, one argument or several, and absent when there are none. A
+/// resolver with only a JSON parser branches on nothing.
+#[test]
+fn a_requests_arguments_are_always_a_json_array() {
+    let g = gateway_fixture();
+    let asks = [
+        ("args0", Ask::new(Verb::Source, iri("urn:data:x"))),
+        (
+            "args1",
+            Ask::new(Verb::Source, iri("urn:data:x")).arg("shout", "yes"),
+        ),
+        (
+            "args2",
+            Ask::new(Verb::Source, iri("urn:data:x"))
+                .arg("shout", "yes")
+                .arg("as", "text/plain"),
+        ),
+    ];
+    for (correlation, ask) in &asks {
+        let turtle = gateway::request_turtle(LAYER, correlation, ask).unwrap();
+        g.out("a", LAYER, &turtle).unwrap();
+    }
+    let taken = |correlation: &str| -> serde_json::Value {
+        let subject = gateway::request_subject(LAYER, correlation);
+        let repr = issue(
+            &g.layers,
+            Verb::Delete,
+            &format!("urn:layer:{LAYER}:tuples"),
+            &[("tuple", &subject), ("as", "application/ld+json")],
+            &g.grant("r1"),
+        )
+        .unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&repr.bytes).unwrap();
+        reply_node(&doc, &subject)
+    };
+    let none = taken("args0");
+    assert!(none.get("argument").is_none(), "{none}");
+    let one = taken("args1");
+    assert_eq!(one["argument"], serde_json::json!(["shout=yes"]), "{one}");
+    let two = taken("args2");
+    let mut both: Vec<&str> = two["argument"]
+        .as_array()
+        .unwrap_or_else(|| panic!("two arguments, not an array: {two}"))
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    both.sort_unstable();
+    assert_eq!(both, ["as=text/plain", "shout=yes"]);
+}
+
+/// The review behind ledger #1377, kept as a test: in each shipped gateway context, a term is
+/// `"@container": "@set"` exactly when its shape lets the property repeat (no `sh:maxCount 1`),
+/// so every term has one JSON shape: a value, or always an array. A property a later shape
+/// change lets repeat fails here until its term says `@set`.
+#[test]
+fn a_term_is_a_set_exactly_when_its_shape_lets_it_repeat() {
+    const SH: &str = "http://www.w3.org/ns/shacl#";
+    for (shapes, context) in [(SHAPES, CONTEXT), (EVENT_SHAPES, EVENT_CONTEXT)] {
+        // Each property shape's path, and whether it says sh:maxCount 1.
+        let triples = ikigai_layers::rdf::parse_turtle(shapes).unwrap();
+        let mut paths: std::collections::BTreeMap<String, (String, bool)> = Default::default();
+        for t in &triples {
+            let key = t.subject.to_string();
+            let entry = paths.entry(key).or_default();
+            if t.predicate.as_str() == format!("{SH}path") {
+                if let oxrdf::Term::NamedNode(p) = &t.object {
+                    entry.0 = p.as_str().to_string();
+                }
+            }
+            if t.predicate.as_str() == format!("{SH}maxCount") {
+                if let oxrdf::Term::Literal(l) = &t.object {
+                    entry.1 = l.value() == "1";
+                }
+            }
+        }
+        let repeats: std::collections::BTreeMap<String, bool> = paths
+            .into_values()
+            .filter(|(path, _)| !path.is_empty())
+            .map(|(path, single)| (path, !single))
+            .collect();
+        // Each term of the context, by the IRI it expands to.
+        let doc: serde_json::Value = serde_json::from_str(context).unwrap();
+        let terms = doc["@context"].as_object().unwrap();
+        let expand = |id: &str| -> String {
+            match id.split_once(':') {
+                Some((prefix, local)) => match terms.get(prefix).and_then(|v| v.as_str()) {
+                    Some(ns) => format!("{ns}{local}"),
+                    None => id.to_string(),
+                },
+                None => id.to_string(),
+            }
+        };
+        let mut checked = 0;
+        for (name, definition) in terms {
+            let (id, set) = match definition {
+                serde_json::Value::Object(d) => (
+                    d["@id"].as_str().unwrap(),
+                    d.get("@container") == Some(&serde_json::json!("@set")),
+                ),
+                serde_json::Value::String(id) => (id.as_str(), false),
+                other => panic!("`{name}`: {other}"),
+            };
+            if let Some(repeat) = repeats.get(&expand(id)) {
+                assert_eq!(
+                    set,
+                    *repeat,
+                    "`{name}`: its shape {} it repeat, so its term {} be @set",
+                    if *repeat { "lets" } else { "does not let" },
+                    if *repeat { "must" } else { "need not" },
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no term matched a shape path");
+    }
+}

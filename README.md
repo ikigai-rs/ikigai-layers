@@ -444,7 +444,7 @@ kernels, `plasma` and `remote`, each asking the other.
 
 | tuple | name | carries |
 | --- | --- | --- |
-| `gw:Request` | `urn:layer:{layer}:request:{correlation}` | `gw:correlation`, `gw:resource` (an IRI), `ik:verb` (one of `Source`, `Sink`, `Exists`, `Delete`, `Meta`), any number of `gw:argument` (`name=value`, text), at most one `ik:addressedTo` (the one resolver that may take it) |
+| `gw:Request` | `urn:layer:{layer}:request:{correlation}` | `gw:correlation`, `gw:resource` (an IRI), `ik:verb` (one of `Source`, `Sink`, `Exists`, `Delete`, `Meta`), any number of `gw:argument` (`name=value`, text; its term is `@set`, so in JSON it is always an array, and absent when there are none), at most one `ik:addressedTo` (the one resolver that may take it) |
 | `gw:Reply` | `urn:layer:{layer}:reply:{correlation}` | `ik:offer` (the request), `ik:addressedTo` (the asker), `gw:correlation`, `ik:mediaType` (with parameters), `gw:bytes` (`xsd:base64Binary`) |
 | `gw:Failure` | `urn:layer:{layer}:reply:{correlation}` | `ik:offer`, `ik:addressedTo`, `gw:correlation`, `gw:errorKind` (one of `unresolved`, `missing-argument`, `invalid-argument`, `endpoint`, `denied`, `not-found`, `conflict`, `timeout`, `unavailable`, `depth-exceeded`: ikigai-core's `Error::kind()`), and `gw:message`, `gw:argumentName`, `gw:target`, `gw:depth` as the kind has them |
 | `gw:Invalidation` | an entry, said about `<urn:layer:new>` | `gw:resource` (what changed, the sayer's own), `gw:reason` |
@@ -500,7 +500,9 @@ What crosses, Turtle or JSON-LD under the layer's own context (`Source
 urn:layer:{layer}:context`); answers come back as Turtle, or, asked `as=application/ld+json`,
 as that context compacted (the reply below as `{"@context": …, "@graph": [{"@id": …,
 "@type": "Reply", "offer": …, "mediaType": "text/plain", "bytes": "aGVsbG8=", "seq": "3",
-…}]}`), which a participant with no RDF parser reads as plain JSON:
+…}]}`), which a participant with no RDF parser reads as plain JSON. Every term has ONE JSON
+shape: `argument` is defined `"@container": "@set"`, so it is an array for one argument as
+for several (and absent for none), and every other term is single-valued:
 
 ```json
 { "@context": { "…": "the layer's context, inline" },
@@ -522,6 +524,14 @@ as that context compacted (the reply below as `{"@context": …, "@graph": [{"@i
     prov:wasAttributedTo <urn:collab:participant:remote> ;
     dcterms:created "2026-10-12T18:00:01.000Z"^^xsd:dateTime ;
     ik:seq 3 .
+```
+
+The shipped context is what fixes the JSON shape, so a participant can rely on it:
+
+```rust
+let context: serde_json::Value =
+    serde_json::from_str(ikigai_layers::gateway::CONTEXT).unwrap();
+assert_eq!(context["@context"]["argument"]["@container"], "@set");
 ```
 
 Not built yet, and stated so nothing is inferred from silence: the HTTP front itself; any

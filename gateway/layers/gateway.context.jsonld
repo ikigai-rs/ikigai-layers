@@ -10,7 +10,7 @@
   "correlation": "gw:correlation",
   "resource": { "@id": "gw:resource", "@type": "@id" },
   "verb": "ik:verb",
-  "argument": "gw:argument",
+  "argument": { "@id": "gw:argument", "@container": "@set" },
   "offer": { "@id": "ik:offer", "@type": "@id" },
   "addressedTo": { "@id": "ik:addressedTo", "@type": "@id" },
   "mediaType": "ik:mediaType",
