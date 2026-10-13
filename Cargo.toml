@@ -70,10 +70,17 @@ toml = "0.8"
 # sub-request to `urn:shacl:validate`: a door that bound the validator for admission's sake
 # offered it to every enrolled participant, since it declares no capability (ledger #1266).
 # Linked, the door binds the layer space alone and nothing reaches the validator but a write
-# the host is admitting. 0.3.3 is the current line and the one every test here ran against
-# (validation on a sized pool, ledger #1102); a host linking ikigai-shacl itself (cli does)
-# unifies with it. ⚠ `"0.3.3"` is `<0.4.0`.
-ikigai-shacl = "0.3.3"
+# the host is admitting. **Without default features** (ledger #1405): the rudof-free subset
+# validator, which refuses BY NAME any construct outside its subset rather than skipping it.
+# A layer host need not link rudof's network stack or its stack-overflow risk, and a consumer
+# that takes this crate as a dev-dependency (gonk) no longer has rudof unified back into its
+# TEST build, so its tests validate with the engine its binary ships. A host that wants rudof
+# enables `ikigai-shacl/rudof` itself, and cargo unifies (cli does). **0.3.6 is the floor**: the
+# first whose subset implements `sh:closed` and `sh:ignoredProperties`, which every layer's
+# shapes use (`config.rs` refuses an open node shape); 0.3.5's subset refused every layer at
+# open. `tests/subset.rs` validates every shipped shapes graph with the subset by name.
+# ⚠ `"0.3.6"` is `<0.4.0`.
+ikigai-shacl = { version = "0.3.6", default-features = false }
 # The JSON-LD faces (ledger #1371): every graph answer `as=application/ld+json` is the layer's
 # egress context, pruned and compacted by `urn:jsonld:prune`, which the host evaluates in a
 # kernel of its OWN (`json::Egress`) and binds into no space a door serves: the prune declares

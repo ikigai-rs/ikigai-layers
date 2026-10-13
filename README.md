@@ -556,7 +556,11 @@ State is plain files: each entry is written once to
   [ikigai-shacl](https://crates.io/crates/ikigai-shacl) and validates every write itself,
   so a door binds no `urn:shacl:validate`: that endpoint declares no capability, and bound
   in a door it would be offered to every participant. A layer whose shapes the validator
-  cannot compile stops the host at open.
+  cannot compile stops the host at open. The host takes ikigai-shacl WITHOUT its `rudof`
+  feature, so admission runs the subset validator (ikigai-shacl's README, "Two validators"),
+  which refuses by name any construct outside its subset rather than skipping it: write a
+  layer's shapes within the subset, or the layer never opens. A host binary that enables
+  `ikigai-shacl/rudof` itself validates with rudof instead (cargo unifies the feature).
 - **Who a participant can learn about.** `urn:layers:participants` is the whole host's
   roster and no generated grant reads it; each participant reads
   `urn:collab:{name}:participants` for its own collaborations, under the
