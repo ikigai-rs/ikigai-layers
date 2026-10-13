@@ -35,7 +35,13 @@
 //! refused as Denied before the kernel sees it). Every asker on a layer gets the same authority:
 //! the layer grant says who may ask, the resolver says what asking can do.
 //!
+//! The example runs both ends against a scratch layer host in this process, so it needs the
+//! `host` feature; a participant built without it uses exactly the same `Asker`, `Resolver` and
+//! `follow`, over a [`Door`] onto some other host's door.
+//!
 //! ```
+//! # #[cfg(feature = "host")]
+//! # fn main() {
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //! use futures::executor::block_on;
@@ -75,6 +81,9 @@
 //! assert_eq!(answer.unwrap().repr_type.media_type, "text/turtle");
 //! # drop(host);
 //! # std::fs::remove_dir_all(&dir).unwrap();
+//! # }
+//! # #[cfg(not(feature = "host"))]
+//! # fn main() {}
 //! ```
 
 use std::collections::BTreeMap;
@@ -671,7 +680,7 @@ fn repr_type(canonical: &str) -> ReprType {
 /// An invalidation, as its owner says it on an event channel, in Turtle: `resource` changed,
 /// because `reason`. About `<urn:layer:new>`; the host names it and stamps who, when, where.
 pub fn invalidation_turtle(resource: &Iri, reason: &str) -> String {
-    let subject = node(crate::channel::NEW_SUBJECT);
+    let subject = node(crate::name::NEW_SUBJECT);
     let triples = [
         Triple::new(
             subject.clone(),
@@ -735,7 +744,7 @@ async fn wait_feed<D: Door + ?Sized>(
 ) -> Result<u64> {
     // The feed waits in whole seconds, at most 60; a shorter deadline races it below.
     let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
-    let secs = secs.min(crate::feed::MAX_WAIT_SECS).to_string();
+    let secs = secs.min(crate::time::MAX_WAIT_SECS).to_string();
     let after = after.to_string();
     let repr = door
         .call(layer_request(

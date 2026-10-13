@@ -25,6 +25,9 @@
 //! - **`space(&host)` is HOST-named** (`SPACE-NAME`, ledger #987): its doors are the layers
 //!   the configuration defines.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use std::sync::Arc;

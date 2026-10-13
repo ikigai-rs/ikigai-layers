@@ -4,6 +4,9 @@
 //! not ikigai take either end; nothing here may depend on either side being ikigai except the
 //! reference participant itself.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use std::sync::atomic::{AtomicBool, Ordering};

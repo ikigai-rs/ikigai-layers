@@ -1,5 +1,8 @@
 //! Feeds: gapless, cursor-resumable, and a long poll that wakes on the next event.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use std::time::{Duration, Instant};

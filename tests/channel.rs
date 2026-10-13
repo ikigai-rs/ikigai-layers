@@ -1,6 +1,9 @@
 //! The channel model: `say` names, stamps, admits and appends; the reads answer what was
 //! said; nothing is ever changed.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use common::*;

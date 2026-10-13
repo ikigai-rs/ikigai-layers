@@ -468,6 +468,20 @@ with `serve`, `serve_pending` and `follow` takes requests, resolves them and ans
 representation larger than the layer's `entry_max` (base64 costs a third) is answered as an
 `endpoint` failure saying so.
 
+**A participant does not build the host** (ledger #1403). The host is the crate's default
+feature, `host`; a tool that only talks to some layer door takes the crate without it and gets
+the `gateway`, `name`, `rdf`, `id` and `time` modules, with no store, no space, no validator,
+no JSON-LD processor, and so no oxigraph and no RocksDB:
+
+```toml
+[dependencies]
+ikigai-layers = { version = "0.2.10", default-features = false }
+```
+
+A participant over the QUIC door went from 241 packages to 101 with it. The `Door` it hands
+an `Asker` or a `Resolver` is one method, `call(Request) -> Result<Representation>`, over any
+ikigai wire client.
+
 ### The wire contract a participant carries
 
 Every step is an ordinary request at the layer host, so this is also what an HTTP front for

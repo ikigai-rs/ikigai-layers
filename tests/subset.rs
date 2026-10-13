@@ -11,6 +11,9 @@
 //! undeclared property is refused with a `sh:ClosedConstraintComponent` result naming that
 //! property, while its `rdf:type` (the one ignored property) is not.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use ikigai_layers::gateway::{self, EVENT_SHAPES, SHAPES};

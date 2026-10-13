@@ -1,5 +1,8 @@
 //! The enrollment generator, and the manifold a generated grant projects.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use std::collections::BTreeSet;

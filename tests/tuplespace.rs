@@ -1,6 +1,9 @@
 //! The tuplespace model (ledger #1187): offers and addressed reports, an atomic take that
 //! is a claim, receipts naming the taker, subject uniqueness and idempotent replay.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use std::sync::{Arc, Barrier};

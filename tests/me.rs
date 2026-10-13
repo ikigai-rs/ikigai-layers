@@ -2,6 +2,9 @@
 //! minted for it, what the participants graph says it is, and the collaborations that grant it
 //! anything, under the GENERATED grant it already holds.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use std::collections::BTreeSet;

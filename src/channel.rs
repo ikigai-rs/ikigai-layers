@@ -28,8 +28,9 @@ use crate::id;
 use crate::name::Participant;
 use crate::rdf::{self, node, object_iri, subject_iri};
 
-/// The subject an author writes for the entry the host is about to name.
-pub const NEW_SUBJECT: &str = "urn:layer:new";
+/// The subject an author writes for the entry the host is about to name (defined in
+/// [`crate::name`], where a participant built without the host links it too).
+pub use crate::name::NEW_SUBJECT;
 
 /// The suffix of an entry file still being written (`.{id}.ttl.partial`, beside where it
 /// will be stored): never read as an entry, and cleared on open.

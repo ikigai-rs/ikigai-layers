@@ -1,5 +1,8 @@
 //! Configuration: what an operator may write, and the isolation rule.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use common::*;

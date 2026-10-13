@@ -4,6 +4,9 @@
 //! list or a write's answer is plain JSON. Every assertion here reads with `serde_json` alone:
 //! no RDF parser on the reading side.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use common::*;

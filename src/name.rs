@@ -21,6 +21,11 @@ pub const HOST_CLIENT_PREFIX: &str = "urn:iki:host:";
 /// The longest collaboration or participant short name.
 pub const MAX_SHORT_NAME: usize = 48;
 
+/// The subject an author writes for the entry the host is about to name: the host rewrites it
+/// to the entry's own IRI when it admits the write. A participant writes it, the host reads it,
+/// so it lives here, where both sides link it (also `channel::NEW_SUBJECT`).
+pub const NEW_SUBJECT: &str = "urn:layer:new";
+
 /// A word in the `[a-z0-9-]` alphabet, starting with a letter or digit and not ending with a
 /// hyphen, and no Windows device name ([`is_windows_device`]). The ledger's rule for names,
 /// used for layers, collaborations and participants; a layer's name is joined to the state
