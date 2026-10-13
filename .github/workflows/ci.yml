@@ -8,11 +8,18 @@ concurrency:
 jobs:
   ci:
     uses: ikigai-rs/.github/.github/workflows/rust.yml@main
-    # No inputs, and each absence is a decision:
+    # The participant build: `default-features = false`, what a tool that only talks to a layer
+    # door links (ledger #1403). The shared `no default features` job lints, tests and documents
+    # it, and the forbid list checks it stays free of the host's storage: no store, no space, no
+    # validator, no JSON-LD processor, and so no oxigraph and no RocksDB.
+    with:
+      no-default-features: true
+      no-default-features-forbid: "ikigai-store ikigai-intray ikigai-shacl ikigai-jsonld oxigraph oxrocksdb-sys rocksdb toml"
+    # The other inputs are absent, and each absence is a decision:
     #
     # `features:` — none: the one feature, `host`, is DEFAULT, so `--all-targets` here sees
     # every target (the `ikigai-layers` binary, `required-features = ["host"]`, included). The
-    # build WITHOUT it is the `participant` job below.
+    # build WITHOUT it is the `no default features` job above.
     #
     # `wasm-lib:` — not claimed. Layer state is files under a state directory (`std::fs`)
     # and a feed's wait runs on futures-timer's helper thread; a browser host is not a
@@ -22,39 +29,3 @@ jobs:
     #
     # msrv — automatic: `rust-version` in Cargo.toml makes the shared workflow run clippy
     # and test on it.
-
-  # The participant build: `default-features = false`, what a tool that only talks to a layer
-  # door links (ledger #1403). The shared gates build the default features only, and rust.yml's
-  # `features` input can add features but cannot turn the default off, so without this job
-  # nothing would lint, test or document the gateway as a participant builds it, nor check that
-  # it stays free of the host's storage.
-  participant:
-    name: participant (no default features)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: participant
-      - run: cargo clippy --no-default-features --all-targets -- -D warnings
-      - run: cargo test --no-default-features
-      - run: cargo doc --no-deps --no-default-features
-        env:
-          RUSTDOCFLAGS: -D warnings
-      # The point of the feature: no store, no space, no validator, no JSON-LD processor, and so
-      # no oxigraph and no RocksDB. A positive check (the tree must print, and must name this
-      # crate), so a failing `cargo tree` cannot read as "absent".
-      - name: the participant build links none of the host's storage
-        run: |
-          tree=$(cargo tree --no-default-features -e normal --prefix none)
-          grep -q '^ikigai-layers ' <<<"$tree"
-          if grep -E '^(ikigai-store|ikigai-intray|ikigai-shacl|ikigai-jsonld|oxigraph|oxrocksdb-sys|rocksdb|toml) ' <<<"$tree"; then
-            echo "::error::the --no-default-features graph links the layer host's storage"
-            exit 1
-          fi
