@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-layers"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 # The toolchain the shared CI's msrv job builds and tests on: the line the ecosystem's other
 # declared crates (ikigai-script, ikigai-log, ikigai-cms-web) hold. Nothing here needs more
