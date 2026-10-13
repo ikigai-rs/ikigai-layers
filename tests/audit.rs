@@ -3,6 +3,9 @@
 //! suites use (a kernel binding the layer space alone, principals minted as a door mints
 //! them).
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use common::*;

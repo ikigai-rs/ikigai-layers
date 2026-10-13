@@ -19,6 +19,33 @@ readme = "README.md"
 keywords = ["ikigai", "roc", "collaboration", "capability", "rdf"]
 categories = ["network-programming"]
 
+[features]
+# **`host` is the layer host** (ledger #1403): `Host`, the layer space a door binds, the
+# configuration, both access models, the feeds, the JSON faces, the enrollment generator and its
+# binary. It is ON by default, so a consumer that names this crate plainly builds exactly what it
+# built before. A PARTICIPANT, a tool that only talks to some layer door (the gateway's `Asker`
+# and `Resolver` over QUIC, say), takes `default-features = false` and links the modules that
+# need no host: `gateway`, `name`, `rdf`, `id` and `time`. Without `host` there is no
+# ikigai-store, ikigai-intray, ikigai-shacl or ikigai-jsonld in the graph, and so no oxigraph
+# and no RocksDB (`oxrocksdb-sys`, which intray's oxigraph builds by default): the ci.yml job
+# `participant` checks that the tree stays free of them.
+default = ["host"]
+host = [
+    "dep:ikigai-intray",
+    "dep:ikigai-store",
+    "dep:ikigai-shacl",
+    "dep:ikigai-jsonld",
+    "dep:oxrdfio",
+    "dep:serde",
+    "dep:toml",
+]
+
+# The enrollment generator is the host's: it reads the host's configuration.
+[[bin]]
+name = "ikigai-layers"
+path = "src/bin/ikigai-layers.rs"
+required-features = ["host"]
+
 [dependencies]
 # The published kernel, the SAME one the hosts link. **0.1.98 is a TESTED floor**: the API
 # this crate calls arrived earlier (the principal a door mints into the capability,
@@ -38,14 +65,14 @@ ikigai-core = "0.1.98"
 # every tuplespace layer of a host shares ONE overdue count (ledger #1362). The unique staging
 # names two concurrent takes depend on (ledger #877) arrived by 0.1.45.
 # ⚠ `"0.1.55"` is `<0.2.0`.
-ikigai-intray = "0.1.55"
+ikigai-intray = { version = "0.1.55", optional = true }
 # The time budget a `match=` runs within (`ikigai_store::budget::{EvaluationBudget,
 # TimeBudget}`): the host builds ONE from `layers.toml` and hands a clone to every tuplespace
 # layer, and `Host::match_budget` exposes it. Named directly because those types are in this
 # crate's API; it is the same store intray links (cargo unifies them). 0.2.19 is the current
 # line and the one every test here ran against; `EvaluationBudget` arrived in 0.2.18.
 # ⚠ `"0.2.19"` is `<0.3.0`.
-ikigai-store = "0.2.19"
+ikigai-store = { version = "0.2.19", optional = true }
 # `Endpoint::invoke` is `async_trait`, and every endpoint here carries the host's state.
 async-trait = "0.1"
 # `futures::lock::Mutex` serializes a layer's writes ACROSS the validation sub-request (an
@@ -61,11 +88,12 @@ futures-timer = "3"
 base64 = "0.22.1"
 # Layer definitions, manifests and enrollment are TOML (the config home's language); the
 # feed's JSON face, the enrollment the generator writes and the validation report admission
-# reads are JSON.
-serde = { version = "1", features = ["derive"] }
+# reads are JSON. `serde_json` alone is outside `host`: a participant's gateway reads a feed's
+# `last` from its JSON face.
+serde = { version = "1", features = ["derive"], optional = true }
 serde_json = "1"
 # ⚠ `"0.8"` is `<0.9`. 0.8.23 is the line the ecosystem's other TOML readers hold.
-toml = "0.8"
+toml = { version = "0.8", optional = true }
 # Admission's validator, LINKED and called by the host itself (`validate_report`), never a
 # sub-request to `urn:shacl:validate`: a door that bound the validator for admission's sake
 # offered it to every enrolled participant, since it declares no capability (ledger #1266).
@@ -80,14 +108,14 @@ toml = "0.8"
 # shapes use (`config.rs` refuses an open node shape); 0.3.5's subset refused every layer at
 # open. `tests/subset.rs` validates every shipped shapes graph with the subset by name.
 # ⚠ `"0.3.6"` is `<0.4.0`.
-ikigai-shacl = { version = "0.3.6", default-features = false }
+ikigai-shacl = { version = "0.3.6", default-features = false, optional = true }
 # The JSON-LD faces (ledger #1371): every graph answer `as=application/ld+json` is the layer's
 # egress context, pruned and compacted by `urn:jsonld:prune`, which the host evaluates in a
 # kernel of its OWN (`json::Egress`) and binds into no space a door serves: the prune declares
 # no capability, so bound in a door it would be offered to every participant (ledger #1266's
 # shape). 0.2.2 is the first with `prune` and the line every test here ran against.
 # ⚠ `"0.2.2"` is `<0.3.0`.
-ikigai-jsonld = "0.2.2"
+ikigai-jsonld = { version = "0.2.2", optional = true }
 # Turtle and JSON-LD in (`say`'s content, the shapes and the participants graph), Turtle out.
 # 0.3.4 / 0.2.4 / 0.2.6 are the model, serializer and parser oxigraph 0.5.11 uses, so the
 # graph carries one of each beside ikigai-shacl in a host. oxrdfio's JSON-LD parser has no
@@ -96,7 +124,7 @@ ikigai-jsonld = "0.2.2"
 # with oxigraph.
 oxrdf = "0.3.4"
 oxttl = "0.2.4"
-oxrdfio = "0.2.6"
+oxrdfio = { version = "0.2.6", optional = true }
 
 [dev-dependencies]
 # The module recipe as one test. 0.6.2 is the CURRENT published definition of "done", and

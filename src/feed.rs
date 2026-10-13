@@ -31,8 +31,9 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-/// The longest `wait=` a feed read may ask for, in seconds.
-pub const MAX_WAIT_SECS: u64 = 60;
+/// The longest `wait=` a feed read may ask for, in seconds (defined in [`crate::time`], where a
+/// participant built without the host links it too).
+pub use crate::time::MAX_WAIT_SECS;
 
 /// The most events one feed answer carries. A follower reads again after the last
 /// sequence number it received; the sequence is gapless, so paging loses nothing.

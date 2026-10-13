@@ -9,6 +9,9 @@
 //! one in `tasks-two`, which answered `Ok` at `max_overdue = 1`. Now the host builds one
 //! budget and every layer gets a clone, so the second is refused (`Unavailable`).
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use std::time::{Duration, Instant};

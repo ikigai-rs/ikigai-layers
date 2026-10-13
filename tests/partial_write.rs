@@ -9,6 +9,8 @@
 //! every test in this file holds one lock for its whole run: no other test writes while the
 //! limit is lowered.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
 #![cfg(unix)]
 
 mod common;

@@ -6,6 +6,9 @@
 //! opened for every append, so swapping it for a directory makes exactly the next append
 //! fail (EISDIR, which root gets too) while everything else the write does still succeeds.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use std::path::PathBuf;

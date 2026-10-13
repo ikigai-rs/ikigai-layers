@@ -3,6 +3,9 @@
 //! #1266): a participant can learn who its collaborators are, one state directory has one
 //! host, and admission needs no validator in the door's kernel.
 
+// Every test here drives a layer host (ledger #1403: a participant build has none).
+#![cfg(feature = "host")]
+
 mod common;
 
 use std::collections::BTreeSet;

@@ -45,6 +45,21 @@
 //!
 //! (Capabilities abbreviated: `read:{layer}` is `urn:cap:layer:read:{layer}`.)
 //!
+//! # Two builds: the host, and a participant
+//!
+//! The `host` feature, on by default, is the layer host: [`Host`], the layer space a door
+//! binds, the configuration, both access models, the feeds, the JSON faces and the enrollment
+//! generator. A PARTICIPANT, a tool that only talks to a layer door (the [`gateway`]'s `Asker`
+//! and `Resolver` over QUIC, say), takes the crate with `default-features = false` and gets the
+//! modules that need no host: [`gateway`], [`name`], [`rdf`], [`id`] and [`time`]. That build
+//! links no store, no space, no validator and no JSON-LD processor, so no oxigraph and no
+//! RocksDB (ledger #1403).
+//!
+//! ```toml
+//! [dependencies]
+//! ikigai-layers = { version = "0.2.10", default-features = false }
+//! ```
+//!
 //! # A host library
 //!
 //! No binary serves anything: a host (ikigai-cli's `serve`, ledger #1188) opens a [`Host`]
@@ -59,6 +74,8 @@
 //! while another host holds it (ledger #1267).
 //!
 //! ```
+//! # #[cfg(feature = "host")]
+//! # fn main() {
 //! use std::sync::Arc;
 //! use ikigai_core::{Kernel, SystemClock};
 //!
@@ -72,6 +89,9 @@
 //! # drop(kernel);
 //! # drop(host);
 //! # std::fs::remove_dir_all(&dir).unwrap();
+//! # }
+//! # #[cfg(not(feature = "host"))]
+//! # fn main() {}
 //! ```
 //!
 //! # Isolation
@@ -90,26 +110,42 @@
 
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
+// The crate's documentation describes the host, and links its items. Built without `host`
+// (a participant), those items do not exist, so the links have nowhere to go: allowed in that
+// build only. The default build, which `cargo doc` in the shared CI runs with `-D warnings`,
+// still refuses every broken link, in every module.
+#![cfg_attr(not(feature = "host"), allow(rustdoc::broken_intra_doc_links))]
 
+#[cfg(feature = "host")]
 pub mod channel;
+#[cfg(feature = "host")]
 pub mod config;
+#[cfg(feature = "host")]
 pub mod endpoints;
+#[cfg(feature = "host")]
 pub mod feed;
 pub mod gateway;
+#[cfg(feature = "host")]
 pub mod grants;
+#[cfg(feature = "host")]
 pub mod host;
 pub mod id;
+#[cfg(feature = "host")]
 pub mod json;
 pub mod name;
 pub mod rdf;
 pub mod time;
+#[cfg(feature = "host")]
 pub mod tuplespace;
 
+#[cfg(feature = "host")]
 pub use config::{Config, ConfigError, LayerDef, Manifest, Model};
+#[cfg(feature = "host")]
 pub use endpoints::space;
+#[cfg(feature = "host")]
 pub use host::Host;
 
-/// The README's examples, compiled so they cannot rot.
-#[cfg(doctest)]
+/// The README's examples, compiled so they cannot rot. They open a host, so they run with it.
+#[cfg(all(doctest, feature = "host"))]
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;

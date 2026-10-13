@@ -1,6 +1,11 @@
-//! The kernel clock's reading as an `xsd:dateTime`, with no date library.
+//! The kernel clock's reading as an `xsd:dateTime`, with no date library, and the bound on a
+//! feed's wait.
 
 use ikigai_core::Time;
+
+/// The longest `wait=` a feed read may ask for, in seconds. The host refuses more, and a
+/// participant clamps to it, so both sides link it from here (also `feed::MAX_WAIT_SECS`).
+pub const MAX_WAIT_SECS: u64 = 60;
 
 /// `time` as an `xsd:dateTime` in UTC with milliseconds: `2026-10-10T12:00:00.000Z`.
 ///
