@@ -18,6 +18,8 @@ homepage = "https://github.com/ikigai-rs/ikigai-layers"
 readme = "README.md"
 keywords = ["ikigai", "roc", "collaboration", "capability", "rdf"]
 categories = ["network-programming"]
+# history/ is a record of the door, not part of the library.
+exclude = ["history/"]
 
 [features]
 # **`host` is the layer host** (ledger #1403): `Host`, the layer space a door binds, the
