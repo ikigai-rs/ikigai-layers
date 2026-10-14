@@ -24,6 +24,10 @@
 //!   `tuples` thread**, which the kernel cuts after every out and take through it.
 //! - **`space(&host)` is HOST-named** (`SPACE-NAME`, ledger #987): its doors are the layers
 //!   the configuration defines.
+//! - **No `Suite::own` scope**: the kernel binds the layer space alone, as a door does, so
+//!   every endpoint walked is this crate's and nothing would be inherited. The second test
+//!   pins the walked list exactly, which is what an `own` scope plus an `inherited` pin
+//!   would buy.
 
 // Every test here drives a layer host (ledger #1403: a participant build has none).
 #![cfg(feature = "host")]
@@ -72,6 +76,11 @@ fn minted(f: &common::Fixture, principal: &str) -> Capability {
 fn suite(f: &common::Fixture, entry_ids: &[(String, String)], receipt: &str) -> Suite {
     let mut suite = Suite::new()
         .host_named_space(SPACE_LABEL, Arc::new(ikigai_layers::space(&f.host)))
+        // The kernel is a scratch fixture, so the write doors are held to REQUIRED too
+        // (conformance 0.8.0, ledger #329): `say` and `out` without their required
+        // `content` must be refused, typed. A drop wrongly accepted would write into the
+        // fixture's own layers, nothing else.
+        .required_on_mutating()
         .fixture(Probe::new("collab", Verb::Source).binding("name", "bobby"))
         .fixture(Probe::new("collab-participants", Verb::Source).binding("name", "bobby"))
         .fixture(Probe::new("layers-feed", Verb::Source).arg("after", "talk:0"))
