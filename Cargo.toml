@@ -127,12 +127,13 @@ oxttl = "0.2.4"
 oxrdfio = { version = "0.2.6", optional = true }
 
 [dev-dependencies]
-# The module recipe as one test. 0.6.2 is the CURRENT published definition of "done", and
-# the floor this suite needs: `Fixture::capability` probes `urn:layers:me` and the write
-# doors AS a minted participant instead of waiving their checks (ledger #1321).
-# ⚠ `"0.6.2"` is `<0.7.0`: raise it when conformance moves, or this crate keeps reporting
+# The module recipe as one test. 0.8.0 is the CURRENT published definition of "done", and
+# the floor this suite needs: `Fixture::capability` (0.6.2) probes `urn:layers:me` and the
+# write doors AS a minted participant instead of waiving their checks (ledger #1321), and
+# `Suite::required_on_mutating` (0.8.0) holds `say` and `out` to REQUIRED (ledger #329).
+# ⚠ `"0.8.0"` is `<0.9.0`: raise it when conformance moves, or this crate keeps reporting
 # green against an old rulebook.
-ikigai-conformance = "0.6.2"
+ikigai-conformance = "0.8.0"
 # `TurtleRenderer` gives the test kernels a JSON Meta face (without one the engine's routing
 # cannot be observed), and its `VOCABULARY` is the conformance suite's oracle: 0.1.96 is the
 # first that defines the layer family these graphs use, so the dev pin is what makes the
