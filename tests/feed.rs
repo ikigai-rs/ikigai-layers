@@ -5,6 +5,7 @@
 
 mod common;
 
+use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -19,6 +20,29 @@ fn feed(f: &Fixture, layer: &str, args: &[(&str, &str)]) -> Result<String, Error
         &member(&participant("bobby")),
     )
     .map(|r| text(&r))
+}
+
+/// The longest wait a feed takes, in seconds: a wait that answers before it was woken.
+const WAIT: &str = "60";
+
+/// Wait until `n` reads are parked on the host's change signal, so the event the test sends
+/// next certainly arrives DURING a wait, on a machine of any speed (ledger #1685). A 300 ms
+/// sleep stood in for this, and a waiter thread that started later than that read the event
+/// without ever waiting: the test passed without testing a wake. A `waiter` that ends first
+/// fails the test rather than leave it polling.
+fn until_parked<T>(f: &Fixture, n: usize, waiter: &ScopedJoinHandle<'_, T>) {
+    let started = Instant::now();
+    while f.host.notify().parked() < n {
+        assert!(
+            !waiter.is_finished(),
+            "the read answered before it was seen waiting"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "no read parked within 60 s"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 #[test]
@@ -64,8 +88,8 @@ fn a_wait_returns_on_the_next_event() {
     let f = fixture();
     let started = Instant::now();
     let got = std::thread::scope(|s| {
-        let waiter = s.spawn(|| feed(&f, "talk", &[("after", "0"), ("wait", "20")]));
-        std::thread::sleep(Duration::from_millis(300));
+        let waiter = s.spawn(|| feed(&f, "talk", &[("after", "0"), ("wait", WAIT)]));
+        until_parked(&f, 1, &waiter);
         say(
             &f.kernel,
             "talk",
@@ -76,8 +100,9 @@ fn a_wait_returns_on_the_next_event() {
         waiter.join().unwrap().unwrap()
     });
     assert!(got.starts_with("1 "), "{got}");
+    // A parked read answers before its bound only when an event wakes it.
     assert!(
-        started.elapsed() < Duration::from_secs(10),
+        started.elapsed() < Duration::from_secs(WAIT.parse().unwrap()),
         "woke on the event, not the timer: {:?}",
         started.elapsed()
     );
@@ -90,11 +115,12 @@ fn a_wait_with_nothing_to_say_ends_at_its_bound() {
     let got = feed(&f, "talk", &[("after", "0"), ("wait", "1")]).unwrap();
     assert_eq!(got, "");
     assert!(started.elapsed() >= Duration::from_millis(900));
-    // An event in ANOTHER layer is not this layer's event: the wait goes on to its bound.
-    let started = Instant::now();
+    // An event in ANOTHER layer is not this layer's event: it wakes the parked read (the
+    // signal is the host's), which finds nothing of its own and parks AGAIN rather than
+    // answer, and it answers only with its own layer's event.
     let got = std::thread::scope(|s| {
-        let waiter = s.spawn(|| feed(&f, "talk", &[("after", "0"), ("wait", "1")]));
-        std::thread::sleep(Duration::from_millis(200));
+        let waiter = s.spawn(|| feed(&f, "talk", &[("after", "0"), ("wait", WAIT)]));
+        until_parked(&f, 1, &waiter);
         say(
             &f.kernel,
             "notes",
@@ -102,10 +128,14 @@ fn a_wait_with_nothing_to_say_ends_at_its_bound() {
             &message("elsewhere"),
         )
         .unwrap();
+        // The say took every parked waker (`Notify::bump`) before it returned, so a read
+        // parked now has parked again.
+        until_parked(&f, 1, &waiter);
+        say(&f.kernel, "talk", &participant("brian"), &message("here")).unwrap();
         waiter.join().unwrap().unwrap()
     });
-    assert_eq!(got, "");
-    assert!(started.elapsed() >= Duration::from_millis(900));
+    assert_eq!(got.lines().count(), 1, "{got}");
+    assert!(got.starts_with("1 "), "{got}");
 }
 
 #[test]
@@ -161,11 +191,11 @@ fn one_wait_over_several_layers() {
         let waiter = s.spawn(|| {
             multi(
                 &f,
-                &[("after", "talk:2,talk-bobby:1"), ("wait", "20")],
+                &[("after", "talk:2,talk-bobby:1"), ("wait", WAIT)],
                 &both,
             )
         });
-        std::thread::sleep(Duration::from_millis(300));
+        until_parked(&f, 1, &waiter);
         say(&f.kernel, "talk-bobby", &brian, &message("b2")).unwrap();
         waiter.join().unwrap().unwrap()
     });
