@@ -1,0 +1,13 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix ik: <https://ikigai-rs.dev/ns#> .
+<urn:layer:talk:entry:01m53cy1f10000000000004> a ik:Message ;
+	ik:body "A magical prediction for a moment in the future when the time is right: 1220120b5615d8842571d0d27c7b3d9e1ccd31feb8ae5bb6bbbbd8ebe05717de6d63" ;
+	prov:wasAttributedTo <urn:collab:participant:bobby> ;
+	dcterms:created "2026-10-16T22:22:15.009Z"^^xsd:dateTime ;
+	ik:seq 4 .
+
