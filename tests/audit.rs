@@ -143,49 +143,109 @@ fn nested_json_ld(depth: usize) -> String {
     body
 }
 
+/// The environment variable that turns [`depth_probe_child`] on and names its write.
+const DEPTH_PROBE: &str = "IKIGAI_LAYERS_DEPTH_PROBE";
+
+/// The child's half of the depth test: inert unless a parent named a write (`say` or `out`).
+/// It makes one deeply nested write on its own 2 MiB thread, as on a door, prints the outcome
+/// on one line, and exits before the harness can.
+#[test]
+fn depth_probe_child() {
+    let Ok(write) = std::env::var(DEPTH_PROBE) else {
+        return;
+    };
+    let f = fixture();
+    let body = nested_json_ld(1500);
+    assert!(body.len() < 16 * 1024, "{} bytes", body.len());
+    let (verb, iri, cap) = match write.as_str() {
+        "say" => (
+            Verb::Sink,
+            "urn:layer:talk:say",
+            member(&participant("bobby")),
+        ),
+        "out" => (Verb::Sink, TUPLES, tasker(&gonk())),
+        other => panic!("no write named {other}"),
+    };
+    let outcome = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn_scoped(scope, || {
+                issue(&f.kernel, verb, iri, &[("content", &body)], &cap)
+            })
+            .expect("a thread")
+            .join()
+            .expect("the write returns rather than panicking")
+    });
+    let outcome = match outcome {
+        Err(ikigai_core::Error::InvalidArgument { name, detail }) => {
+            format!("refused {name}: {detail}")
+        }
+        other => format!("not refused: {other:?}"),
+    };
+    println!("\nOUTCOME {}", outcome.replace('\n', " "));
+    // `exit` runs no destructors: remove the scratch directories first.
+    drop(f);
+    std::process::exit(0);
+}
+
+/// The parent's half: run one write in a child process and return the outcome it printed, or
+/// fail naming how the child died. An abort kills only the child, so it reads here as one
+/// failed test rather than the whole test binary going down.
+fn depth_probe(write: &str) -> String {
+    let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "depth_probe_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(DEPTH_PROBE, write)
+        .output()
+        .expect("the probe child runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "a `{write}` of JSON-LD nested 1500 deep did not survive a 2 MiB thread ({}): {}",
+        out.status,
+        stderr
+            .lines()
+            .find(|l| l.contains("overflow"))
+            .unwrap_or(&stderr)
+    );
+    let at = stdout
+        .find("\nOUTCOME ")
+        .unwrap_or_else(|| panic!("the `{write}` probe reported nothing: {stdout}"));
+    stdout[at + "\nOUTCOME ".len()..]
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 /// JSON-LD's parser recurses once per nested object, so one `say` (or `out`) of deeply nested
 /// JSON-LD under the layer's own size bound overflowed the stack of the thread serving it,
 /// and a stack overflow ABORTS the process: one participant holding `say` on any layer could
 /// stop the host for everyone. Measured on a 2 MiB thread (the door's runtime gives its
-/// workers 2 MiB): 1500 levels, 12 KB, aborted a release build. Each write runs here on its
-/// own 2 MiB thread, as on a door; before the fix this test's process aborted.
+/// workers 2 MiB): 1500 levels, 12 KB, aborted a release build. Each deep write runs in a
+/// CHILD PROCESS (this test binary re-executed with [`DEPTH_PROBE`] set) on its own 2 MiB
+/// thread, as on a door, because an abort cannot be caught in-process: a regression fails this
+/// one test with the signal named, and the rest of the suite still reports (ledger #1728).
 #[test]
 fn deeply_nested_json_ld_is_refused_not_a_stack_overflow() {
-    let f = fixture();
-    let on_a_door_thread = |verb: Verb, iri: &'static str, cap: Capability, body: String| {
-        std::thread::scope(|scope| {
-            std::thread::Builder::new()
-                .stack_size(2 * 1024 * 1024)
-                .spawn_scoped(scope, || {
-                    issue(&f.kernel, verb, iri, &[("content", &body)], &cap)
-                })
-                .expect("a thread")
-                .join()
-                .expect("the write returns rather than taking the thread down")
-        })
-    };
-    let body = nested_json_ld(1500);
-    assert!(body.len() < 16 * 1024, "{} bytes", body.len());
-    let said = on_a_door_thread(
-        Verb::Sink,
-        "urn:layer:talk:say",
-        member(&participant("bobby")),
-        body.clone(),
-    );
-    match said {
-        Err(ikigai_core::Error::InvalidArgument { name, detail }) => {
-            assert_eq!(name, "content");
-            assert!(detail.contains("nested"), "{detail}");
-        }
-        other => panic!("a refusal on content, not {other:?}"),
-    }
-    let dropped = on_a_door_thread(Verb::Sink, TUPLES, tasker(&gonk()), body);
+    let said = depth_probe("say");
     assert!(
-        matches!(dropped, Err(ikigai_core::Error::InvalidArgument { ref name, .. }) if name == "content"),
-        "{dropped:?}"
+        said.starts_with("refused content: ") && said.contains("nested"),
+        "a refusal on content, not {said}"
+    );
+    let dropped = depth_probe("out");
+    assert!(
+        dropped.starts_with("refused content: "),
+        "a refusal on content, not {dropped}"
     );
     // A JSON-LD entry nested as deep as real entries are still parses: the bound refuses
     // only depth no entry needs.
+    let f = fixture();
     let ok = format!(
         r#"{{"@context": {{"ik": "{IK}", "body": {{"@id": "ik:body"}}}},
             "@id": "urn:layer:new", "@type": "ik:Message", "body": [{{"@value": "nested [{{x}}] \"ok\""}}]}}"#
