@@ -11,6 +11,9 @@ between two worlds. A **layer** is the third option: one independent, named spac
 read and write through the same doors, under grants that say exactly which layers each one
 holds and nothing more.
 
+Layers are inspired by Daniel Suarez's novel *Daemon*
+([daniel-suarez.com](https://www.daniel-suarez.com/)).
+
 - **A layer is configuration, not code.** One TOML file picks an access model, names the
   closed SHACL shapes every write must conform to and the JSON-LD context that is the
   layer's egress allowlist. A new channel for a new collaboration is a file.
