@@ -354,7 +354,12 @@ use serde_json::Value;
 # write("participants.ttl", "<urn:collab:participant:brian> a <http://xmlns.com/foaf/0.1/Person> .\n");
 # write("collabs/team.toml", "[[mount]]\nlayer = \"talk\"\nbrian = [\"read\", \"say\"]\n\n\
 #     [[mount]]\nlayer = \"tasks\"\nbrian = [\"read\", \"out\", \"take\"]\n");
-let host = ikigai_layers::Host::open(&config, &state).expect("a configuration that checks");
+# write("state.key", age::secrecy::ExposeSecret::expose_secret(
+#     &age::x25519::Identity::generate().to_string()));
+// The host's key: an age identity file (`age-keygen -o state.key`), whose path a deployment
+// hands over. Every state file is sealed to it.
+let key = ikigai_layers::StateKey::load(config.join("state.key")).expect("an age identity");
+let host = ikigai_layers::Host::open(&config, &state, &key).expect("a configuration that checks");
 let kernel = Kernel::new(Arc::new(ikigai_layers::space(&host))).with_clock(Arc::new(SystemClock));
 // What a door mints for a participant holding these grants.
 let brian = Capability::scoped([
@@ -478,7 +483,7 @@ no JSON-LD processor, and so no oxigraph and no RocksDB:
 
 ```toml
 [dependencies]
-ikigai-layers = { version = "0.2.10", default-features = false }
+ikigai-layers = { version = "0.3.0", default-features = false }
 ```
 
 A participant over the QUIC door went from 241 packages to 101 with it. The `Door` it hands
@@ -561,8 +566,8 @@ asker).
 ## Hosting it
 
 A host library: a host (ikigai-cli's `serve`) opens a `Host` over its configuration and
-state directories and binds `ikigai_layers::space(&host)`, alone, on a kernel with a clock.
-State is plain files: each entry is written once to
+state directories, with the state's key, and binds `ikigai_layers::space(&host)`, alone, on a
+kernel with a clock. State is files, sealed at rest (see below): each entry is written once to
 `<state>/{layer}/graphs/{author}/{id}.ttl`, and each feed is `<state>/{layer}/feed.log`.
 
 - **One host per state directory.** The host holds `<state>/host.lock` exclusively while it
@@ -593,7 +598,67 @@ at `<state>/{layer}/tuples/`, which the host links and calls under its own
 `urn:cap:space:*`: participants never hold a space capability, and the space is never
 bound into the kernel. Intray's take is a rename, which is what makes it atomic. Receipts
 are `<state>/{layer}/receipts/{id}.ttl`. Keep the state directory out of any intray root a
-reactor watches.
+reactor watches. The space holds each tuple sealed, so intray cannot read a tuple's Turtle:
+the host evaluates a `match=` template itself, over the opened pending tuples, within the same
+bounds and the same time budget intray applies.
+
+### State, sealed at rest
+
+**Every file the host writes under `<state>/{layer}/` is age ciphertext** (age v1, X25519),
+sealed to the host's own key and opened with it, so the files, a backup of them or an image
+of the disk say nothing without the key (ledger #2011). An entry, a receipt (committed or
+staged) and a tuple are each one age file; the feed stays a log of lines, each line one age
+file in base64, so an append is still one synced write and a torn last line is still dropped
+on open. age gives every file its own random file key, wrapped to the host's recipient:
+envelope encryption. File names keep their suffixes; what is in a file says what it is.
+
+- **The key is an age identity file** (`age-keygen -o state.key`), and the host is handed its
+  PATH: `StateKey::load(path)`, then `Host::open(config, state, &key)`. Never an environment
+  variable, so a deployment can hand the file over from an in-memory credential store
+  (systemd's `LoadCredentialEncrypted`, say). A missing or unreadable file, or one holding no
+  identity, is refused at open naming the file, never echoing a line of it.
+- **A wrong key opens nothing.** `<state>/key-check.age` is a fixed text sealed to the key,
+  written after the first open with it succeeds. An identity that cannot open it is refused
+  before anything else is read, so a wrong key never opens an empty layer.
+- **A state directory written before 0.3.0 is refused** while it holds any plaintext file,
+  naming one. Open it ONCE with `Host::open_with(config, state, &key, Migration::Reseal)`: every
+  plaintext file is sealed in place, file by file, each written whole to a `.partial` file and
+  renamed over the old one, and each layer is then opened again refusing plaintext, so the
+  open fails if anything was left behind. A run that stops part-way is resumed by running it
+  again. A tuple sealed is a new intray id, so it is stored again and the old copy taken; a
+  stop between the two leaves it twice, and the next open keeps one.
+- **Rotation is the same option.** The identity file may hold several identities: files are
+  sealed to the FIRST and opened with any. Put the new identity first and keep the old one
+  after it, open once with `Migration::Reseal` (everything sealed only to the old identity is
+  sealed again, to the new one), then drop the old line.
+- **Modes.** Files are created `0600` and directories `0700`, and every open makes what is
+  already there the same (state written before 0.3.0, and the files intray creates with the
+  process's umask).
+- **What it does not cover.** The running host reads entries to validate them against the
+  layer's shapes and opens tuples to evaluate `match=` templates, so it holds plaintext while
+  it works; whoever holds the identity file reads everything; and a directory under the state
+  directory that no layer definition names is not the host's state, so it is neither read
+  nor sealed. Intray's `.err` notes beside a quarantined tuple stay plain text: an id and a
+  fixed sentence. End-to-end sealing, which the host itself cannot read, is separate work.
+
+```rust
+use ikigai_layers::{Host, Migration, StateKey};
+
+# let dir = std::env::temp_dir().join(format!("ikigai-layers-readme-key-{}", std::process::id()));
+# let (config, state) = (dir.join("config"), dir.join("state"));
+# std::fs::create_dir_all(&config).unwrap();
+# std::fs::write(dir.join("state.key"), age::secrecy::ExposeSecret::expose_secret(
+#     &age::x25519::Identity::generate().to_string())).unwrap();
+let key = StateKey::load(dir.join("state.key")).expect("an age identity file");
+// Once, over a directory a host before 0.3.0 wrote (or to rotate the key):
+let host = Host::open_with(&config, &state, &key, Migration::Reseal).expect("sealed in place");
+drop(host);
+// Every open after that:
+let host = Host::open(&config, &state, &key).expect("a sealed state directory");
+assert!(state.join("key-check.age").exists());
+# drop(host);
+# std::fs::remove_dir_all(&dir).unwrap();
+```
 
 ## License
 

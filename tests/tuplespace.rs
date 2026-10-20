@@ -805,7 +805,7 @@ fn a_staged_receipt_whose_tuple_is_pending_is_dropped_on_open() {
         .join("receipts")
         .join(".taking")
         .join(format!("{cid}.0000000000000000000000002.ttl"));
-    std::fs::write(&staged, "never read").unwrap();
+    std::fs::write(&staged, sealed(f.config.path(), b"never read")).unwrap();
     f.reopen();
     assert!(!staged.exists());
     assert_eq!(rd(&f.kernel, &[]).lines().count(), 1);

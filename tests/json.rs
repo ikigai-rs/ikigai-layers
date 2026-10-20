@@ -227,7 +227,8 @@ fn what_the_context_does_not_define_is_absent() {
         "[[mount]]\nlayer = \"narrow\"\nbrian = [\"read\", \"feed\", \"say\"]\n",
     );
     let state = Scratch::new("json-prune-state");
-    let host = Host::open(config.path(), state.path()).expect("the narrow layer opens");
+    let host = Host::open(config.path(), state.path(), &common::key(config.path()))
+        .expect("the narrow layer opens");
     let kernel = kernel_over(&host);
     let who = cap(
         &brian(),
@@ -305,7 +306,7 @@ fn a_context_that_redefines_a_stamp_term_is_refused_at_open() {
         write_config(&config);
         config.write("layers/msg.context.jsonld", context);
         let state = Scratch::new("json-refuse-state");
-        let refused = Host::open(config.path(), state.path())
+        let refused = Host::open(config.path(), state.path(), &common::key(config.path()))
             .err()
             .unwrap_or_else(|| panic!("opened over {context}"))
             .to_string();

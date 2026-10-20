@@ -224,7 +224,8 @@ fn shapes_the_validator_cannot_compile_stop_the_host() {
         &SHAPES.replace("sh:maxLength 4000", "sh:maxLength \"long\""),
     );
     let state = Scratch::new("bad-shapes-state");
-    let refused = ikigai_layers::Host::open(config.path(), state.path());
+    let refused =
+        ikigai_layers::Host::open(config.path(), state.path(), &common::key(config.path()));
     let Err(e) = refused else {
         panic!("shapes the validator cannot compile opened a host");
     };
@@ -435,11 +436,16 @@ fn a_feed_that_lost_an_event_is_repaired_on_open() {
     say(&f.kernel, "talk", &bobby(), &message("one")).unwrap();
     let two = say(&f.kernel, "talk", &bobby(), &message("two")).unwrap();
     // A crash between storing the entry and logging it: the last feed line is gone, and
-    // a torn half-line was left behind.
+    // a torn half-line was left behind (each line is sealed, so half of a sealed line).
     let log = f.state.path().join("talk/feed.log");
     let text = std::fs::read_to_string(&log).unwrap();
-    let first_line = text.lines().next().unwrap();
-    std::fs::write(&log, format!("{first_line}\n2\t2026")).unwrap();
+    let mut lines = text.lines();
+    let (first_line, second) = (lines.next().unwrap(), lines.next().unwrap());
+    std::fs::write(
+        &log,
+        format!("{first_line}\n{}", &second[..second.len() / 2]),
+    )
+    .unwrap();
     f.reopen();
     let feed = source(
         &f.kernel,

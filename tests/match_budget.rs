@@ -285,7 +285,8 @@ fn a_budget_the_host_cannot_serve_is_refused_at_open() {
     ] {
         f.config.write(config::HOST_FILE, text);
         let state = Scratch::new("refused-state");
-        let refusal = match Host::open(f.config.path(), state.path()) {
+        let refusal = match Host::open(f.config.path(), state.path(), &common::key(f.config.path()))
+        {
             Ok(_) => panic!("{text:?} should stop the host"),
             Err(e) => e.to_string(),
         };

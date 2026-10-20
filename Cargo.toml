@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-layers"
-version = "0.2.10"
+version = "0.3.0"
 edition = "2021"
 # The toolchain the shared CI's msrv job builds and tests on: the line the ecosystem's other
 # declared crates (ikigai-script, ikigai-log, ikigai-cms-web) hold. Nothing here needs more
@@ -33,12 +33,15 @@ exclude = ["history/"]
 # `participant` checks that the tree stays free of them.
 default = ["host"]
 host = [
+    "dep:age",
     "dep:ikigai-intray",
     "dep:ikigai-store",
     "dep:ikigai-shacl",
     "dep:ikigai-jsonld",
+    "dep:oxigraph",
     "dep:oxrdfio",
     "dep:serde",
+    "dep:spargebra",
     "dep:toml",
 ]
 
@@ -127,6 +130,32 @@ ikigai-jsonld = { version = "0.2.2", optional = true }
 oxrdf = "0.3.4"
 oxttl = "0.2.4"
 oxrdfio = { version = "0.2.6", optional = true }
+# State sealed at rest (`at_rest`, ledger #2011): every file the host writes is an age file
+# sealed to the host's own recipient. **Why `age` and not ikigai-encrypt**, the ecosystem's home
+# for age: ikigai-encrypt 0.2.0 offers only its two ENDPOINTS (`urn:encrypt:encrypt` and
+# `urn:encrypt:decrypt`), which resolve the key as a kernel resource and answer armored text;
+# its seal and open are private functions. A host sealing its own files on every write needs a
+# library call, so this takes the SAME crate at the SAME line ikigai-encrypt takes (0.11, no
+# default features: no plugins, no scrypt passphrases, no armor) and calls it directly; no
+# cryptography is written here. When ikigai-encrypt exposes seal/open as library functions,
+# this should call those instead. ikigai-encrypt's low-order recipient check is not needed:
+# every recipient here is derived from the host's own identity (`Identity::to_public`), which is
+# never a low-order point. 0.11.1 is the line whose `Encryptor::with_recipients` takes an
+# iterator and whose `Decryptor` is one type, the API used here; tested against 0.11.5.
+# ⚠ `"0.11.1"` is `<0.12.0`.
+age = { version = "0.11.1", default-features = false, optional = true }
+# A tuple is sealed before intray stores it, so intray's own `match=` (a SPARQL ASK over the
+# Turtle of each tuple it holds) can no longer read it: the host opens the pending tuples and
+# evaluates the template itself, with ikigai-store's bounds (`limits::check_sparql`, the
+# algebra bounds `budget::check_query`, `service::refuse_service_with` and the refusing
+# `service::evaluator`, all inside the host's one `EvaluationBudget`), exactly as intray does.
+# These two are the parser and the store that evaluation runs on, the lines ikigai-store and
+# intray already put in the graph (oxigraph 0.5.11 pins spargebra =0.4.7), so nothing new is
+# compiled. Without default features: no RocksDB from this edge (intray's oxigraph brings its
+# own defaults, as before). ⚠ `"0.5.11"` is `<0.6.0` and `"0.4.7"` is `<0.5.0`: move them with
+# oxigraph.
+oxigraph = { version = "0.5.11", default-features = false, optional = true }
+spargebra = { version = "0.4.7", optional = true }
 
 [dev-dependencies]
 # The module recipe as one test. 0.8.0 is the CURRENT published definition of "done", and

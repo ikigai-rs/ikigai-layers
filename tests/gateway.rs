@@ -91,7 +91,8 @@ fn gateway_fixture() -> Gateway {
     config.write("participants.ttl", PARTICIPANTS);
     config.write("collabs/gateway.toml", MANIFEST);
     let state = Scratch::new("gw-state");
-    let host = Host::open(config.path(), state.path()).expect("the gateway configuration");
+    let host = Host::open(config.path(), state.path(), &common::key(config.path()))
+        .expect("the gateway configuration");
     let layers = kernel_over(&host);
     let loaded = Config::load(config.path()).unwrap();
     let fingerprints = load_fingerprints(config.path(), &loaded).unwrap();
@@ -829,7 +830,8 @@ fn the_shipped_example_configuration_opens() {
         "a file in gateway/layers this test does not copy"
     );
     let state = Scratch::new("gw-example-state");
-    let host = Host::open(config.path(), state.path()).expect("the example opens");
+    let host = Host::open(config.path(), state.path(), &common::key(config.path()))
+        .expect("the example opens");
     let names: Vec<&String> = host.layers().keys().collect();
     assert_eq!(
         names,

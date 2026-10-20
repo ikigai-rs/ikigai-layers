@@ -157,11 +157,12 @@ fn an_entry_write_left_partial_by_a_crash_is_cleared_on_open() {
     let torn = graphs
         .join("bobby")
         .join(format!(".{}.ttl.partial", id::mint(1_791_590_499_000, 2)));
-    std::fs::write(
-        &torn,
-        "@prefix ik: <https://ikigai-rs.dev/ns#> .\n<urn:layer:talk:en",
-    )
-    .unwrap();
+    // What a crash mid-write leaves: part of a sealed entry (state is sealed at rest).
+    let entry = graphs
+        .join("bobby")
+        .join(format!("{}.ttl", one.rsplit(':').next().unwrap()));
+    let sealed = std::fs::read(&entry).unwrap();
+    std::fs::write(&torn, &sealed[..sealed.len() / 2]).unwrap();
     f.reopen();
     assert!(!torn.exists(), "cleared on open");
     let two = say(&f.kernel, "talk", &bobby, &message("two")).unwrap();
@@ -188,11 +189,12 @@ fn a_torn_staged_receipt_is_discarded_on_open() {
         "0".repeat(64),
         id::mint(1_791_590_499_000, 2)
     ));
-    std::fs::write(
-        &torn,
-        "@prefix prov: <http://www.w3.org/ns/prov#> .\n<urn:la",
-    )
-    .unwrap();
+    // What a crash mid-write leaves: part of a sealed receipt (state is sealed at rest).
+    let receipts = f.state.path().join(TASKS).join("receipts");
+    let committed = files(&receipts);
+    assert_eq!(committed.len(), 1, "{committed:?}");
+    let sealed = std::fs::read(receipts.join(&committed[0])).unwrap();
+    std::fs::write(&torn, &sealed[..sealed.len() / 2]).unwrap();
     f.reopen();
     assert!(!torn.exists(), "discarded on open");
     assert_eq!(

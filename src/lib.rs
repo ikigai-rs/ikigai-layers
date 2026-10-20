@@ -57,7 +57,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! ikigai-layers = { version = "0.2.10", default-features = false }
+//! ikigai-layers = { version = "0.3.0", default-features = false }
 //! ```
 //!
 //! # A host library
@@ -71,21 +71,29 @@
 //! this crate links and calls itself, so the door's kernel needs no `urn:shacl:validate`,
 //! and binding one beside would offer it to every participant: it declares no capability
 //! (ledger #1266). **One host per state directory**: [`Host::open`] locks it, and refuses
-//! while another host holds it (ledger #1267).
+//! while another host holds it (ledger #1267). **State is sealed at rest**: every file the
+//! host writes is age ciphertext sealed to the host's own key, an identity file handed to
+//! [`Host::open`] as a path ([`at_rest`], ledger #2011).
 //!
 //! ```
 //! # #[cfg(feature = "host")]
 //! # fn main() {
 //! use std::sync::Arc;
 //! use ikigai_core::{Kernel, SystemClock};
+//! use ikigai_layers::StateKey;
 //!
 //! # let dir = std::env::temp_dir().join(format!("ikigai-layers-doc-{}", std::process::id()));
 //! # let (config, state) = (dir.join("config"), dir.join("state"));
 //! # std::fs::create_dir_all(&config).unwrap();
-//! let host = ikigai_layers::Host::open(&config, &state).expect("a configuration that checks");
+//! # let identity = age::x25519::Identity::generate();
+//! # std::fs::write(dir.join("state.key"),
+//! #     age::secrecy::ExposeSecret::expose_secret(&identity.to_string())).unwrap();
+//! // An age identity file (`age-keygen -o state.key`), read once, at open.
+//! let key = StateKey::load(dir.join("state.key")).expect("an age identity");
+//! let host = ikigai_layers::Host::open(&config, &state, &key).expect("a configuration that checks");
 //! let kernel = Kernel::new(Arc::new(ikigai_layers::space(&host))).with_clock(Arc::new(SystemClock));
 //! // A second host over the same state directory is refused while this one lives.
-//! assert!(ikigai_layers::Host::open(&config, &state).is_err());
+//! assert!(ikigai_layers::Host::open(&config, &state, &key).is_err());
 //! # drop(kernel);
 //! # drop(host);
 //! # std::fs::remove_dir_all(&dir).unwrap();
@@ -117,6 +125,8 @@
 #![cfg_attr(not(feature = "host"), allow(rustdoc::broken_intra_doc_links))]
 
 #[cfg(feature = "host")]
+pub mod at_rest;
+#[cfg(feature = "host")]
 pub mod channel;
 #[cfg(feature = "host")]
 pub mod config;
@@ -138,6 +148,8 @@ pub mod time;
 #[cfg(feature = "host")]
 pub mod tuplespace;
 
+#[cfg(feature = "host")]
+pub use at_rest::{Migration, StateKey};
 #[cfg(feature = "host")]
 pub use config::{Config, ConfigError, LayerDef, Manifest, Model};
 #[cfg(feature = "host")]
