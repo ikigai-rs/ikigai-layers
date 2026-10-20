@@ -258,9 +258,12 @@ fn a_crash_after_a_failed_append_that_reached_the_disk_reopens() {
     mend_feed(&f, "talk");
     let path = feed_path(&f, "talk");
     let mut text = std::fs::read_to_string(&path).unwrap();
-    text.push_str(&format!(
-        "2\t2026-10-10T00:00:09.000Z\tsay\t{two}\t{bobby}\n"
+    // The line that reached the disk, sealed as the host seals every feed line.
+    text.push_str(&sealed_line(
+        f.config.path(),
+        &format!("2\t2026-10-10T00:00:09.000Z\tsay\t{two}\t{bobby}"),
     ));
+    text.push('\n');
     std::fs::write(&path, text).unwrap();
     f.reopen();
     let logged = events(&f.kernel, "talk");

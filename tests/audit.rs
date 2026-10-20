@@ -81,7 +81,11 @@ fn no_self_description_carries_a_run_of_spaces() {
 #[test]
 fn the_held_state_directory_refusal_carries_no_run_of_spaces() {
     let f = fixture();
-    let refusal = match ikigai_layers::Host::open(f.config.path(), f.state.path()) {
+    let refusal = match ikigai_layers::Host::open(
+        f.config.path(),
+        f.state.path(),
+        &common::key(f.config.path()),
+    ) {
         Ok(_) => panic!("a second host over a held state directory opened"),
         Err(e) => e.to_string(),
     };
@@ -283,7 +287,8 @@ fn a_device_name_is_no_layer_or_participant_name() {
         "model = \"channel\"\nshapes = \"msg.shapes.ttl\"\ncontext = \"msg.context.jsonld\"\n",
     );
     let state = Scratch::new("device-state");
-    let refused = ikigai_layers::Host::open(config.path(), state.path());
+    let refused =
+        ikigai_layers::Host::open(config.path(), state.path(), &common::key(config.path()));
     assert!(refused.is_err(), "a layer named `nul` opened");
     assert!(!state.path().join("nul").exists(), "`nul` reached the disk");
 }

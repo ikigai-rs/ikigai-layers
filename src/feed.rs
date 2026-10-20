@@ -1,7 +1,8 @@
 //! A layer's feed: an append-only log with a GAPLESS sequence, and the waiting that lets a
 //! follower park until something happens instead of polling.
 //!
-//! One file per layer, `<state>/{layer}/feed.log`, one event per line:
+//! One file per layer, `<state>/{layer}/feed.log`, one event per line, each line sealed at
+//! rest on its own ([`crate::at_rest`]: `base64(age(event))`) over the event's text:
 //!
 //! ```text
 //! {seq}\t{time}\t{kind}\t{iri}\t{by}
@@ -31,6 +32,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::at_rest::{self, Sealer};
+
 /// The longest `wait=` a feed read may ask for, in seconds (defined in [`crate::time`], where a
 /// participant built without the host links it too).
 pub use crate::time::MAX_WAIT_SECS;
@@ -58,7 +61,7 @@ pub struct Event {
 impl Event {
     fn line(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}",
             self.seq, self.time, self.kind, self.iri, self.by
         )
     }
@@ -79,6 +82,8 @@ impl Event {
 /// One layer's feed, held open for appending.
 pub struct FeedLog {
     path: PathBuf,
+    /// How its lines are sealed and opened.
+    sealer: Sealer,
     events: Vec<Event>,
     /// The bytes of the whole, logged events: where the next line goes, whatever a failed
     /// append left after it.
@@ -88,8 +93,9 @@ pub struct FeedLog {
 }
 
 impl FeedLog {
-    /// Open (or create) the log at `path`, checking that it is gapless from 1.
-    pub fn open(path: &Path) -> Result<FeedLog, String> {
+    /// Open (or create) the log at `path`, opening every line with `sealer`, checking that it
+    /// is gapless from 1.
+    pub fn open(path: &Path, sealer: &Sealer) -> Result<FeedLog, String> {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -111,8 +117,11 @@ impl FeedLog {
                 .map_err(|e| format!("truncate the torn tail of {}: {e}", path.display()))?;
         }
         let mut events = Vec::new();
-        for (n, line) in whole.lines().enumerate() {
-            let event = Event::parse(line)
+        for (n, sealed) in whole.lines().enumerate() {
+            let line = sealer
+                .open_line(sealed)
+                .map_err(|why| format!("line {}: {}", n + 1, why.about(path)))?;
+            let event = Event::parse(&line)
                 .ok_or_else(|| format!("{}:{}: not a feed event", path.display(), n + 1))?;
             if event.seq != n as u64 + 1 {
                 return Err(format!(
@@ -127,6 +136,7 @@ impl FeedLog {
         }
         Ok(FeedLog {
             path: path.to_path_buf(),
+            sealer: sealer.clone(),
             events,
             len: whole.len() as u64,
             owed: Vec::new(),
@@ -171,8 +181,8 @@ impl FeedLog {
 
     fn write(&mut self, event: Event) -> Result<(), String> {
         assert_eq!(event.seq, self.last() + 1, "a feed is gapless");
-        let line = event.line();
-        let written = OpenOptions::new()
+        let line = self.sealer.seal_line(&event.line())? + "\n";
+        let written = at_rest::private_file()
             .create(true)
             .write(true)
             .truncate(false)
@@ -219,6 +229,29 @@ impl FeedLog {
         Ok(logged)
     }
 
+    /// Seal the whole log again, every line to the current identity, when any line is
+    /// plaintext or sealed only to an older identity ([`at_rest::Migration::Reseal`]): one
+    /// file written whole and renamed over the old one, so it is the old log or the new.
+    /// Answers whether it rewrote. Owed events stay owed.
+    pub(crate) fn reseal(&mut self) -> Result<bool, String> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("read {}: {e}", self.path.display())),
+        };
+        if text.lines().all(|line| self.sealer.is_current_line(line)) {
+            return Ok(false);
+        }
+        let mut sealed = String::new();
+        for event in &self.events {
+            sealed.push_str(&self.sealer.seal_line(&event.line())?);
+            sealed.push('\n');
+        }
+        at_rest::replace(&self.path, sealed.as_bytes())?;
+        self.len = sealed.len() as u64;
+        Ok(true)
+    }
+
     /// Every event, in order.
     pub fn events(&self) -> &[Event] {
         &self.events
@@ -234,7 +267,7 @@ impl FeedLog {
 
 /// Make sure a feed file exists (so a layer's directory says it is a layer).
 pub(crate) fn touch(path: &Path) -> Result<(), String> {
-    OpenOptions::new()
+    at_rest::private_file()
         .create(true)
         .append(true)
         .open(path)

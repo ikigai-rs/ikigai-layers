@@ -69,7 +69,7 @@ fn a_private_layer_mounted_by_two_collaborations_is_refused() {
     );
     // The host will not open over it either.
     let state = Scratch::new("state");
-    assert!(Host::open(config.path(), state.path()).is_err());
+    assert!(Host::open(config.path(), state.path(), &common::key(config.path())).is_err());
 }
 
 #[test]

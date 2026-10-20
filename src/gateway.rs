@@ -60,7 +60,10 @@
 //! # write("layers/gateway-a.toml", "model = \"tuplespace\"\nshapes = \"gateway.shapes.ttl\"\ncontext = \"gateway.context.jsonld\"\naddressed = true\n");
 //! # write("participants.ttl", "@prefix ik: <https://ikigai-rs.dev/ns#> .\n<urn:collab:participant:a> a ik:Machine .\n<urn:collab:participant:r> a ik:Machine .\n");
 //! # write("collabs/gw.toml", "[[mount]]\nlayer = \"gateway-a\"\na = [\"read\", \"feed\", \"out\", \"take\"]\nr = [\"read\", \"feed\", \"out\", \"take\"]\n");
-//! let host = ikigai_layers::Host::open(&config, &state).expect("a gateway configuration");
+//! # write("state.key", age::secrecy::ExposeSecret::expose_secret(
+//! #     &age::x25519::Identity::generate().to_string()));
+//! # let key = ikigai_layers::StateKey::load(config.join("state.key")).unwrap();
+//! let host = ikigai_layers::Host::open(&config, &state, &key).expect("a gateway configuration");
 //! let layers = Kernel::new(Arc::new(ikigai_layers::space(&host))).with_clock(Arc::new(SystemClock));
 //! let grant = |who: &str| {
 //!     Capability::scoped(["read", "feed", "out", "take"].map(|v| format!("urn:cap:layer:{v}:gateway-a")))

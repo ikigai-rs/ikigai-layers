@@ -7,15 +7,15 @@
 //!   (`prov:wasAttributedTo`, the principal its door minted), when (`dcterms:created`, the
 //!   kernel clock) and its place in the feed (`ik:seq`), refusing any of the three if sent;
 //! - the stamped graph must conform to the layer's closed shapes;
-//! - it is written once to `<state>/{layer}/graphs/{author slug}/{id}.ttl` and never
-//!   rewritten: there is no edit and no delete, and a correction is a new entry that
+//! - it is written once to `<state>/{layer}/graphs/{author slug}/{id}.ttl`, sealed at rest
+//!   ([`crate::at_rest`]: the file is age ciphertext of the Turtle), and never rewritten
+//!   (but for [`crate::Migration::Reseal`], which seals it again with the same Turtle): there is no edit and no delete, and a correction is a new entry that
 //!   `ik:supersedes` the old one (the same author's, in the same layer).
 //!
 //! This module holds the entries and their index; the endpoints in [`crate::endpoints`]
 //! compose admission (the host's own call to ikigai-shacl's validator) around it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -23,6 +23,7 @@ use ikigai_core::Error;
 use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use oxrdfio::{RdfFormat, RdfParser};
 
+use crate::at_rest::{self, Sealer};
 use crate::config::LayerDef;
 use crate::id;
 use crate::name::Participant;
@@ -61,6 +62,7 @@ pub struct EntryMeta {
 
 /// A channel layer's entries.
 pub struct Channel {
+    sealer: Sealer,
     layer: String,
     about: String,
     graphs: PathBuf,
@@ -82,13 +84,14 @@ pub(crate) fn invalid(detail: impl Into<String>) -> Error {
 }
 
 impl Channel {
-    /// Open the entries under `dir` (`<state>/{layer}`), rebuilding the index from the
-    /// files themselves: they are the record, and the index is only ever derived.
-    pub fn open(def: &LayerDef, dir: &Path) -> Result<Channel, String> {
+    /// Open the entries under `dir` (`<state>/{layer}`), each opened with `sealer`,
+    /// rebuilding the index from the files themselves: they are the record, and the index is
+    /// only ever derived.
+    pub fn open(def: &LayerDef, dir: &Path, sealer: &Sealer) -> Result<Channel, String> {
         let graphs = dir.join("graphs");
-        std::fs::create_dir_all(&graphs)
-            .map_err(|e| format!("create {}: {e}", graphs.display()))?;
+        at_rest::private_dir(&graphs)?;
         let mut channel = Channel {
+            sealer: sealer.clone(),
             layer: def.name.clone(),
             about: def.about.clone(),
             graphs: graphs.clone(),
@@ -113,8 +116,7 @@ impl Channel {
                     }
                     continue;
                 }
-                let text = std::fs::read_to_string(&file)
-                    .map_err(|e| format!("read {}: {e}", file.display()))?;
+                let text = channel.sealer.read_text(&file)?;
                 let triples =
                     rdf::parse_turtle(&text).map_err(|e| format!("{}: {e}", file.display()))?;
                 let meta = channel
@@ -238,8 +240,25 @@ impl Channel {
 
     /// The stored Turtle of one entry.
     pub fn turtle(&self, meta: &EntryMeta) -> Result<String, String> {
-        let path = self.path_of(meta);
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))
+        self.sealer.read_text(&self.path_of(meta))
+    }
+
+    /// Seal again, to the current identity, every entry that is plaintext or sealed only to
+    /// an older identity ([`crate::Migration::Reseal`]), each replaced whole. Answers how many.
+    pub(crate) fn reseal(&self) -> Result<usize, String> {
+        let mut resealed = 0;
+        for meta in &self.entries {
+            let path = self.path_of(meta);
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            if self.sealer.is_current(&bytes) {
+                continue;
+            }
+            let opened = self.sealer.open(&bytes).map_err(|why| why.about(&path))?;
+            at_rest::replace(&path, &self.sealer.seal(&opened)?)?;
+            resealed += 1;
+        }
+        Ok(resealed)
     }
 
     fn path_of(&self, meta: &EntryMeta) -> PathBuf {
@@ -261,16 +280,17 @@ impl Channel {
         let meta = self.meta(triples)?;
         let path = self.path_of(&meta);
         let dir = path.parent().expect("a graph directory");
-        std::fs::create_dir_all(dir)
+        at_rest::private_dir(dir)
             .map_err(|e| format!("create the graph of {}: {e}", meta.author))?;
+        let sealed = self.sealer.seal(rdf::to_turtle(triples).as_bytes())?;
         let partial = dir.join(format!(".{}.ttl{PARTIAL}", meta.id));
-        let written = OpenOptions::new()
+        let written = at_rest::private_file()
             .write(true)
             .create(true)
             .truncate(true)
             .open(&partial)
             .and_then(|mut file| {
-                file.write_all(rdf::to_turtle(triples).as_bytes())?;
+                file.write_all(&sealed)?;
                 file.sync_all()
             })
             .map_err(|e| format!("write {}: {e}", partial.display()))

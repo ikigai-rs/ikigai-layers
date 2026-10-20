@@ -33,9 +33,16 @@
 //! that never completed (discarded). Events stored but not logged are logged then, in order,
 //! as the channel model does. A take whose commit fails is still a take: it is recorded, its
 //! number is spent, and its receipt is read from where it is staged until that open.
+//!
+//! # Sealed at rest
+//!
+//! Every tuple is sealed ([`crate::at_rest`]) BEFORE intray stores it, so the intray id is the
+//! hash of the ciphertext, and every receipt, staged or committed, is sealed too. Intray's own
+//! `match=` reads the Turtle of each tuple it holds, which it no longer can, so a template is
+//! evaluated here instead, over the opened pending tuples, with the bounds intray uses
+//! ([`Store::matching`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -43,9 +50,15 @@ use std::path::{Path, PathBuf};
 use ikigai_core::{
     ArgRef, Bindings, Capability, Endpoint, Error, Invocation, Iri, Request, Result, Verb,
 };
-use ikigai_intray::SpaceEndpoint;
-use ikigai_store::budget::EvaluationBudget;
+use ikigai_intray::{SpaceEndpoint, PROCESSING_DIR};
+use ikigai_store::budget::{check_query, EvaluationBudget};
+use ikigai_store::limits;
+use ikigai_store::service::{self, refuse_service_with};
+use oxigraph::io::{RdfFormat, RdfParser};
+use oxigraph::sparql::{CancellationToken, QueryResults};
 use oxrdf::{Literal, NamedOrBlankNode, Term, Triple};
+
+use crate::at_rest::{self, Sealer, Unsealed};
 
 use crate::channel::{admitted_type, invalid, parse_content, refuse_stamp, require_type};
 use crate::config::LayerDef;
@@ -55,6 +68,11 @@ use crate::rdf::{self, node, object_iri, subject_iri};
 
 /// The intray space a tuplespace layer fronts: `<state>/{layer}/tuples/`.
 pub const SPACE_NAME: &str = "tuples";
+
+/// The directories intray keeps under a space: its live drops, and where a drop and a take
+/// stage their file (ikigai-intray 0.1.66's layout, which this host made itself so they are
+/// `0700`, and whose leftovers a [`crate::Migration::Reseal`] clears).
+const INTRAY_DIRS: [&str; 3] = ["inbox", ".dropping", ".taking"];
 
 /// The words a tuple's subject may not begin with after `urn:layer:{layer}:`: the host's own
 /// resources (and `new`, the channel's placeholder), so a tuple's name never reads as one.
@@ -204,6 +222,16 @@ impl Index {
         Ok(())
     }
 
+    /// A pending tuple stored again under a new intray id (sealed again by
+    /// [`crate::Migration::Reseal`]).
+    fn recid(&mut self, seq: u64, cid: String) {
+        if let Some(meta) = self.pending.get_mut(&seq) {
+            self.by_cid.remove(&meta.cid);
+            self.by_cid.insert(cid.clone(), seq);
+            meta.cid = cid;
+        }
+    }
+
     /// Record a take: the pending tuple becomes a receipt.
     fn taken(&mut self, receipt: Receipt) {
         if let Some(meta) = self.pending.remove(&receipt.tuple.seq) {
@@ -234,9 +262,14 @@ impl Index {
 /// host owns rather than a name it resolves.
 pub struct Store {
     space: SpaceEndpoint,
+    /// `<state>/{layer}/tuples/`, the space's own directory.
+    tuples: PathBuf,
     receipts: PathBuf,
     staging: PathBuf,
     authority: Capability,
+    /// The host's one budget, which [`matching`](Self::matching) evaluates within.
+    budget: EvaluationBudget,
+    sealer: Sealer,
 }
 
 fn space_iri() -> Iri {
@@ -246,15 +279,27 @@ fn space_iri() -> Iri {
 impl Store {
     /// The space under `dir`, its `match=` evaluations run within `budget`: the HOST's one,
     /// shared by every tuplespace layer, so one overdue count caps them all (ledger #1362).
-    fn open(dir: &Path, budget: EvaluationBudget) -> std::result::Result<Store, String> {
+    fn open(
+        dir: &Path,
+        budget: EvaluationBudget,
+        sealer: &Sealer,
+    ) -> std::result::Result<Store, String> {
         let receipts = dir.join("receipts");
         let staging = receipts.join(".taking");
-        std::fs::create_dir_all(&staging)
-            .map_err(|e| format!("create {}: {e}", staging.display()))?;
+        at_rest::private_dir(&staging)?;
+        let tuples = dir.join(SPACE_NAME);
+        // Intray creates these with the process's umask when it first needs them; made here
+        // first, they are `0700` like every other directory of the host's state.
+        for stage in INTRAY_DIRS {
+            at_rest::private_dir(&tuples.join(stage))?;
+        }
         Ok(Store {
-            space: SpaceEndpoint::new(dir.to_path_buf()).with_evaluation_budget(budget),
+            space: SpaceEndpoint::new(dir.to_path_buf()).with_evaluation_budget(budget.clone()),
+            tuples,
             receipts,
             staging,
+            budget,
+            sealer: sealer.clone(),
             authority: Capability::scoped([
                 ikigai_intray::CAP_OUT.to_string(),
                 ikigai_intray::CAP_READ.to_string(),
@@ -274,14 +319,37 @@ impl Store {
         self.space.invoke(&inv).await.map(|r| r.bytes)
     }
 
-    /// Drop `bytes` into the space; answers the intray id.
+    /// Seal `bytes` and drop them into the space; answers the intray id (the hash of the
+    /// sealed bytes).
     pub async fn drop_tuple(&self, bytes: &[u8]) -> Result<String> {
-        let id = self.call(Verb::Sink, &[("content", bytes)]).await?;
-        String::from_utf8(id).map_err(|_| Error::Endpoint("intray answered a non-UTF-8 id".into()))
+        let sealed = self.sealer.seal(bytes).map_err(Error::Endpoint)?;
+        self.drop_sealed(&sealed).await
     }
 
-    /// A pending tuple's bytes, or `None` when it is not in the space.
-    pub async fn read(&self, cid: &str) -> Result<Option<Vec<u8>>> {
+    async fn drop_sealed(&self, sealed: &[u8]) -> Result<String> {
+        let id = self.call(Verb::Sink, &[("content", sealed)]).await?;
+        let id = String::from_utf8(id)
+            .map_err(|_| Error::Endpoint("intray answered a non-UTF-8 id".into()))?;
+        // Intray writes the file with the process's umask; the bytes are sealed and the
+        // directory is `0700`, and the file is made `0600` too. Best effort: the drop is
+        // stored either way, and the host's next open makes every file `0600`.
+        let _ = at_rest::private(&self.tuple_path(&id));
+        Ok(id)
+    }
+
+    fn tuple_path(&self, cid: &str) -> PathBuf {
+        self.tuples.join("inbox").join(format!("{cid}.tuple"))
+    }
+
+    /// Open a tuple's sealed bytes; the refusal names its file.
+    fn unseal(&self, cid: &str, sealed: &[u8]) -> Result<Vec<u8>> {
+        self.sealer
+            .open(sealed)
+            .map_err(|why| Error::Endpoint(why.about(&self.tuple_path(cid))))
+    }
+
+    /// A pending tuple's sealed bytes, as intray holds them, or `None`.
+    async fn read_sealed(&self, cid: &str) -> Result<Option<Vec<u8>>> {
         match self.call(Verb::Source, &[("tuple", cid.as_bytes())]).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(Error::NotFound(_)) => Ok(None),
@@ -289,10 +357,18 @@ impl Store {
         }
     }
 
-    /// Take a tuple by its intray id: its bytes, or `None` when another taker won it.
+    /// A pending tuple's bytes, opened, or `None` when it is not in the space.
+    pub async fn read(&self, cid: &str) -> Result<Option<Vec<u8>>> {
+        match self.read_sealed(cid).await? {
+            Some(sealed) => self.unseal(cid, &sealed).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Take a tuple by its intray id: its bytes, opened, or `None` when another taker won it.
     pub async fn take(&self, cid: &str) -> Result<Option<Vec<u8>>> {
         match self.call(Verb::Delete, &[("tuple", cid.as_bytes())]).await {
-            Ok(bytes) => Ok(Some(bytes)),
+            Ok(sealed) => self.unseal(cid, &sealed).map(Some),
             Err(Error::NotFound(_)) => Ok(None),
             Err(e) => Err(e),
         }
@@ -304,13 +380,45 @@ impl Store {
         Ok(ids(&bytes))
     }
 
-    /// The intray ids of the pending tuples a SPARQL ASK holds for (intray's associative
-    /// match: bounded, and refusing `SERVICE`).
+    /// The intray ids of the pending tuples a SPARQL ASK holds for: intray's associative
+    /// match, evaluated HERE over the opened tuples, since intray holds only sealed bytes.
+    ///
+    /// ⚠ This is intray's `with_template`, `parse_match` and `tuple_matches` (ikigai-intray
+    /// 0.1.66) over opened bytes, built from the same shared pieces of ikigai-store, and it
+    /// must keep their bounds: the text refused over 1 MiB or nested past 64 before anything
+    /// is parsed ([`limits::check_sparql`]); only an ASK; the algebra bounds
+    /// ([`check_query`]); `SERVICE` refused anywhere in the algebra
+    /// ([`refuse_service_with`]) and refused again by the evaluator
+    /// ([`service::evaluator`]); and the parse and every evaluation inside the host's one
+    /// [`EvaluationBudget`], on a thread sized for the text, cancelled between tuples. The
+    /// tuples are opened before the budget starts (their cost is the layer's size, never the
+    /// caller's template). A tuple that does not open never matches, as intray skips a file
+    /// that is not the tuple its name says. When intray can hold sealed tuples itself (a
+    /// codec it calls), this copy should go.
     pub async fn matching(&self, query: &str) -> Result<Vec<String>> {
-        let bytes = self
-            .call(Verb::Source, &[("match", query.as_bytes())])
-            .await?;
-        Ok(ids(&bytes))
+        limits::check_sparql(query, "match")?;
+        let mut tuples = Vec::new();
+        for cid in self.list().await? {
+            if let Ok(Some(bytes)) = self.read(&cid).await {
+                tuples.push((cid, bytes));
+            }
+        }
+        let text = query.to_string();
+        self.budget.run(query, &self.authority, None, move |token| {
+            let template = parse_match(&text)?;
+            let mut hits = Vec::new();
+            for (cid, bytes) in tuples {
+                if token.is_cancelled() {
+                    return Err(Error::Timeout(
+                        "match: canceled at its time budget".to_string(),
+                    ));
+                }
+                if tuple_matches(&template, &bytes, token)? {
+                    hits.push(cid);
+                }
+            }
+            Ok(hits)
+        })
     }
 
     fn receipt_path(&self, id: &str) -> PathBuf {
@@ -327,14 +435,13 @@ impl Store {
     /// complete.
     pub fn stage(&self, cid: &str, id: &str, text: &str) -> std::result::Result<(), String> {
         let path = self.staged_path(cid, id);
-        let mut file = OpenOptions::new()
+        let sealed = self.sealer.seal(text.as_bytes())?;
+        let mut file = at_rest::private_file()
             .write(true)
             .create_new(true)
             .open(&path)
             .map_err(|e| format!("create {}: {e}", path.display()))?;
-        let written = file
-            .write_all(text.as_bytes())
-            .and_then(|()| file.sync_all());
+        let written = file.write_all(&sealed).and_then(|()| file.sync_all());
         drop(file);
         written.map_err(|e| {
             let _ = std::fs::remove_file(&path);
@@ -358,8 +465,12 @@ impl Store {
     /// commits it.
     pub fn receipt_text(&self, id: &str) -> std::result::Result<String, String> {
         let path = self.receipt_path(id);
-        let committed = match std::fs::read_to_string(&path) {
-            Ok(text) => return Ok(text),
+        let committed = match std::fs::read(&path) {
+            Ok(bytes) => {
+                let opened = self.sealer.open(&bytes).map_err(|why| why.about(&path))?;
+                return String::from_utf8(opened)
+                    .map_err(|_| format!("{} is not UTF-8", path.display()));
+            }
             Err(e) => format!("read {}: {e}", path.display()),
         };
         let suffix = format!(".{id}.ttl");
@@ -372,8 +483,7 @@ impl Store {
                 })
         });
         match staged {
-            Some(staged) => std::fs::read_to_string(&staged)
-                .map_err(|e| format!("read {}: {e}", staged.display())),
+            Some(staged) => self.sealer.read_text(&staged),
             None => Err(committed),
         }
     }
@@ -411,20 +521,26 @@ impl Tuplespace {
         def: &LayerDef,
         dir: &Path,
         logged: &[String],
+        sealer: &Sealer,
     ) -> std::result::Result<(Tuplespace, Stored), String> {
-        Self::open_with_budget(def, dir, logged, EvaluationBudget::default())
+        Self::open_with_budget(def, dir, logged, EvaluationBudget::default(), sealer)
     }
 
     /// [`open`](Self::open), its `match=` evaluations within `budget`: a clone of the host's
     /// one, so every layer shares one overdue count (see [`crate::Host::match_budget`],
     /// ledger #1362).
+    ///
+    /// Two pending tuples that open to the same bytes are one tuple stored twice (a
+    /// [`crate::Migration::Reseal`] stores the sealed copy before it takes the old one, and
+    /// may stop between the two): one is kept and the other taken out of the space.
     pub fn open_with_budget(
         def: &LayerDef,
         dir: &Path,
         logged: &[String],
         budget: EvaluationBudget,
+        sealer: &Sealer,
     ) -> std::result::Result<(Tuplespace, Stored), String> {
-        let store = Store::open(dir, budget)?;
+        let store = Store::open(dir, budget, sealer)?;
         let layer = def.name.as_str();
         let pending_ids: BTreeSet<String> = block_on(store.list())
             .map_err(|e| format!("list the space: {e}"))?
@@ -441,8 +557,7 @@ impl Tuplespace {
             let Some(id) = name.strip_suffix(".ttl") else {
                 continue;
             };
-            let text = std::fs::read_to_string(&file)
-                .map_err(|e| format!("read {}: {e}", file.display()))?;
+            let text = sealer.read_text(&file)?;
             let receipt =
                 parse_receipt(layer, &text).map_err(|e| format!("{}: {e}", file.display()))?;
             if receipt.id != id {
@@ -457,6 +572,7 @@ impl Tuplespace {
             stored.push(taken_event(&receipt));
             index.insert_receipt(receipt)?;
         }
+        let mut texts: HashMap<String, String> = HashMap::new();
         for cid in &pending_ids {
             let bytes = block_on(store.read(cid))
                 .map_err(|e| format!("read tuple {cid}: {e}"))?
@@ -464,6 +580,12 @@ impl Tuplespace {
             let text = String::from_utf8(bytes).map_err(|_| format!("tuple {cid} is not UTF-8"))?;
             let triples = rdf::parse_turtle(&text).map_err(|e| format!("tuple {cid}: {e}"))?;
             let meta = tuple_meta(layer, &triples, cid).map_err(|e| format!("tuple {cid}: {e}"))?;
+            if texts.get(&meta.subject).is_some_and(|seen| *seen == text) {
+                // The same tuple stored twice (see above): keep the first.
+                block_on(store.take(cid)).map_err(|e| format!("take duplicate {cid}: {e}"))?;
+                continue;
+            }
+            texts.insert(meta.subject.clone(), text);
             stored.push(out_event(&meta));
             index.insert_pending(meta)?;
         }
@@ -478,6 +600,83 @@ impl Tuplespace {
             },
             stored,
         ))
+    }
+
+    /// Seal again, to the current identity, everything this layer's space holds that is
+    /// plaintext or sealed only to an older identity ([`crate::Migration::Reseal`]):
+    ///
+    /// - each receipt, committed or staged, replaced whole;
+    /// - each pending tuple, STORED AGAIN: sealed bytes are a new intray id, so the sealed
+    ///   copy is dropped first and the old one taken after (a stop between the two leaves the
+    ///   tuple twice, which the next open resolves, see [`open_with_budget`](Self::open_with_budget));
+    /// - intray's leftovers: a staged drop (`.dropping/`, never published) and a staged claim
+    ///   (`.taking/`, a take the layer has already settled: the host holds the state
+    ///   directory, so neither is live) are removed, and any other file under the space
+    ///   (`error/`, `outbox/`, `.processing/`; never read by the layer host) is sealed in
+    ///   place, but for intray's `.err` notes, which hold an id and a fixed sentence.
+    ///
+    /// Answers how many files it rewrote or removed.
+    pub(crate) fn reseal(&self) -> std::result::Result<usize, String> {
+        let store = &self.store;
+        let sealer = &store.sealer;
+        let mut changed = 0;
+        for dir in [&store.receipts, &store.staging] {
+            for file in read_dir(dir)? {
+                if reseal_file(sealer, &file)? {
+                    changed += 1;
+                }
+            }
+        }
+        let pending: Vec<TupleMeta> = self
+            .index
+            .read()
+            .expect("tuplespace lock")
+            .pending()
+            .cloned()
+            .collect();
+        for meta in pending {
+            let sealed = block_on(store.read_sealed(&meta.cid))
+                .map_err(|e| format!("read tuple {}: {e}", meta.cid))?
+                .ok_or_else(|| format!("tuple {} vanished while the layer resealed", meta.cid))?;
+            if sealer.is_current(&sealed) {
+                continue;
+            }
+            let opened = store
+                .unseal(&meta.cid, &sealed)
+                .map_err(|e| e.to_string())?;
+            let resealed = sealer.seal(&opened)?;
+            let cid = block_on(store.drop_sealed(&resealed))
+                .map_err(|e| format!("store tuple {} sealed: {e}", meta.subject))?;
+            block_on(store.call(Verb::Delete, &[("tuple", meta.cid.as_bytes())]))
+                .map_err(|e| format!("take the old copy of tuple {}: {e}", meta.subject))?;
+            self.index
+                .write()
+                .expect("tuplespace lock")
+                .recid(meta.seq, cid);
+            changed += 1;
+        }
+        for stage in [".dropping", ".taking"] {
+            for file in read_dir(&store.tuples.join(stage))? {
+                std::fs::remove_file(&file)
+                    .map_err(|e| format!("remove {}: {e}", file.display()))?;
+                changed += 1;
+            }
+        }
+        for stage in ["error", "outbox", PROCESSING_DIR] {
+            let dir = store.tuples.join(stage);
+            if !dir.is_dir() {
+                continue;
+            }
+            for file in read_dir(&dir)? {
+                if file.extension().is_some_and(|x| x == "err") {
+                    continue;
+                }
+                if reseal_file(sealer, &file)? {
+                    changed += 1;
+                }
+            }
+        }
+        Ok(changed)
     }
 
     /// Record a drop that has been stored and logged.
@@ -544,8 +743,16 @@ fn settle_staged(
             continue;
         };
         let bytes = std::fs::read(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
-        let whole = String::from_utf8(bytes)
-            .ok()
+        // Torn (empty, part of a header, or a body that does not open whole) is a stage that
+        // never completed; a wrong key or plaintext is not, and refuses the open instead of
+        // discarding a record.
+        let opened = match store.sealer.open(&bytes) {
+            Ok(opened) => Some(opened),
+            Err(Unsealed::Corrupt(_)) => None,
+            Err(why) => return Err(why.about(&file)),
+        };
+        let whole = opened
+            .and_then(|bytes| String::from_utf8(bytes).ok())
             .is_some_and(|text| parse_receipt(layer, &text).is_ok());
         if pending.contains(cid) || !whole {
             store.unstage(cid, id);
@@ -554,6 +761,75 @@ fn settle_staged(
         }
     }
     Ok(())
+}
+
+/// Seal the file at `path` again, whole, unless it is already sealed to the current identity.
+fn reseal_file(sealer: &Sealer, path: &Path) -> std::result::Result<bool, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    if sealer.is_current(&bytes) {
+        return Ok(false);
+    }
+    let opened = sealer.open(&bytes).map_err(|why| why.about(path))?;
+    at_rest::replace(path, &sealer.seal(&opened)?)?;
+    Ok(true)
+}
+
+/// What a `match=` refused for `SERVICE` should do instead (intray's sentence).
+const MATCH_REMEDY: &str = "A match is evaluated against one tuple's graph and never leaves \
+     this host: put the data it needs in the tuple.";
+
+/// Parse a `match=` into the template every tuple is tested against: only an ASK, within the
+/// store's algebra bounds, with no `SERVICE` anywhere (intray's `parse_match`, see
+/// [`Store::matching`]). Called only inside the budget, which sizes the thread's stack.
+fn parse_match(query: &str) -> Result<spargebra::Query> {
+    let invalid = |detail: String| Error::InvalidArgument {
+        name: "match".to_string(),
+        detail,
+    };
+    let parsed = spargebra::SparqlParser::new()
+        .parse_query(query)
+        .map_err(|e| invalid(format!("SPARQL syntax error: {e}")))?;
+    if !matches!(parsed, spargebra::Query::Ask { .. }) {
+        return Err(invalid(
+            "an associative match must be an ASK query".to_string(),
+        ));
+    }
+    check_query(&parsed, "match")?;
+    refuse_service_with(&parsed, "match", Some(MATCH_REMEDY))?;
+    Ok(parsed)
+}
+
+/// Whether a tuple's graph (its Turtle as the default graph) satisfies the template, with an
+/// evaluator that refuses every service call and stops when `token` fires (intray's
+/// `tuple_matches`). A tuple that is not RDF never matches, and neither does one that nests
+/// RDF 1.2 triple terms past ikigai-store's bound: it is never parsed, since the parse
+/// recurses once per level and a stack overflow aborts the host (intray 0.1.66, ledger #992).
+fn tuple_matches(
+    template: &spargebra::Query,
+    bytes: &[u8],
+    token: &CancellationToken,
+) -> Result<bool> {
+    if ikigai_store::depth::check_rdf_nesting(bytes, RdfFormat::Turtle, "content").is_err() {
+        return Ok(false);
+    }
+    let store = ikigai_store::Store::new()
+        .map_err(|e| Error::Endpoint(format!("match: store init: {e}")))?;
+    if store
+        .load_from_slice(RdfParser::from_format(RdfFormat::Turtle), bytes)
+        .is_err()
+    {
+        return Ok(false);
+    }
+    match service::evaluator()
+        .with_cancellation_token(token.clone())
+        .for_query(template.clone())
+        .on_store(&store)
+        .execute()
+        .map_err(|e| Error::Endpoint(format!("match: evaluation: {e}")))?
+    {
+        QueryResults::Boolean(b) => Ok(b),
+        _ => Ok(false),
+    }
 }
 
 /// The `out` event a stored tuple carries.

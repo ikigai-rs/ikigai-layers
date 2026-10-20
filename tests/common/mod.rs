@@ -13,7 +13,7 @@ use ikigai_core::{
     ArgRef, Capability, Clock, Error, Fallback, Iri, Kernel, Representation, Request, Space, Time,
     Verb,
 };
-use ikigai_layers::Host;
+use ikigai_layers::{Host, StateKey};
 
 /// A scratch directory, removed when dropped.
 pub struct Scratch(pub PathBuf);
@@ -274,6 +274,50 @@ pub fn write_config(dir: &Scratch) {
     dir.write("enrollment.toml", ENROLLMENT_TOML);
 }
 
+/// The state key a test's host seals with: an age identity written once into `config` (where a
+/// deployment's config home could hold it) and read back, so every open over the same config
+/// directory, a restart included, uses the same key.
+pub fn key(config: &Path) -> StateKey {
+    let path = config.join("state.key");
+    if !path.exists() {
+        write_identity(&path, &age::x25519::Identity::generate());
+    }
+    StateKey::load(&path).expect("the test identity")
+}
+
+/// `bytes` sealed as the host seals a state file, to the current key in `config` (see [`key`]).
+pub fn sealed(config: &Path, bytes: &[u8]) -> Vec<u8> {
+    let text = std::fs::read_to_string(config.join("state.key")).unwrap();
+    let identity: age::x25519::Identity = text
+        .lines()
+        .find(|l| l.starts_with("AGE-SECRET-KEY-"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    age::encrypt(&identity.to_public(), bytes).unwrap()
+}
+
+/// `line` sealed as the host seals a feed line: `base64(age(line))`.
+pub fn sealed_line(config: &Path, line: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(sealed(config, line.as_bytes()))
+}
+
+/// Write `identities` as an age identity file at `path`, the first the current one.
+pub fn write_identities(path: &Path, identities: &[&age::x25519::Identity]) {
+    use age::secrecy::ExposeSecret;
+    let text: String = identities
+        .iter()
+        .map(|i| format!("{}\n", i.to_string().expose_secret()))
+        .collect();
+    std::fs::write(path, format!("# created by a test\n{text}")).unwrap();
+}
+
+/// Write one identity as an age identity file at `path`.
+pub fn write_identity(path: &Path, identity: &age::x25519::Identity) {
+    write_identities(path, &[identity]);
+}
+
 /// A host over a fresh fixture: its config and state directories, and a kernel.
 pub struct Fixture {
     pub config: Scratch,
@@ -297,7 +341,8 @@ pub fn fixture() -> Fixture {
     let config = Scratch::new("config");
     write_config(&config);
     let state = Scratch::new("state");
-    let host = Host::open(config.path(), state.path()).expect("the fixture configuration");
+    let host = Host::open(config.path(), state.path(), &key(config.path()))
+        .expect("the fixture configuration");
     let kernel = kernel_over(&host);
     Fixture {
         config,
@@ -314,10 +359,20 @@ impl Fixture {
     /// one opens.
     pub fn reopen(&mut self) {
         let between = Scratch::new("between");
-        let empty = Host::open(between.path(), between.path().join("state")).expect("empty");
+        let empty = Host::open(
+            between.path(),
+            between.path().join("state"),
+            &key(between.path()),
+        )
+        .expect("empty");
         self.kernel = kernel_over(&empty);
         self.host = empty;
-        self.host = Host::open(self.config.path(), self.state.path()).expect("reopen");
+        self.host = Host::open(
+            self.config.path(),
+            self.state.path(),
+            &key(self.config.path()),
+        )
+        .expect("reopen");
         self.kernel = kernel_over(&self.host);
     }
 }

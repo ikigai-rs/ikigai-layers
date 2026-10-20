@@ -183,7 +183,11 @@ fn an_unknown_collaborations_participants_are_refused_without_naming_it() {
 #[test]
 fn a_second_host_over_one_state_directory_is_refused_naming_the_first() {
     let f = fixture();
-    let second = Host::open(f.config.path(), f.state.path());
+    let second = Host::open(
+        f.config.path(),
+        f.state.path(),
+        &common::key(f.config.path()),
+    );
     let Err(e) = second else {
         panic!("a second host opened the state directory the first holds");
     };
@@ -209,7 +213,8 @@ fn a_second_host_over_one_state_directory_is_refused_naming_the_first() {
     } = f;
     drop(kernel);
     drop(host);
-    let again = Host::open(config.path(), state.path()).expect("the lock went with the host");
+    let again = Host::open(config.path(), state.path(), &common::key(config.path()))
+        .expect("the lock went with the host");
     assert_eq!(again.layer("talk").unwrap().last_seq(), 1);
 }
 
@@ -218,7 +223,8 @@ fn a_second_host_over_one_state_directory_is_refused_naming_the_first() {
 fn two_hosts_over_two_state_directories_both_open() {
     let f = fixture();
     let other = Scratch::new("state-b");
-    let second = Host::open(f.config.path(), other.path()).expect("a second directory");
+    let second = Host::open(f.config.path(), other.path(), &common::key(f.config.path()))
+        .expect("a second directory");
     assert!(second.layer("talk").is_some());
 }
 
