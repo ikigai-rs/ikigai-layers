@@ -370,7 +370,8 @@ pub struct Draft {
 /// `{` or `[`.
 ///
 /// Refused (as a bad `content`): more than the layer's `entry_max` bytes; JSON-LD nested
-/// deeper than [`MAX_JSON_DEPTH`]; a parse error; a named graph; anything but exactly one
+/// deeper than [`MAX_JSON_DEPTH`], or Turtle deeper than [`MAX_TURTLE_DEPTH`]; a parse error;
+/// a named graph; anything but exactly one
 /// subject, `<urn:layer:new>` or one blank node; a
 /// blank node or a quoted triple anywhere else; any of the three stamps
 /// (`prov:wasAttributedTo`, `dcterms:created`, `ik:seq`); no `rdf:type`, or a type no shape
@@ -437,8 +438,8 @@ pub fn draft(def: &LayerDef, content: &[u8]) -> Result<Draft, Error> {
 }
 
 /// Parse what a writer sent: Turtle, or JSON-LD when it starts with `{` or `[`, at most the
-/// layer's `entry_max` bytes (and JSON-LD at most [`MAX_JSON_DEPTH`] levels deep), in the
-/// default graph only. What the triples may say is the
+/// layer's `entry_max` bytes (and at most [`MAX_JSON_DEPTH`] or [`MAX_TURTLE_DEPTH`] levels
+/// deep, before anything is parsed), in the default graph only. What the triples may say is the
 /// caller's (each model's) to check.
 pub(crate) fn parse_content(def: &LayerDef, content: &[u8]) -> Result<Vec<Triple>, Error> {
     if content.len() > def.entry_max {
@@ -457,6 +458,14 @@ pub(crate) fn parse_content(def: &LayerDef, content: &[u8]) -> Result<Vec<Triple
             return Err(invalid(format!(
                 "JSON-LD nested {depth} levels deep, over the bound of {MAX_JSON_DEPTH}: an entry \
                  is one subject, and no entry needs more"
+            )));
+        }
+    } else {
+        let depth = turtle_depth(content);
+        if depth > MAX_TURTLE_DEPTH {
+            return Err(invalid(format!(
+                "Turtle nested {depth} levels deep, over the bound of {MAX_TURTLE_DEPTH}: an \
+                 entry is one subject, and no entry needs more"
             )));
         }
     }
@@ -524,6 +533,117 @@ pub fn json_depth(json: &[u8]) -> usize {
             b'}' | b']' => depth = depth.saturating_sub(1),
             _ => {}
         }
+    }
+    deepest
+}
+
+/// The deepest Turtle a write may nest: triple terms `<<( … )>>`, reified triples `<< … >>`,
+/// blank-node property lists `[ … ]`, collections `( … )` and annotations `{| … |}`, counted
+/// together.
+///
+/// Turtle's parser keeps its own stack, but an RDF 1.2 triple term is a boxed tree, and the
+/// parser clones it recursively when it emits the triple that holds it, so a stack overflow
+/// ABORTS the process here too, whatever the size bound allows: triple terms nested 1,750 deep
+/// (16 KB, under the default 16 KiB `entry_max`) overflowed a 2 MiB thread in a debug build,
+/// and 4,500 deep (40 KB, under the largest `entry_max`) in a release build (ledger #2015).
+/// Every host that links this crate parses them: its graph turns RDF 1.2 on. The other three
+/// shapes did not overflow at 100,000 deep, and are bounded with them anyway, so the bound is
+/// one rule about Turtle rather than one parser's current recursion. An entry is one subject
+/// whose other nodes are IRIs, so real entries nest a handful of levels; 64 is the bound
+/// [`MAX_JSON_DEPTH`] puts on JSON-LD, for the same reason.
+pub const MAX_TURTLE_DEPTH: usize = 64;
+
+/// The deepest nesting of Turtle's brackets in `turtle` (see [`MAX_TURTLE_DEPTH`]), read byte
+/// by byte with no recursion, outside IRIs, strings and comments. Not a validator: the parser
+/// judges the rest.
+///
+/// It reads those three as the parser's lexer does (oxttl's, which this crate parses with),
+/// so it never skips a bracket the parser will see: an IRI runs from `<` (but `<<`) to the
+/// first `>`, a string to its first unescaped closing quote (`"""` or `'''` for a long one),
+/// a comment from `#` to the end of the line, and a backslash takes the next byte with it,
+/// in a string, an IRI or a prefixed name (`:a\#b` is one name, not a comment). Where the two
+/// could part (an invalid escape, a line break in a short string), the lexer reports an error,
+/// and a write stops at its first error, so nothing past that point becomes a term.
+///
+/// ```
+/// use ikigai_layers::channel::turtle_depth;
+///
+/// assert_eq!(turtle_depth(b"<urn:a> <urn:b> <urn:c> ."), 0);
+/// assert_eq!(turtle_depth(b"<urn:a> <urn:b> [ <urn:c> ( 1 2 ) ] ."), 2);
+/// assert_eq!(turtle_depth(b"<urn:a> <urn:b> <<( <urn:a> <urn:b> <urn:c> )>> ."), 1);
+/// // Brackets in an IRI, a string, a long string or a comment are not nesting.
+/// assert_eq!(turtle_depth(br#"<urn:a(> <urn:b> "[[(\"" , """ ") """ . # <<("#), 0);
+/// // An escaped `#` in a prefixed name starts no comment.
+/// assert_eq!(turtle_depth(br"<urn:a> :b\#c [ <urn:c> 1 ] ."), 1);
+/// assert_eq!(turtle_depth(&b"<<(: a".repeat(100_000)), 100_000);
+/// ```
+pub fn turtle_depth(turtle: &[u8]) -> usize {
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    let mut i = 0;
+    while let Some(&b) = turtle.get(i) {
+        let next = |k: usize| turtle.get(i + k).copied();
+        match b {
+            b'#' => {
+                // A comment, to the end of the line.
+                while turtle.get(i).is_some_and(|c| !matches!(c, b'\n' | b'\r')) {
+                    i += 1;
+                }
+                continue;
+            }
+            b'\\' => i += 1, // an escape in a prefixed name: the next byte is part of it
+            b'<' if next(1) == Some(b'<') => {
+                // `<<(` (a triple term) or `<<` (a reified triple): one level either way.
+                depth += 1;
+                deepest = deepest.max(depth);
+                i += if next(2) == Some(b'(') { 2 } else { 1 };
+            }
+            b'<' => {
+                // An IRI, to the first `>`.
+                i += 1;
+                while let Some(&c) = turtle.get(i) {
+                    match c {
+                        b'>' => break,
+                        b'\\' => i += 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            b'"' | b'\'' => {
+                let long = next(1) == Some(b) && next(2) == Some(b);
+                i += if long { 3 } else { 1 };
+                while let Some(&c) = turtle.get(i) {
+                    if c == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if c == b
+                        && (!long
+                            || (turtle.get(i + 1) == Some(&b) && turtle.get(i + 2) == Some(&b)))
+                    {
+                        i += if long { 2 } else { 0 };
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'[' | b'(' | b'{' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b')' if next(1) == Some(b'>') && next(2) == Some(b'>') => {
+                // `)>>` closes a triple term: one level, as `<<(` opened it.
+                depth = depth.saturating_sub(1);
+                i += 2;
+            }
+            b'>' if next(1) == Some(b'>') => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b']' | b')' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
     }
     deepest
 }

@@ -200,8 +200,8 @@ $ cat note.ttl | ikigai -c 'sink urn:layer:talk:say'
 urn:layer:talk:entry:01m4hhr0z80000000000001
 ```
 
-Turtle or JSON-LD, about `<urn:layer:new>` (or one blank node); JSON-LD nested more than
-64 levels deep is refused before it is parsed. What is stored:
+Turtle or JSON-LD, about `<urn:layer:new>` (or one blank node); JSON-LD or Turtle nested more
+than 64 levels deep is refused before it is parsed. What is stored:
 
 ```turtle
 <urn:layer:talk:entry:01m4hhr0z80000000000001> a ik:Message ;
