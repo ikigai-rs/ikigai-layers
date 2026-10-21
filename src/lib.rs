@@ -57,7 +57,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! ikigai-layers = { version = "0.3.0", default-features = false }
+//! ikigai-layers = { version = "0.3.1", default-features = false }
 //! ```
 //!
 //! # A host library
