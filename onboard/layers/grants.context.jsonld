@@ -1,0 +1,23 @@
+{ "@context": {
+  "onb": "https://ikigai-rs.dev/ns/onboard#",
+  "ik": "https://ikigai-rs.dev/ns#",
+  "dcterms": "http://purl.org/dc/terms/",
+  "prov": "http://www.w3.org/ns/prov#",
+  "xsd": "http://www.w3.org/2001/XMLSchema#",
+  "Entitlement": "onb:Entitlement",
+  "fingerprint": "onb:fingerprint",
+  "principal": { "@id": "onb:principal", "@type": "@id" },
+  "kind": { "@id": "onb:kind", "@type": "@id" },
+  "request": { "@id": "onb:request", "@type": "@id" },
+  "layerGrant": { "@id": "onb:layerGrant", "@type": "@id", "@container": "@set" },
+  "gonkGrant": { "@id": "onb:gonkGrant", "@container": "@set" },
+  "router": { "@id": "onb:router", "@container": "@set" },
+  "gonkDoor": "onb:gonkDoor",
+  "gonkServerCert": "onb:gonkServerCert",
+  "expires": { "@id": "onb:expires", "@type": "xsd:dateTime" },
+  "supersedes": { "@id": "ik:supersedes", "@type": "@id" },
+  "signature": "onb:signature",
+  "attributedTo": { "@id": "prov:wasAttributedTo", "@type": "@id" },
+  "created": { "@id": "dcterms:created", "@type": "xsd:dateTime" },
+  "seq": { "@id": "ik:seq", "@type": "xsd:integer" }
+} }

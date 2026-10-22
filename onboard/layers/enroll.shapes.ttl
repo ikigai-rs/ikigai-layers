@@ -1,0 +1,25 @@
+# What a lobby admits: one onb:EnrollmentRequest per entry, closed, with the host's three stamps.
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix ik: <https://ikigai-rs.dev/ns#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix onb: <https://ikigai-rs.dev/ns/onboard#> .
+
+<urn:iki:onboard:shape:request> a sh:NodeShape ;
+  sh:targetClass onb:EnrollmentRequest ;
+  sh:closed true ;
+  sh:ignoredProperties ( rdf:type ) ;
+  sh:property
+    [ sh:path onb:invite ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ;
+      sh:pattern "^urn:iki:onboard:invite:[A-Za-z0-9._-]{1,64}$" ] ,
+    [ sh:path onb:certificate ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ;
+      sh:maxLength 8192 ] ,
+    [ sh:path onb:fingerprint ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ;
+      sh:pattern "^[0-9a-f]{64}$" ] ,
+    [ sh:path onb:proof ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ;
+      sh:pattern "^[0-9a-f]{64}$" ] ,
+    [ sh:path prov:wasAttributedTo ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ,
+    [ sh:path dcterms:created ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:dateTime ] ,
+    [ sh:path ik:seq ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:integer ] .

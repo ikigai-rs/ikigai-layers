@@ -33,14 +33,19 @@ exclude = ["history/"]
 # `participant` checks that the tree stays free of them.
 default = ["host"]
 host = [
+    "dep:der",
     "dep:ikigai-encrypt",
+    "dep:ikigai-sign",
     "dep:ikigai-intray",
     "dep:ikigai-store",
     "dep:ikigai-shacl",
     "dep:ikigai-jsonld",
     "dep:oxigraph",
     "dep:oxrdfio",
+    "dep:oxsdatatypes",
+    "dep:pem-rfc7468",
     "dep:serde",
+    "dep:sha2",
     "dep:spargebra",
     "dep:toml",
 ]
@@ -156,6 +161,28 @@ ikigai-encrypt = { version = "0.2.1", default-features = false, optional = true 
 # oxigraph.
 oxigraph = { version = "0.5.11", default-features = false, optional = true }
 spargebra = { version = "0.4.7", optional = true }
+# Onboarding (ledger #2009, `onboard`): an entitlement is applied only when its signature verifies
+# against the controller's public key, and the host verifies through ikigai-sign's `urn:sign:verify`,
+# evaluated in a kernel of the host's OWN that no door binds (the pattern `json::Egress` set): the
+# ecosystem's one Ed25519 verifier, so no signature code here. 0.3.2 is the current release and the
+# one every test here ran against; its `verify` (bytes, signature graph, SPKI key IRI) is older.
+# ⚠ `"0.3.2"` is `<0.4.0`.
+ikigai-sign = { version = "0.3.2", optional = true }
+# An enrollment request carries its certificate as PEM, and the host checks that the certificate's
+# leaf DER hashes to the fingerprint the request states, which must be the poster's own. PEM is
+# decoded by RustCrypto's RFC 7468 decoder and the DER is checked as one well-formed DER document,
+# the two crates ikigai-sign's key parsing (ed25519-dalek, p256, through pkcs8 and spki) already
+# puts in the graph, so nothing new is compiled and nothing is hand-parsed. The SHA-256 is
+# RustCrypto's 0.10 line, the one ikigai-sign links. (The fingerprint of a PEM has a shared home in
+# ikigai-quic, `fingerprint_of_pem`, which a host cannot link without the whole QUIC transport.)
+# ⚠ `"0.7.10"`, `"0.7.0"` and `"0.10.9"` are `<0.8.0`, `<0.8.0` and `<0.11.0`.
+der = { version = "0.7.10", features = ["alloc"], optional = true }
+pem-rfc7468 = { version = "0.7.0", features = ["alloc"], optional = true }
+sha2 = { version = "0.10.9", optional = true }
+# An entitlement's `onb:expires` is compared with the kernel clock as an `xsd:dateTime`, by the
+# XSD datatype library oxigraph's SPARQL evaluation already links (0.2.4 is that line), never
+# by a date parser of this crate's own. ⚠ `"0.2.4"` is `<0.3.0`: move it with oxigraph.
+oxsdatatypes = { version = "0.2.4", optional = true }
 
 [dev-dependencies]
 # The module recipe as one test. 0.8.0 is the CURRENT published definition of "done", and
@@ -184,6 +211,12 @@ oxigraph = { version = "0.5.11", default-features = false, features = ["rdf-12"]
 # code that wrote it. The line ikigai-encrypt 0.2.1 takes (`age = "0.11"`), so nothing new is
 # compiled; a dev-dependency adds nothing to a consumer's build. ⚠ `"0.11.1"` is `<0.12.0`.
 age = { version = "0.11.1", default-features = false }
+
+# The onboarding tests' controller (and stranger) keys, GENERATED in each test from a seed the
+# test chooses, never a real key: written as PKCS8 and SPKI PEM for ikigai-sign's `urn:sign:sign`
+# and the host's `onboard.controller_key`. The line ikigai-sign links (`"2.1"`), so nothing new is
+# compiled. ⚠ `"2.1"` is `<3.0.0`.
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "pkcs8", "pem"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # `tests/partial_write.rs` injects a torn write from outside the library by lowering the

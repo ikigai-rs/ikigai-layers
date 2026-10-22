@@ -364,6 +364,9 @@ pub struct Draft {
     triples: Vec<Triple>,
     /// The entries it says it supersedes.
     pub supersedes: BTreeSet<String>,
+    /// The subject its author wrote, when it was not `<urn:layer:new>` or a blank node (a
+    /// lobby's `urn:iki:onboard:request:{fingerprint}`).
+    pub(crate) posted: Option<String>,
 }
 
 /// Parse and check what an author sent to `say`: Turtle, or JSON-LD when it starts with
@@ -381,9 +384,26 @@ pub fn draft(def: &LayerDef, content: &[u8]) -> Result<Draft, Error> {
     let new = node(NEW_SUBJECT);
     let mut blank = None;
     let mut placeholder = false;
+    // A lobby also takes the subject the onboarding contract names a request by,
+    // `urn:iki:onboard:request:{fingerprint}`, as the placeholder: the host still names the
+    // entry, and the fingerprint in the name is checked against the entry's own
+    // (`onboard::check_request`).
+    let mut posted: Option<oxrdf::NamedNode> = None;
     for t in &triples {
         match &t.subject {
             NamedOrBlankNode::NamedNode(n) if n.as_str() == NEW_SUBJECT => placeholder = true,
+            NamedOrBlankNode::NamedNode(n)
+                if def.lobby
+                    && crate::onboard::request_subject_fingerprint(n.as_str()).is_some() =>
+            {
+                match &posted {
+                    None => posted = Some(n.clone()),
+                    Some(one) if one == n => {}
+                    Some(_) => {
+                        return Err(invalid("more than one subject: an entry is one subject"))
+                    }
+                }
+            }
             NamedOrBlankNode::BlankNode(b) => match &blank {
                 None => blank = Some(b.clone()),
                 Some(one) if one == b => {}
@@ -397,7 +417,12 @@ pub fn draft(def: &LayerDef, content: &[u8]) -> Result<Draft, Error> {
             }
         }
     }
-    if placeholder && blank.is_some() {
+    if [placeholder, blank.is_some(), posted.is_some()]
+        .iter()
+        .filter(|b| **b)
+        .count()
+        > 1
+    {
         return Err(invalid("more than one subject: an entry is one subject"));
     }
     let supersedes_p = rdf::ik_supersedes();
@@ -409,6 +434,7 @@ pub fn draft(def: &LayerDef, content: &[u8]) -> Result<Draft, Error> {
         refuse_stamp(p)?;
         let object = match t.object {
             Term::BlankNode(ref b) if Some(b) == blank.as_ref() => Term::NamedNode(new.clone()),
+            Term::NamedNode(ref n) if Some(n) == posted.as_ref() => Term::NamedNode(new.clone()),
             Term::NamedNode(_) | Term::Literal(_) => t.object.clone(),
             _ => {
                 return Err(invalid(
@@ -434,6 +460,7 @@ pub fn draft(def: &LayerDef, content: &[u8]) -> Result<Draft, Error> {
     Ok(Draft {
         triples: checked,
         supersedes,
+        posted: posted.map(|n| n.into_string()),
     })
 }
 
@@ -588,6 +615,16 @@ fn list(classes: &BTreeSet<String>) -> String {
 }
 
 impl Draft {
+    /// Its triples, about [`NEW_SUBJECT`], as the author sent them.
+    pub(crate) fn triples(&self) -> &[Triple] {
+        &self.triples
+    }
+
+    /// The subject its author wrote, when it was a lobby's request name.
+    pub(crate) fn posted(&self) -> Option<&str> {
+        self.posted.as_deref()
+    }
+
     /// The entry as it will be stored: named `iri`, attributed to `author`, created at
     /// `created` (`xsd:dateTime`) and numbered `seq`.
     pub fn stamp(&self, iri: &str, author: &str, created: &str, seq: u64) -> Vec<Triple> {

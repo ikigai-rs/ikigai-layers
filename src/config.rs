@@ -8,6 +8,9 @@
 //!   participants.ttl             who each principal is (served at urn:layers:participants)
 //!   collabs/{name}.toml          a collaboration's manifest (served at urn:collab:{name})
 //!   enrollment.toml              certificate fingerprints, read only by the grants generator
+//!   entitlements.toml            WRITTEN by the host: what verified entitlements grant
+//!                                (crate::onboard), read by the grants generator beside the
+//!                                manifests
 //!   layers.toml                  optional: the host's own options ([`load_match_budget`])
 //! ```
 //!
@@ -127,6 +130,13 @@ pub struct LayerDef {
     /// The collaborations this layer is declared shared with. `None` means private: at
     /// most one manifest may mount it.
     pub shared: Option<BTreeSet<String>>,
+    /// A channel's only: whether this layer is an enrollment LOBBY (`lobby = true`, ledger
+    /// #2009). A door may admit a certificate nobody enrolled to `say` on a lobby and nothing
+    /// else ([`crate::onboard::lobby_capability`]); the host accepts a lobby entry from a
+    /// principal the participants graph does not name, so long as its name carries its
+    /// certificate's fingerprint, and holds every lobby to the bounds in [`crate::onboard`]:
+    /// at most [`crate::onboard::LOBBY_ENTRY_MAX`] bytes an entry, and a rate.
+    pub lobby: bool,
 }
 
 #[derive(Deserialize)]
@@ -142,6 +152,7 @@ struct LayerToml {
     #[serde(rename = "match")]
     matching: Option<bool>,
     shared: Option<Vec<String>>,
+    lobby: Option<bool>,
 }
 
 /// Read every `layers/*.toml` under `dir`. No `layers/` directory is a host with no
@@ -213,6 +224,12 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
                  has no rd"
             ))
         }
+        Model::Tuplespace if parsed.lobby.is_some() => {
+            return err(format!(
+                "{at}: `lobby` is a channel option: an enrollment request is an entry someone \
+                 says"
+            ))
+        }
         Model::Tuplespace if parsed.about.is_some() => {
             return err(format!(
                 "{at}: `about` is a channel option (its `latest about=` read); a tuplespace \
@@ -246,6 +263,14 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
             iri
         }
     };
+    let lobby = parsed.lobby.unwrap_or(false);
+    if lobby && entry_max > crate::onboard::LOBBY_ENTRY_MAX {
+        return err(format!(
+            "{at}: a lobby admits certificates nobody enrolled, so its entry_max is at most \
+             {} bytes, and this says {entry_max}",
+            crate::onboard::LOBBY_ENTRY_MAX
+        ));
+    }
     let shared = match parsed.shared {
         None => None,
         Some(names) => {
@@ -269,6 +294,7 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         addressed: parsed.addressed.unwrap_or(false),
         matching: parsed.matching.unwrap_or(false),
         shared,
+        lobby,
     })
 }
 
@@ -729,6 +755,69 @@ pub const HOST_FILE: &str = "layers.toml";
 struct HostToml {
     #[serde(rename = "match")]
     matching: Option<MatchToml>,
+    onboard: Option<OnboardToml>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OnboardToml {
+    grants: Option<String>,
+    controller: Option<String>,
+    controller_key: Option<String>,
+    trust_dir: Option<String>,
+    trust_reload: Option<String>,
+}
+
+/// When the door this host's enrollment feeds reads its client trust list
+/// ([`OnboardConfig::trust_reload`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrustReload {
+    /// At every handshake (cli's `serve quic://` since ledger #1825): a certificate written
+    /// to the trust directory is trusted at its next connection, so applying an entitlement
+    /// needs no restart. The default.
+    Live,
+    /// Only when the door starts: after the host applies an entitlement, the door must be
+    /// restarted before the new certificate can connect, and the host says so (in its log and
+    /// at [`crate::onboard::STATUS`]). It never restarts anything itself.
+    Start,
+}
+
+/// The host's onboarding (ledger #2009): the `[onboard]` table of [`HOST_FILE`].
+///
+/// ```toml
+/// # layers.toml
+/// [onboard]
+/// grants         = "grants"             # the channel layer entitlements are said on
+/// controller     = "brian"              # the ONE participant who may say on it
+/// controller_key = "controller.pub.pem" # the controller's Ed25519 public key (SPKI PEM),
+///                                       # a file beside layers.toml
+/// trust_dir      = "/home/door/.ikigai/quic/clients"  # where an entitled certificate goes
+/// trust_reload   = "live"               # or "start": the door reads trust_dir only at start
+/// ```
+///
+/// Without the table nothing is applied. With it, `grants`, `controller`, `controller_key` and
+/// `trust_dir` are required, because each names something the host would otherwise have to
+/// guess: the layer it trusts, who alone may say on it, the key that decides, and the directory
+/// the door trusts certificates from.
+///
+/// **Only the controller says on the grants layer**, held three ways: the host refuses to open
+/// when a manifest grants `say` on it to anyone else, refuses an entitlement that grants more
+/// than `read` or `feed` on it, and refuses a `say` on it from any other principal. A node
+/// reads its own entitlement there without verifying the signature, so this is what it relies
+/// on.
+#[derive(Clone, Debug)]
+pub struct OnboardConfig {
+    /// The channel layer whose entries are entitlements.
+    pub grants: String,
+    /// The one participant who may say on it, by IRI.
+    pub controller: String,
+    /// The controller's public key, as the SPKI PEM the file holds.
+    pub controller_key: String,
+    /// The directory an entitled certificate is written to (`{fingerprint}.crt`). Relative
+    /// paths are resolved against the config directory.
+    pub trust_dir: PathBuf,
+    /// When the door reads `trust_dir`.
+    pub trust_reload: TrustReload,
 }
 
 #[derive(Deserialize)]
@@ -797,6 +886,238 @@ pub fn load_match_budget(dir: &Path) -> Result<TimeBudget, ConfigError> {
     Ok(budget)
 }
 
+/// The `[onboard]` table of [`HOST_FILE`] under `dir`, checked against `layers`: `None` when
+/// there is no such table. See [`OnboardConfig`].
+pub fn load_onboard(
+    dir: &Path,
+    layers: &BTreeMap<String, LayerDef>,
+) -> Result<Option<OnboardConfig>, ConfigError> {
+    let path = dir.join(HOST_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return err(format!("read {}: {e}", path.display())),
+    };
+    let at = path.display();
+    let parsed: HostToml = toml::from_str(&text).map_err(|e| ConfigError(format!("{at}: {e}")))?;
+    let Some(onboard) = parsed.onboard else {
+        return Ok(None);
+    };
+    let required = |value: Option<String>, key: &str, what: &str| {
+        value
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| ConfigError(format!("{at}: `onboard.{key}` is required: {what}")))
+    };
+    let grants = required(
+        onboard.grants,
+        "grants",
+        "the channel layer whose entries are entitlements",
+    )?;
+    match layers.get(&grants) {
+        Some(def) if def.model == Model::Channel && !def.lobby => {}
+        Some(_) => {
+            return err(format!(
+                "{at}: `onboard.grants` names `{grants}`, which is not a channel (or is a \
+                 lobby): an entitlement is an entry the controller says"
+            ))
+        }
+        None => {
+            return err(format!(
+                "{at}: `onboard.grants` names `{grants}`, which no definition defines"
+            ))
+        }
+    }
+    let controller = required(
+        onboard.controller,
+        "controller",
+        "the one participant who may say on the grants layer (a manifest key: `brian`, or an IRI)",
+    )?;
+    let controller = Participant::from_manifest_key(&controller)
+        .map_err(|e| ConfigError(format!("{at}: `onboard.controller`: {e}")))?
+        .iri()
+        .to_string();
+    let key_file = required(
+        onboard.controller_key,
+        "controller_key",
+        "the file (beside layers.toml) holding the controller's Ed25519 public key, SPKI PEM",
+    )?;
+    if !is_plain_file_name(&key_file) {
+        return err(format!(
+            "{at}: `onboard.controller_key` is `{key_file}`; it names a file beside \
+             layers.toml, not a path"
+        ));
+    }
+    let controller_key = read(&dir.join(&key_file))?;
+    crate::onboard::check_public_key_pem(&controller_key)
+        .map_err(|e| ConfigError(format!("{at}: `onboard.controller_key` `{key_file}`: {e}")))?;
+    let trust_dir = required(
+        onboard.trust_dir,
+        "trust_dir",
+        "the directory the door trusts client certificates from",
+    )?;
+    let trust_dir = dir.join(trust_dir);
+    let trust_reload = match onboard.trust_reload.as_deref() {
+        None | Some("live") => TrustReload::Live,
+        Some("start") => TrustReload::Start,
+        Some(other) => {
+            return err(format!(
+                "{at}: `onboard.trust_reload` is `{other}`; it is `live` (the door reads its \
+                 trust list at every handshake) or `start` (only when it starts)"
+            ))
+        }
+    };
+    Ok(Some(OnboardConfig {
+        grants,
+        controller,
+        controller_key,
+        trust_dir,
+        trust_reload,
+    }))
+}
+
+/// The file the host writes what its verified entitlements grant into (ledger #2009), beside
+/// the manifests: the grants generator reads it as a second source of grants, so the operator
+/// running `ikigai-layers grants` by hand derives exactly what the host's apply step derived.
+/// Written whole by [`crate::onboard`], never by hand.
+pub const ENTITLEMENTS_FILE: &str = "entitlements.toml";
+
+/// One participant a verified entitlement grants, as [`ENTITLEMENTS_FILE`] records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entitled {
+    /// Who.
+    pub participant: Participant,
+    /// Its certificate's fingerprint, folded.
+    pub fingerprint: String,
+    /// The entitlement entry it was applied from.
+    pub entitlement: String,
+    /// Each layer it may use, and the verbs.
+    pub grants: BTreeMap<String, BTreeSet<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntitlementsToml {
+    #[serde(default)]
+    entitled: Vec<EntitledToml>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntitledToml {
+    participant: String,
+    fingerprint: String,
+    entitlement: String,
+    grants: Vec<String>,
+}
+
+/// Parse `urn:cap:layer:{verb}:{layer}` into (layer, verb).
+///
+/// ```
+/// use ikigai_layers::config::parse_layer_cap;
+///
+/// assert_eq!(parse_layer_cap("urn:cap:layer:read:tasks"), Some(("tasks", "read")));
+/// assert_eq!(parse_layer_cap("urn:cap:layer:read:Tasks"), None);
+/// assert_eq!(parse_layer_cap("urn:cap:collab:read:edge"), None);
+/// ```
+pub fn parse_layer_cap(cap: &str) -> Option<(&str, &str)> {
+    let rest = cap.strip_prefix("urn:cap:layer:")?;
+    let (verb, layer) = rest.split_once(':')?;
+    let known = matches!(verb, "read" | "feed" | "say" | "out" | "take");
+    (known && is_layer_name(layer)).then_some((layer, verb))
+}
+
+/// Check one entitled grant set against the layers and manifests: each layer defined, each
+/// verb one its model has, and each layer mounted by some collaboration (a grant on a layer no
+/// manifest mounts would belong to no collaboration; creating layers is ledger #2010).
+pub fn check_entitled_grants(
+    grants: &BTreeMap<String, BTreeSet<String>>,
+    layers: &BTreeMap<String, LayerDef>,
+    collabs: &BTreeMap<String, Manifest>,
+) -> Result<(), String> {
+    for (layer, verbs) in grants {
+        let Some(def) = layers.get(layer) else {
+            return Err(format!("layer `{layer}`, which no definition defines"));
+        };
+        if let Some(verb) = verbs
+            .iter()
+            .find(|v| !def.model.verbs().contains(&v.as_str()))
+        {
+            return Err(format!(
+                "`{verb}` on `{layer}`, a {} layer, whose verbs are {}",
+                def.model.as_str(),
+                def.model.verbs().join(", ")
+            ));
+        }
+        if !collabs
+            .values()
+            .any(|m| m.mounts.iter().any(|mount| &mount.layer == layer))
+        {
+            return Err(format!(
+                "layer `{layer}`, which no collaboration mounts (a grant belongs to a \
+                 collaboration; creating layers is ledger #2010)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Read [`ENTITLEMENTS_FILE`] under `dir`, checked against the layers, the participants and
+/// the manifests. Absent is empty.
+pub fn load_entitled(
+    dir: &Path,
+    layers: &BTreeMap<String, LayerDef>,
+    participants: &Participants,
+    collabs: &BTreeMap<String, Manifest>,
+) -> Result<Vec<Entitled>, ConfigError> {
+    let path = dir.join(ENTITLEMENTS_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return err(format!("read {}: {e}", path.display())),
+    };
+    let at = path.display();
+    let parsed: EntitlementsToml =
+        toml::from_str(&text).map_err(|e| ConfigError(format!("{at}: {e}")))?;
+    let mut entitled = Vec::new();
+    for item in parsed.entitled {
+        let participant =
+            Participant::parse(&item.participant).map_err(|e| ConfigError(format!("{at}: {e}")))?;
+        if !participants.names(participant.iri()) {
+            return err(format!(
+                "{at}: {} is no participant in participants.ttl",
+                participant.iri()
+            ));
+        }
+        let fingerprint = crate::name::fold_fingerprint(&item.fingerprint).ok_or_else(|| {
+            ConfigError(format!(
+                "{at}: `{}` is not a SHA-256 fingerprint",
+                item.fingerprint
+            ))
+        })?;
+        let mut grants: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for cap in &item.grants {
+            let (layer, verb) = parse_layer_cap(cap).ok_or_else(|| {
+                ConfigError(format!(
+                    "{at}: `{cap}` is not a layer grant (urn:cap:layer:{{verb}}:{{layer}})"
+                ))
+            })?;
+            grants
+                .entry(layer.to_string())
+                .or_default()
+                .insert(verb.to_string());
+        }
+        check_entitled_grants(&grants, layers, collabs)
+            .map_err(|e| ConfigError(format!("{at}: {} is granted {e}", participant.iri())))?;
+        entitled.push(Entitled {
+            participant,
+            fingerprint,
+            entitlement: item.entitlement,
+            grants,
+        });
+    }
+    Ok(entitled)
+}
+
 /// Everything in one directory, checked.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -808,6 +1129,8 @@ pub struct Config {
     pub participants: Participants,
     /// The collaborations, by name.
     pub collabs: BTreeMap<String, Manifest>,
+    /// What verified entitlements grant ([`ENTITLEMENTS_FILE`]), beside the manifests.
+    pub entitled: Vec<Entitled>,
 }
 
 impl Config {
@@ -817,11 +1140,13 @@ impl Config {
         let layers = load_layers(&dir)?;
         let participants = load_participants(&dir)?;
         let collabs = load_collabs(&dir, &layers, &participants)?;
+        let entitled = load_entitled(&dir, &layers, &participants, &collabs)?;
         Ok(Config {
             dir,
             layers,
             participants,
             collabs,
+            entitled,
         })
     }
 }

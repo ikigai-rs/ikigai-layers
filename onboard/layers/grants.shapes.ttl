@@ -1,0 +1,35 @@
+# What the grants layer admits: one onb:Entitlement per entry, closed, with the host's three stamps.
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix ik: <https://ikigai-rs.dev/ns#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix onb: <https://ikigai-rs.dev/ns/onboard#> .
+
+<urn:iki:onboard:shape:entitlement> a sh:NodeShape ;
+  sh:targetClass onb:Entitlement ;
+  sh:closed true ;
+  sh:ignoredProperties ( rdf:type ) ;
+  sh:property
+    [ sh:path onb:fingerprint ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ;
+      sh:pattern "^[0-9a-f]{64}$" ] ,
+    [ sh:path onb:principal ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ;
+      sh:pattern "^urn:collab:participant:[a-z0-9][a-z0-9-]{0,47}$" ] ,
+    [ sh:path onb:kind ; sh:maxCount 1 ; sh:nodeKind sh:IRI ;
+      sh:pattern "^urn:iki:onboard:kind:[a-z0-9-]{1,48}$" ] ,
+    [ sh:path onb:request ; sh:maxCount 1 ; sh:nodeKind sh:IRI ;
+      sh:pattern "^urn:layer:[a-z0-9-]{1,24}:entry:[0-9a-z]{23}$" ] ,
+    [ sh:path onb:layerGrant ; sh:maxCount 64 ; sh:nodeKind sh:IRI ;
+      sh:pattern "^urn:cap:layer:(read|feed|say|out|take):[a-z0-9-]{1,24}$" ] ,
+    [ sh:path onb:gonkGrant ; sh:maxCount 16 ; sh:datatype xsd:string ; sh:maxLength 200 ] ,
+    [ sh:path onb:router ; sh:maxCount 16 ; sh:datatype xsd:string ; sh:maxLength 200 ] ,
+    [ sh:path onb:gonkDoor ; sh:maxCount 1 ; sh:datatype xsd:string ; sh:maxLength 255 ] ,
+    [ sh:path onb:gonkServerCert ; sh:maxCount 1 ; sh:datatype xsd:string ; sh:maxLength 8192 ] ,
+    [ sh:path onb:expires ; sh:maxCount 1 ; sh:datatype xsd:dateTime ] ,
+    [ sh:path ik:supersedes ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ,
+    [ sh:path onb:signature ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ;
+      sh:maxLength 4096 ] ,
+    [ sh:path prov:wasAttributedTo ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ,
+    [ sh:path dcterms:created ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:dateTime ] ,
+    [ sh:path ik:seq ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:integer ] .

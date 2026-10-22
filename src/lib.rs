@@ -143,6 +143,7 @@ pub mod id;
 #[cfg(feature = "host")]
 pub mod json;
 pub mod name;
+pub mod onboard;
 pub mod rdf;
 pub mod time;
 #[cfg(feature = "host")]

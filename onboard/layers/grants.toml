@@ -1,0 +1,13 @@
+# The GRANTS layer (ledger #2009), served as urn:layer:grants: where the controller says signed
+# entitlements, and the layer host applies each one that verifies against `onboard.controller_key`
+# (layers.toml) to its own door's enrollment. Only `onboard.controller` may say here (the host
+# refuses any other manifest grant of `say`, and any other author); every node an entitlement
+# enrolls gets `read` here with it, to read its own entitlement.
+#
+# The closed shapes admit one entry type, onb:Entitlement. Its onb:signature is ikigai-sign's
+# signature graph over `ikigai_layers::onboard::signing_bytes` of the rest; a revocation is an
+# entitlement with no onb:layerGrant that ik:supersedes the current one.
+model   = "channel"
+label   = "Entitlements"
+shapes  = "grants.shapes.ttl"
+context = "grants.context.jsonld"

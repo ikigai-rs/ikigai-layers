@@ -1,0 +1,15 @@
+{ "@context": {
+  "onb": "https://ikigai-rs.dev/ns/onboard#",
+  "ik": "https://ikigai-rs.dev/ns#",
+  "dcterms": "http://purl.org/dc/terms/",
+  "prov": "http://www.w3.org/ns/prov#",
+  "xsd": "http://www.w3.org/2001/XMLSchema#",
+  "EnrollmentRequest": "onb:EnrollmentRequest",
+  "invite": { "@id": "onb:invite", "@type": "@id" },
+  "certificate": "onb:certificate",
+  "fingerprint": "onb:fingerprint",
+  "proof": "onb:proof",
+  "attributedTo": { "@id": "prov:wasAttributedTo", "@type": "@id" },
+  "created": { "@id": "dcterms:created", "@type": "xsd:dateTime" },
+  "seq": { "@id": "ik:seq", "@type": "xsd:integer" }
+} }
