@@ -33,7 +33,7 @@ exclude = ["history/"]
 # `participant` checks that the tree stays free of them.
 default = ["host"]
 host = [
-    "dep:age",
+    "dep:ikigai-encrypt",
     "dep:ikigai-intray",
     "dep:ikigai-store",
     "dep:ikigai-shacl",
@@ -134,19 +134,16 @@ oxrdf = "0.3.4"
 oxttl = "0.2.4"
 oxrdfio = { version = "0.2.6", optional = true }
 # State sealed at rest (`at_rest`, ledger #2011): every file the host writes is an age file
-# sealed to the host's own recipient. **Why `age` and not ikigai-encrypt**, the ecosystem's home
-# for age: ikigai-encrypt 0.2.0 offers only its two ENDPOINTS (`urn:encrypt:encrypt` and
-# `urn:encrypt:decrypt`), which resolve the key as a kernel resource and answer armored text;
-# its seal and open are private functions. A host sealing its own files on every write needs a
-# library call, so this takes the SAME crate at the SAME line ikigai-encrypt takes (0.11, no
-# default features: no plugins, no scrypt passphrases, no armor) and calls it directly; no
-# cryptography is written here. When ikigai-encrypt exposes seal/open as library functions,
-# this should call those instead. ikigai-encrypt's low-order recipient check is not needed:
-# every recipient here is derived from the host's own identity (`Identity::to_public`), which is
-# never a low-order point. 0.11.1 is the line whose `Encryptor::with_recipients` takes an
-# iterator and whose `Decryptor` is one type, the API used here; tested against 0.11.5.
-# ⚠ `"0.11.1"` is `<0.12.0`.
-age = { version = "0.11.1", default-features = false, optional = true }
+# sealed to the host's own recipient, through ikigai-encrypt's library face
+# (`ikigai_encrypt::age`: `seal`, `open`, `parse_identities`, ledger #2016), the ecosystem's one
+# implementation of age, so no cryptography and no `age` dependency of this crate's own. 0.2.1 is
+# the first release with that face (0.2.0 had only the two endpoints). Without default features:
+# no ikigai-core endpoints, no async-trait and no armor, so `seal` writes binary age and `open`
+# reads it (armored input too if something else in the graph turns `armor` on, which the MAGIC
+# prefix checks in `at_rest` make harmless). Its low-order recipient check is not needed here:
+# every recipient is the host's own (`Identity::to_public`), never a low-order point.
+# ⚠ `"0.2.1"` is `<0.3.0`.
+ikigai-encrypt = { version = "0.2.1", default-features = false, optional = true }
 # A tuple is sealed before intray stores it, so intray's own `match=` (a SPARQL ASK over the
 # Turtle of each tuple it holds) can no longer read it: the host opens the pending tuples and
 # evaluates the template itself, with ikigai-store's bounds (`limits::check_sparql`, the
@@ -180,6 +177,13 @@ ikigai-vocab = "0.1.98"
 # oxrdfio and the SPARQL crates turn it on together (each matches on it exhaustively). Without
 # this the depth tests would only see a syntax error (ledger #2015).
 oxigraph = { version = "0.5.11", default-features = false, features = ["rdf-12"] }
+
+# The tests' independent oracle for the sealed files: `tests/at_rest.rs` and `tests/common`
+# open what the host wrote, and seal plaintext fixtures, with `age` called directly, so a file
+# the host seals through ikigai-encrypt is checked against age itself, not against the same
+# code that wrote it. The line ikigai-encrypt 0.2.1 takes (`age = "0.11"`), so nothing new is
+# compiled; a dev-dependency adds nothing to a consumer's build. ⚠ `"0.11.1"` is `<0.12.0`.
+age = { version = "0.11.1", default-features = false }
 
 [target.'cfg(unix)'.dev-dependencies]
 # `tests/partial_write.rs` injects a torn write from outside the library by lowering the
