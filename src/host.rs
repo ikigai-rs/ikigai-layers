@@ -257,10 +257,13 @@ impl Host {
     /// [`crate::onboard::lobby_principal`] (`host` is the door's instance name). `Ok(None)`
     /// when the host has no lobby: the door then refuses the certificate, as it always did.
     ///
-    /// ⚠ A door can only call this for a certificate its TLS handshake ADMITTED, and cli's
-    /// QUIC door (ikigai-quic's pinned verifier) refuses a certificate not on its trust list
-    /// at the handshake. Until it can admit an untrusted certificate for the lobby only, a
-    /// lobby is reachable by certificates the door already trusts (ledger #2009).
+    /// With ikigai-cli at or after the release carrying
+    /// [f1d2124](https://github.com/ikigai-rs/ikigai-cli/commit/f1d2124b6eff40512aed346fd2a8ffa3ef917771),
+    /// a QUIC door with a lobby admits an unlisted, in-window client certificate and mints
+    /// this capability: `say` on the lobbies only. A door without a lobby still refuses it.
+    /// Set `[onboard]`'s `trust_dir` to the door's `<quic cert dir>/clients`, so an applied
+    /// entitlement installs the certificate where the door reads it. Start the door with a
+    /// short instance name, e.g. `--name lobby`, for the lobby principal (ledger #2009).
     pub fn lobby_capability(
         &self,
         host: &str,
