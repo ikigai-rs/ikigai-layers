@@ -26,6 +26,7 @@
 //! sealing is separate work (ledger #2013).
 //!
 //! ```
+//! use ikigai_encrypt::age::{ExposeSecret, Identity};
 //! use ikigai_layers::at_rest::{Migration, StateKey};
 //!
 //! # let dir = std::env::temp_dir().join(format!("ikigai-layers-key-doc-{}", std::process::id()));
@@ -33,7 +34,7 @@
 //! let path = dir.join("state.key");
 //! // An operator runs `age-keygen -o state.key`; this writes the same file.
 //! std::fs::write(&path, format!("# created by age-keygen\n{}\n",
-//!     age::secrecy::ExposeSecret::expose_secret(&age::x25519::Identity::generate().to_string()))).unwrap();
+//!     ExposeSecret::expose_secret(&Identity::generate().to_string()))).unwrap();
 //! let key = StateKey::load(&path).expect("an age identity file");
 //! assert!(key.recipient().starts_with("age1"));
 //! // A missing identity is refused, naming the path, never an empty layer.
@@ -46,11 +47,10 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::Arc;
 
-use age::x25519::{Identity, Recipient};
 use base64::Engine;
+use ikigai_encrypt::age::{Identity, Recipient};
 
 use crate::config::ConfigError;
 
@@ -132,21 +132,18 @@ impl StateKey {
                 ),
                 _ => refuse(format!("cannot be read ({e})")),
             })?;
-        let mut identities = Vec::new();
-        for (number, line) in text.lines().enumerate().map(|(n, l)| (n + 1, l.trim())) {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
+        let identities = ikigai_encrypt::age::parse_identities(&text).map_err(|e| match e {
+            ikigai_encrypt::age::Error::BadKey { line, detail } => refuse(format!(
+                "line {line} is not an X25519 age identity ({detail})"
+            )),
+            ikigai_encrypt::age::Error::NoKeys => {
+                refuse("holds no age identity (expected a line AGE-SECRET-KEY-1…)".to_string())
             }
-            identities.push(Identity::from_str(line).map_err(|e| {
-                refuse(format!("line {number} is not an X25519 age identity ({e})"))
-            })?);
-        }
-        let Some(current) = identities.first() else {
-            return Err(refuse(
-                "holds no age identity (expected a line AGE-SECRET-KEY-1…)".to_string(),
-            ));
-        };
-        let recipient = current.to_public();
+            // `Error` is non-exhaustive; nothing else is a parse failure today.
+            other => refuse(other.to_string()),
+        })?;
+        // `parse_identities` refuses an empty list, so there is a first.
+        let recipient = identities[0].to_public();
         Ok(StateKey(Arc::new(KeyInner {
             path: path.to_path_buf(),
             identities,
@@ -224,18 +221,8 @@ impl Sealer {
 
     /// Seal `plaintext` to the current recipient, as binary age.
     pub(crate) fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
-        let recipient = &self.key.0.recipient as &dyn age::Recipient;
-        let encryptor = age::Encryptor::with_recipients(std::iter::once(recipient))
-            .map_err(|e| format!("seal: {e}"))?;
-        let mut sealed = Vec::with_capacity(plaintext.len() + 256);
-        let mut writer = encryptor
-            .wrap_output(&mut sealed)
-            .map_err(|e| format!("seal: {e}"))?;
-        writer
-            .write_all(plaintext)
-            .and_then(|()| writer.finish().map(|_| ()))
-            .map_err(|e| format!("seal: {e}"))?;
-        Ok(sealed)
+        ikigai_encrypt::age::seal(plaintext, std::slice::from_ref(&self.key.0.recipient))
+            .map_err(|e| format!("seal: {e}"))
     }
 
     /// Open a file's bytes with any identity in the key file (or pass plaintext through,
@@ -256,13 +243,13 @@ impl Sealer {
                 "torn: empty, or part of an age header".into(),
             ));
         }
-        open_with(bytes, self.key.0.identities.iter())
+        open_with(bytes, &self.key.0.identities)
     }
 
     /// Whether `bytes` are sealed and the CURRENT identity opens them: a file that needs no
     /// [`Migration::Reseal`].
     pub(crate) fn is_current(&self, bytes: &[u8]) -> bool {
-        bytes.starts_with(MAGIC) && open_with(bytes, self.key.0.identities.iter().take(1)).is_ok()
+        bytes.starts_with(MAGIC) && open_with(bytes, &self.key.0.identities[..1]).is_ok()
     }
 
     /// Read the file at `path` and open it as UTF-8 text; the refusal names the file.
@@ -289,7 +276,7 @@ impl Sealer {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(line)
             .map_err(|e| Unsealed::Corrupt(format!("not base64: {e}")))?;
-        let opened = open_with(&bytes, self.key.0.identities.iter())?;
+        let opened = open_with(&bytes, &self.key.0.identities)?;
         String::from_utf8(opened).map_err(|_| Unsealed::Corrupt("not UTF-8".into()))
     }
 
@@ -302,22 +289,14 @@ impl Sealer {
     }
 }
 
-fn open_with<'a>(
-    bytes: &[u8],
-    identities: impl Iterator<Item = &'a Identity>,
-) -> Result<Vec<u8>, Unsealed> {
-    let decryptor = age::Decryptor::new(bytes).map_err(|e| Unsealed::Corrupt(e.to_string()))?;
-    let mut reader = decryptor
-        .decrypt(identities.map(|i| i as &dyn age::Identity))
-        .map_err(|e| match e {
-            age::DecryptError::NoMatchingKeys => Unsealed::NoMatchingKey,
-            other => Unsealed::Corrupt(other.to_string()),
-        })?;
-    let mut opened = Vec::new();
-    reader
-        .read_to_end(&mut opened)
-        .map_err(|e| Unsealed::Corrupt(e.to_string()))?;
-    Ok(opened)
+/// Open `bytes` with whichever of `identities` matches: a whole file sealed to none of them is
+/// [`Unsealed::NoMatchingKey`], and every other failure (not age, an altered header, a torn or
+/// altered payload, a contained panic) is [`Unsealed::Corrupt`].
+fn open_with(bytes: &[u8], identities: &[Identity]) -> Result<Vec<u8>, Unsealed> {
+    ikigai_encrypt::age::open(bytes, identities).map_err(|e| match e {
+        ikigai_encrypt::age::Error::NoMatchingKey => Unsealed::NoMatchingKey,
+        other => Unsealed::Corrupt(other.to_string()),
+    })
 }
 
 /// Whether a file's first bytes say it is plaintext: non-empty, and not (a prefix of) an age

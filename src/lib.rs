@@ -85,9 +85,9 @@
 //! # let dir = std::env::temp_dir().join(format!("ikigai-layers-doc-{}", std::process::id()));
 //! # let (config, state) = (dir.join("config"), dir.join("state"));
 //! # std::fs::create_dir_all(&config).unwrap();
-//! # let identity = age::x25519::Identity::generate();
+//! # let identity = ikigai_encrypt::age::Identity::generate();
 //! # std::fs::write(dir.join("state.key"),
-//! #     age::secrecy::ExposeSecret::expose_secret(&identity.to_string())).unwrap();
+//! #     ikigai_encrypt::age::ExposeSecret::expose_secret(&identity.to_string())).unwrap();
 //! // An age identity file (`age-keygen -o state.key`), read once, at open.
 //! let key = StateKey::load(dir.join("state.key")).expect("an age identity");
 //! let host = ikigai_layers::Host::open(&config, &state, &key).expect("a configuration that checks");
