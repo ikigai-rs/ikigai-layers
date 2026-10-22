@@ -61,6 +61,9 @@ required-features = ["host"]
 # ⚠ `"0.1.98"` is a RANGE, `>=0.1.98, <0.2.0`: when core reaches 0.2 this line must move or
 # the crate freezes out of it.
 ikigai-core = "0.1.98"
+# Shared triple-term nesting guard; 0.2.1 first exports the check and bound (0.2.0 does not).
+# Also used by participants: adds oxrdfio and quick-xml, but no store or RocksDB.
+ikigai-rdf = "0.2.1"
 # The space a tuplespace layer fronts: intray's `urn:space:{name}` endpoint, linked and
 # invoked privately under the host's own `urn:cap:space:*` (core gives an endpoint no way to
 # issue above its caller's capability, so the space is a value the host owns, never a name it
