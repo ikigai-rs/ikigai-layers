@@ -370,7 +370,7 @@ pub struct Draft {
 /// `{` or `[`.
 ///
 /// Refused (as a bad `content`): more than the layer's `entry_max` bytes; JSON-LD nested
-/// deeper than [`MAX_JSON_DEPTH`], or Turtle deeper than [`MAX_TURTLE_DEPTH`]; a parse error;
+/// deeper than [`MAX_JSON_DEPTH`], or Turtle triple terms deeper than [`ikigai_rdf::MAX_TURTLE_NESTING`]; a parse error;
 /// a named graph; anything but exactly one
 /// subject, `<urn:layer:new>` or one blank node; a
 /// blank node or a quoted triple anywhere else; any of the three stamps
@@ -438,7 +438,7 @@ pub fn draft(def: &LayerDef, content: &[u8]) -> Result<Draft, Error> {
 }
 
 /// Parse what a writer sent: Turtle, or JSON-LD when it starts with `{` or `[`, at most the
-/// layer's `entry_max` bytes (and at most [`MAX_JSON_DEPTH`] or [`MAX_TURTLE_DEPTH`] levels
+/// layer's `entry_max` bytes (and at most [`MAX_JSON_DEPTH`] or [`ikigai_rdf::MAX_TURTLE_NESTING`] triple-term levels
 /// deep, before anything is parsed), in the default graph only. What the triples may say is the
 /// caller's (each model's) to check.
 pub(crate) fn parse_content(def: &LayerDef, content: &[u8]) -> Result<Vec<Triple>, Error> {
@@ -461,13 +461,12 @@ pub(crate) fn parse_content(def: &LayerDef, content: &[u8]) -> Result<Vec<Triple
             )));
         }
     } else {
-        let depth = turtle_depth(content);
-        if depth > MAX_TURTLE_DEPTH {
-            return Err(invalid(format!(
-                "Turtle nested {depth} levels deep, over the bound of {MAX_TURTLE_DEPTH}: an \
-                 entry is one subject, and no entry needs more"
-            )));
-        }
+        let text = std::str::from_utf8(content).map_err(|e| invalid(format!("not Turtle: {e}")))?;
+        rdf::check_turtle_nesting(text, "content").map_err(|message| {
+            invalid(format!(
+                "{message}: an entry is one subject, and no entry needs more"
+            ))
+        })?;
     }
     let format = if json {
         RdfFormat::from_media_type("application/ld+json").expect("a known format")
@@ -537,7 +536,8 @@ pub fn json_depth(json: &[u8]) -> usize {
     deepest
 }
 
-/// Shared Turtle nesting bound and scanner, also used by participant readers.
+/// Deprecated compatibility names for the former Turtle nesting rule.
+#[allow(deprecated)]
 pub use crate::rdf::{turtle_depth, MAX_TURTLE_DEPTH};
 
 /// The predicates the host stamps (who, when, and the feed position), refused if sent.

@@ -106,39 +106,37 @@ pub fn node(iri: &str) -> NamedNode {
 }
 
 /// Parse Turtle into triples. No base IRI: a relative IRI is an error, never resolved
-/// against something the author did not write. Nesting beyond [`MAX_TURTLE_DEPTH`] is
+/// against something the author did not write. Triple-term nesting beyond
+/// [`ikigai_rdf::MAX_TURTLE_NESTING`] is
 /// refused before parsing, including answers received by participants and gateways.
 pub fn parse_turtle(text: &str) -> Result<Vec<Triple>, String> {
-    let depth = turtle_depth(text.as_bytes());
-    if depth > MAX_TURTLE_DEPTH {
-        return Err(format!(
-            "Turtle nested {depth} levels deep, over the bound of {MAX_TURTLE_DEPTH}"
-        ));
-    }
+    check_turtle_nesting(text, "content")?;
     TurtleParser::new()
         .for_slice(text.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
 }
 
-/// The deepest Turtle this crate may parse: triple terms `<<( … )>>`, reified triples `<< … >>`,
-/// blank-node property lists `[ … ]`, collections `( … )` and annotations `{| … |}`, counted
-/// together.
-///
-/// Turtle's parser keeps its own stack, but an RDF 1.2 triple term is a boxed tree, and the
-/// parser clones it recursively when it emits the triple that holds it, so a stack overflow
-/// ABORTS the process here too, whatever the size bound allows: triple terms nested 1,750 deep
-/// (16 KB, under the default 16 KiB `entry_max`) overflowed a 2 MiB thread in a debug build,
-/// and 4,500 deep (40 KB, under the largest `entry_max`) in a release build (ledger #2015).
-/// Every host that links this crate parses them: its graph turns RDF 1.2 on. The other three
-/// shapes did not overflow at 100,000 deep, and are bounded with them anyway, so the bound is
-/// one rule about Turtle rather than one parser's current recursion. An entry is one subject
-/// whose other nodes are IRIs, so real entries nest a handful of levels; 64 is the bound
-/// the host puts on JSON-LD, for the same reason.
-pub const MAX_TURTLE_DEPTH: usize = 64;
+/// Compatibility name for the shared triple-term nesting bound.
+#[deprecated(note = "use ikigai_rdf::MAX_TURTLE_NESTING")]
+pub const MAX_TURTLE_DEPTH: usize = ikigai_rdf::MAX_TURTLE_NESTING;
+
+/// Apply the shared guard, retaining layers' existing String refusal message.
+pub(crate) fn check_turtle_nesting(text: &str, arg: &str) -> Result<(), String> {
+    ikigai_rdf::check_turtle_nesting(text, arg).map_err(|_error| {
+        // The shared typed refusal does not report a numeric depth. The legacy scan is
+        // diagnostic only: it never decides whether input is admitted.
+        let depth = legacy_turtle_depth(text.as_bytes());
+        format!(
+            "Turtle nested {depth} levels deep, over the bound of {}",
+            ikigai_rdf::MAX_TURTLE_NESTING
+        )
+    })
+}
 
 /// The deepest nesting of Turtle's brackets in `turtle` (see [`MAX_TURTLE_DEPTH`]), read byte
-/// by byte with no recursion, outside IRIs, strings and comments. Not a validator: the parser
+/// by byte with no recursion, outside IRIs, strings and comments. This legacy metric counts
+/// structural brackets too; admission now uses only the shared triple-term guard. The parser
 /// judges the rest.
 ///
 /// It reads those three as the parser's lexer does (oxttl's, which this crate parses with),
@@ -150,6 +148,7 @@ pub const MAX_TURTLE_DEPTH: usize = 64;
 /// and a write stops at its first error, so nothing past that point becomes a term.
 ///
 /// ```
+/// # #![allow(deprecated)]
 /// use ikigai_layers::rdf::turtle_depth;
 ///
 /// assert_eq!(turtle_depth(b"<urn:a> <urn:b> <urn:c> ."), 0);
@@ -161,7 +160,12 @@ pub const MAX_TURTLE_DEPTH: usize = 64;
 /// assert_eq!(turtle_depth(br"<urn:a> :b\#c [ <urn:c> 1 ] ."), 1);
 /// assert_eq!(turtle_depth(&b"<<(: a".repeat(100_000)), 100_000);
 /// ```
+#[deprecated(note = "use ikigai_rdf::check_turtle_nesting for the shared admission rule")]
 pub fn turtle_depth(turtle: &[u8]) -> usize {
+    legacy_turtle_depth(turtle)
+}
+
+fn legacy_turtle_depth(turtle: &[u8]) -> usize {
     let (mut depth, mut deepest) = (0usize, 0usize);
     let mut i = 0;
     while let Some(&b) = turtle.get(i) {

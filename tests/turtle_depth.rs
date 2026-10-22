@@ -1,6 +1,6 @@
 //! Deeply nested TURTLE in a write (ledger #2015). JSON-LD's depth is bounded before it is
-//! parsed (`MAX_JSON_DEPTH`, the audit of 2026-10-11); this suite asks the same of Turtle, whose
-//! nesting comes in four shapes: RDF 1.2 triple terms `<<( … )>>`, reified triples `<< … >>`,
+//! parsed (`MAX_JSON_DEPTH`, the audit of 2026-10-11); Turtle's shared bound covers recursive
+//! triple terms. This suite also exercises the iterative structural shapes: RDF 1.2 triple terms `<<( … )>>`, reified triples `<< … >>`,
 //! blank-node property lists `[ … ]` and collections `( … )`.
 //!
 //! Each deep write runs in a CHILD PROCESS (this test binary re-executed with [`PROBE`] set) on
@@ -167,16 +167,21 @@ fn deeply_nested_triple_terms_are_refused_not_a_stack_overflow() {
     }
 }
 
-/// Reified triples, blank-node property lists and collections nested 100,000 deep: none of
-/// them overflowed before the bound (the parser keeps its own stack, and they parse to flat
-/// triples), and each is refused by the same bound now, before anything is parsed.
+/// Reified triples still share the triple-term bound. Blank-node lists and collections
+/// were measured not to recurse at 32,000 levels (ikigai-linkeddata/tests/structural_depth.rs),
+/// so those now reach the entry checks after parsing instead of a nesting refusal.
 #[test]
-fn every_deep_turtle_shape_is_refused_before_parsing() {
+fn deep_shapes_follow_the_shared_triple_term_rule() {
     for write in ["say", "out"] {
         for shape in ["reified", "bnode", "collection"] {
             let outcome = probe(write, shape, 100_000).unwrap_or_else(|died| {
                 panic!("a `{write}` of {shape} nested 100,000 deep did not survive ({died})")
             });
+            if matches!(shape, "bnode" | "collection") {
+                assert!(!outcome.contains("Turtle nested"), "{outcome}");
+                assert!(outcome.contains("more than one subject"), "{outcome}");
+                continue;
+            }
             assert!(
                 outcome.contains("refused content: Turtle nested 100000 levels deep"),
                 "`{write}` {shape}: a refusal naming the depth, not {outcome}"
@@ -198,7 +203,9 @@ fn the_bound_is_exact_and_ignores_brackets_in_text() {
         at.to_string().contains("quoted triple") && !at.to_string().contains("nested"),
         "64 levels parse: {at}"
     );
-    let over = say(&f.kernel, "talk", &bobby, &body("say", "bnode", 65))
+    // Blank-node lists at 65 are now allowed through the guard, as justified by the
+    // 32,000-level structural measurement; use a recursive triple term for this boundary.
+    let over = say(&f.kernel, "talk", &bobby, &body("say", "triple", 65))
         .expect_err("65 levels are over the bound");
     assert!(
         over.to_string().contains("Turtle nested 65 levels deep"),
