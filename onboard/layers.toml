@@ -1,0 +1,19 @@
+# The layer host's [onboard] table (ledger #2009), in the host's layers.toml beside layers/.
+# Without it nothing is applied; with it, the first three keys are required.
+[onboard]
+# The channel layer whose entries are entitlements.
+grants = "grants"
+# The ONE participant who may say on it. The host refuses to open when a manifest grants `say`
+# on the grants layer to anyone else, and refuses a `say` there from anyone else: a node reads
+# its entitlement without verifying the signature, and relies on this.
+controller = "brian"
+# The controller's Ed25519 public key, SPKI PEM (`openssl pkey -pubout`), a file beside this one.
+controller_key = "controller.pub.pem"
+# Where an entitled certificate is written, as {fingerprint}.crt: the directory the door trusts
+# client certificates from. For cli's `serve quic://` that is the quic directory's `clients/`.
+# Relative paths are resolved against the config directory.
+trust_dir = "quic/clients"
+# "live" (the default): the door reads trust_dir at every handshake (cli since ledger #1825), so
+# nothing is restarted. "start": the door reads it only when it starts, and the host says
+# "restart the door" in its log and at urn:layer:onboard:status after it applies one.
+trust_reload = "live"

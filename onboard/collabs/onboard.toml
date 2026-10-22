@@ -1,0 +1,13 @@
+# Who uses the two onboarding layers (ledger #2009). The controller says entitlements and reads
+# the lobby's requests; nobody holds `say` on the lobby here, because a door admits an unenrolled
+# certificate to it directly. A node an entitlement enrolls gets its grants from the entitlement,
+# not from this file.
+label = "Onboarding"
+
+[[mount]]
+layer = "enroll"
+brian = ["read", "feed"]
+
+[[mount]]
+layer = "grants"
+brian = ["read", "feed", "say"]

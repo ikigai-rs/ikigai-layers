@@ -11,6 +11,7 @@ use crate::channel::Channel;
 use crate::config::{self, Config, ConfigError, LayerDef, Model, Participants};
 use crate::feed::{self, Event, FeedLog, Notify};
 use crate::json::{egress_context, Egress};
+use crate::onboard::apply::{LobbyRate, Onboard};
 use crate::tuplespace::Tuplespace;
 use ikigai_store::budget::EvaluationBudget;
 
@@ -110,6 +111,10 @@ pub struct Host {
     match_budget: EvaluationBudget,
     /// The host's own JSON-LD processor, bound into no space (ledger #1371).
     json: Egress,
+    /// Onboarding (ledger #2009): the `[onboard]` table, when `layers.toml` has one.
+    onboard: Option<Onboard>,
+    /// Every lobby's rate of says.
+    lobby_rate: LobbyRate,
     /// Held, never read: the state directory's lock lives exactly as long as the host.
     _lock: File,
 }
@@ -151,6 +156,28 @@ impl Host {
     ) -> Result<Arc<Host>, ConfigError> {
         let config = Config::load(&config_dir)?;
         let match_budget = EvaluationBudget::new(config::load_match_budget(&config.dir)?);
+        let onboard = config::load_onboard(&config.dir, &config.layers)?;
+        if let Some(onboard) = &onboard {
+            // Only the controller says entitlements: a manifest that lets anyone else is the
+            // operator's error, refused here rather than discovered by a node.
+            for manifest in config.collabs.values() {
+                for mount in manifest.mounts.iter().filter(|m| m.layer == onboard.grants) {
+                    for (who, verbs) in &mount.grants {
+                        if verbs.contains("say") && who.iri() != onboard.controller {
+                            return Err(ConfigError(format!(
+                                "collabs/{}.toml grants `say` on `{}` to {}, and only \
+                                 onboard.controller ({}) says entitlements",
+                                manifest.name,
+                                onboard.grants,
+                                who.iri(),
+                                onboard.controller
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        let onboard = onboard.map(Onboard::new);
         let json = Egress::new();
         let mut egress = BTreeMap::new();
         for (name, def) in &config.layers {
@@ -191,14 +218,88 @@ impl Host {
         check
             .settle(key, migration == Migration::Reseal)
             .map_err(ConfigError)?;
-        Ok(Arc::new(Host {
+        let host = Arc::new(Host {
             config_dir: config.dir,
             layers,
             notify: Arc::new(Notify::default()),
             match_budget,
             json,
+            onboard,
+            lobby_rate: LobbyRate::default(),
             _lock: lock,
-        }))
+        });
+        // Catch up on the grants layer: an entitlement said while no host ran is applied now,
+        // and one already applied changes nothing (ledger #2009).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        futures::executor::block_on(host.apply_entitlements(ikigai_core::Time::from_millis(now)));
+        Ok(host)
+    }
+
+    /// The configuration directory the host was opened over: where its door's enrollment
+    /// lives, and where applying an entitlement writes.
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
+    }
+
+    /// The lobbies (`lobby = true` channels), by name.
+    pub fn lobbies(&self) -> Vec<&str> {
+        self.layers
+            .iter()
+            .filter(|(_, s)| s.def.lobby)
+            .map(|(n, _)| n.as_str())
+            .collect()
+    }
+
+    /// The capability a door mints for a certificate its enrollment does not name, on this
+    /// host: `say` on every lobby and nothing else, under
+    /// [`crate::onboard::lobby_principal`] (`host` is the door's instance name). `Ok(None)`
+    /// when the host has no lobby: the door then refuses the certificate, as it always did.
+    ///
+    /// ⚠ A door can only call this for a certificate its TLS handshake ADMITTED, and cli's
+    /// QUIC door (ikigai-quic's pinned verifier) refuses a certificate not on its trust list
+    /// at the handshake. Until it can admit an untrusted certificate for the lobby only, a
+    /// lobby is reachable by certificates the door already trusts (ledger #2009).
+    pub fn lobby_capability(
+        &self,
+        host: &str,
+        fingerprint: &str,
+    ) -> Result<Option<ikigai_core::Capability>, String> {
+        let lobbies = self.lobbies();
+        if lobbies.is_empty() {
+            return Ok(None);
+        }
+        let principal = crate::onboard::lobby_principal(host, fingerprint)?;
+        ikigai_core::Capability::scoped(
+            lobbies
+                .iter()
+                .map(|layer| crate::name::layer_cap("say", layer)),
+        )
+        .with_principal(&principal)
+        .map(Some)
+        .map_err(|e| format!("{principal}: {e}"))
+    }
+
+    /// The onboarding status ([`crate::onboard::STATUS`]), when the host has `[onboard]`.
+    pub fn onboard_status(&self) -> Option<crate::onboard::Status> {
+        self.onboard.as_ref().map(Onboard::status)
+    }
+
+    /// The onboarding configuration, when the host has one.
+    pub fn onboard_config(&self) -> Option<&config::OnboardConfig> {
+        self.onboard.as_ref().map(|o| &o.config)
+    }
+
+    /// Apply the grants layer's entitlements, at `now`. Nothing to do without `[onboard]`.
+    pub(crate) async fn apply_entitlements(&self, now: ikigai_core::Time) {
+        if let Some(onboard) = &self.onboard {
+            onboard.apply(self, now).await;
+        }
+    }
+
+    pub(crate) fn lobby_rate(&self) -> &LobbyRate {
+        &self.lobby_rate
     }
 
     /// The layers, by name.

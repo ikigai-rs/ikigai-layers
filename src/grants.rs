@@ -11,8 +11,13 @@
 //!   writes is attributed to).
 //!
 //! Fingerprints come from `enrollment.toml` (a participant's name, as a manifest writes
-//! it, to one fingerprint or a list), or from the participant's own name when it is a host
-//! client (`urn:iki:host:{host}:client:<fingerprint>`). Nothing else.
+//! it, to one fingerprint or a list), from the participant's own name when it is a host
+//! client (`urn:iki:host:{host}:client:<fingerprint>`), or from a verified entitlement the
+//! host applied ([`crate::config::ENTITLEMENTS_FILE`]). Nothing else.
+//!
+//! **An entitlement grants what a manifest line would** (ledger #2009): for each layer it
+//! names, `urn:cap:layer:{verb}:{layer}` per verb, and `urn:cap:collab:read:{name}` for each
+//! collaboration that mounts the layer, unioned into the participant's one grant.
 //!
 //! **Isolation is structural here.** The generator reads only manifests that
 //! [`crate::config::load_collabs`] accepted, and that refuses a manifest mounting a layer
@@ -54,7 +59,8 @@ pub struct Enrollment {
 }
 
 /// Read `enrollment.toml` under `dir`: participant (as a manifest names it) → fingerprint
-/// or fingerprints. Absent is empty.
+/// or fingerprints, with every fingerprint `config`'s entitlements record added. Absent is
+/// no hand-enrolled certificate.
 pub fn load_fingerprints(
     dir: &Path,
     config: &Config,
@@ -63,7 +69,8 @@ pub fn load_fingerprints(
     let at = path.display();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        // Absent is no hand-enrolled certificate; entitled ones are still read below.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(ConfigError(format!("read {at}: {e}"))),
     };
     let table: toml::Table =
@@ -103,6 +110,12 @@ pub fn load_fingerprints(
             })?);
         }
     }
+    for entitled in &config.entitled {
+        fingerprints
+            .entry(entitled.participant.iri().to_string())
+            .or_default()
+            .insert(entitled.fingerprint.clone());
+    }
     Ok(fingerprints)
 }
 
@@ -118,6 +131,17 @@ pub fn generate(
                 let held = scopes.entry(participant.clone()).or_default();
                 held.insert(collab_cap(&manifest.name));
                 held.extend(verbs.iter().map(|verb| layer_cap(verb, &mount.layer)));
+            }
+        }
+    }
+    for entitled in &config.entitled {
+        let held = scopes.entry(entitled.participant.clone()).or_default();
+        for (layer, verbs) in &entitled.grants {
+            held.extend(verbs.iter().map(|verb| layer_cap(verb, layer)));
+            for manifest in config.collabs.values() {
+                if manifest.mounts.iter().any(|m| &m.layer == layer) {
+                    held.insert(collab_cap(&manifest.name));
+                }
             }
         }
     }

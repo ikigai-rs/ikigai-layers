@@ -189,6 +189,40 @@ nobody enrolled is refused). ikigai-cli's door re-reads both on every connection
 edit takes effect without a restart. A configuration that breaks the isolation rule writes
 nothing.
 
+## Onboarding a node by itself
+
+Two layers, both configuration (the example pair is [`onboard/`](onboard/), with its
+`[onboard]` table and a manifest), let a node with a brand-new certificate ask to join and be
+let in on a signed decision, with no file copied by hand (ledger #2009):
+
+- **A lobby** is a channel marked `lobby = true`. A door may admit a certificate nobody
+  enrolled to `say` on it and nothing else: `Host::lobby_capability(host, fingerprint)` is the
+  capability to mint for it, under the principal `urn:iki:host:{host}:client:{fingerprint}`.
+  Every lobby is held to 16 KiB an entry, 5 says an hour from one certificate and 30 from
+  everyone together (refused as `Unavailable`, naming the bound). Its shapes admit an
+  `onb:EnrollmentRequest` about `<urn:iki:onboard:request:{fingerprint}>` (or
+  `<urn:layer:new>`), and the host checks it beyond them: the posted certificate's leaf DER
+  must hash to `onb:fingerprint`, which must be the poster's own and the one in the subject.
+- **A grants layer** is a channel only `onboard.controller` says on (the host refuses a
+  manifest that grants anyone else `say` there, and any other author). Its entries are
+  `onb:Entitlement`s signed with [ikigai-sign](https://crates.io/crates/ikigai-sign) under the
+  controller's key over `onboard::signing_bytes`. The host verifies each new one against
+  `onboard.controller_key` and applies what verifies: the participant into `participants.ttl`,
+  its grants into `entitlements.toml` (which the grants generator reads beside the manifests),
+  `grants.json` and `clients.json` regenerated, and the certificate, taken from the lobby
+  request the entitlement names, into `onboard.trust_dir` as `{fingerprint}.crt`. An applied
+  entitlement also grants `read` on the grants layer, so the node reads its own. A newer one
+  for the same fingerprint must `ik:supersedes` the current one (so a replay changes nothing),
+  and one with no `onb:layerGrant` revokes.
+- **`urn:layer:onboard:status`** (readable under `urn:cap:layer:say:{grants}`, the
+  controller's) says what was seen, applied, superseded, expired and refused, and why, and
+  whether the door must be restarted (`onboard.trust_reload = "start"`; cli's door reads its
+  trust list at every handshake, so by default nothing is restarted).
+
+⚠ cli's QUIC door refuses an untrusted client certificate at the TLS handshake, so until its
+verifier can admit one for the lobby only, the lobby is reachable by certificates the door
+already trusts.
+
 ## Writing an entry
 
 ```text

@@ -1,0 +1,16 @@
+# The enrollment LOBBY (ledger #2009), served as urn:layer:enroll: where a node with a brand-new
+# certificate says its one enrollment request. `lobby = true` lets a door admit a certificate
+# nobody enrolled to `say` here and nothing else (`Host::lobby_capability`), and the host holds a
+# lobby to 16 KiB an entry, 5 says an hour from one certificate and 30 from everyone together.
+#
+# The closed shapes admit one entry type, onb:EnrollmentRequest, and the host checks it beyond
+# them: the certificate must hash to its onb:fingerprint, and that must be the certificate that
+# said it. The pairing-code proof is the controller's to check.
+#
+# Who READS the lobby is a manifest's grant, never the stranger's: the controller (and the tools
+# beside it) read pending requests here.
+model   = "channel"
+label   = "Enrollment requests"
+shapes  = "enroll.shapes.ttl"
+context = "enroll.context.jsonld"
+lobby   = true

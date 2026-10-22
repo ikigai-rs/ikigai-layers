@@ -56,6 +56,7 @@ use crate::feed::{self, Event, MAX_WAIT_SECS};
 use crate::host::{Host, LayerState};
 use crate::id;
 use crate::name::{collab_cap, collab_iri, endpoint_id, layer_cap, layer_iri, Participant};
+use crate::onboard;
 use crate::rdf::{self, node};
 use crate::time::xsd_date_time;
 use crate::tuplespace::{self, Lookup, Receipt, TupleMeta};
@@ -115,6 +116,15 @@ pub fn space(host: &Arc<Host>) -> EndpointSpace {
                 Some(_) => space.bind(template(action.iri(&base)), endpoint),
             };
         }
+    }
+    if let Some(config) = host.onboard_config() {
+        space = space.bind(
+            Exact::new(onboard::STATUS),
+            StatusEndpoint {
+                host: Arc::clone(host),
+                cap: layer_cap("say", &config.grants),
+            },
+        );
     }
     space
         .bind(
@@ -493,7 +503,11 @@ impl LayerEndpoint {
             })?
             .to_string();
         let participants = self.host.participants().map_err(host_error)?;
-        if !participants.names(&principal) {
+        // A lobby is where a certificate nobody enrolled says its request, so its author need
+        // not be a participant, only a name the host can attribute and tie to a certificate.
+        let lobby_author = self.def().lobby
+            && Participant::parse(&principal).is_ok_and(|p| p.fingerprint().is_some());
+        if !participants.names(&principal) && !lobby_author {
             return Err(Error::Denied(format!(
                 "{principal} is not a participant of this host (participants.ttl does not name \
                  it)"
@@ -552,7 +566,35 @@ impl LayerEndpoint {
         // stored, never after.
         let as_json = face(inv, &[TEXT, JSON])? == JSON;
         let (author, _) = self.attributed(inv, "say")?;
+        if let Some(c) = self
+            .host
+            .onboard_config()
+            .filter(|c| c.grants == self.layer() && c.controller != author)
+        {
+            return Err(Error::Denied(format!(
+                "only the onboarding controller ({}) says on layer `{}`",
+                c.controller,
+                self.layer()
+            )));
+        }
+        if self.def().lobby {
+            // Counted before anything is parsed: the rate bounds the work a stranger causes.
+            let who = Participant::parse(&author)
+                .ok()
+                .and_then(|p| p.fingerprint().map(str::to_string))
+                .unwrap_or_else(|| author.clone());
+            let now = self.now(inv)?;
+            self.host
+                .lobby_rate()
+                .admit(self.layer(), &who, now.as_millis())?;
+        }
         let draft = channel::draft(self.def(), inv.inline_arg("content")?)?;
+        if draft.triples().iter().any(|t| {
+            t.predicate.as_str() == rdf::RDF_TYPE
+                && rdf::object_iri(&t.object) == Some(onboard::ENROLLMENT_REQUEST)
+        }) {
+            onboard::check_request(draft.triples(), draft.posted(), &author)?;
+        }
         // From here to the feed append is one step per layer: the sequence number is
         // assigned, stamped, admitted, stored and logged under this lock.
         let _write = self.state.write.lock().await;
@@ -593,6 +635,14 @@ impl LayerEndpoint {
             )));
         }
         self.host.notify().bump();
+        if self
+            .host
+            .onboard_config()
+            .is_some_and(|c| c.grants == self.layer())
+        {
+            // The entry is stored whatever applying it decides: the decision is the status's.
+            self.host.apply_entitlements(now).await;
+        }
         Ok(named(&iri, as_json))
     }
 
@@ -1787,6 +1837,51 @@ impl Endpoint for MultiFeed {
                     .class(xsd("string")),
             )
             .input(wait_spec())
+            .input(as_spec(&[TEXT, JSON]))
+            .output(TEXT)
+            .output(JSON)
+    }
+}
+
+/// `urn:layer:onboard:status`: what the host saw on its grants layer, applied and refused,
+/// and whether its door must be restarted (ledger #2009). Readable by whoever may say on the
+/// grants layer: the controller.
+struct StatusEndpoint {
+    host: Arc<Host>,
+    cap: String,
+}
+
+#[async_trait]
+impl Endpoint for StatusEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let as_json = face(inv, &[TEXT, JSON])? == JSON;
+        let status = self
+            .host
+            .onboard_status()
+            .ok_or_else(|| Error::Endpoint("this host has no [onboard]".into()))?;
+        Ok(if as_json {
+            json_repr(serde_json::to_value(&status).map_err(|e| {
+                Error::Endpoint(format!("the onboarding status did not serialize: {e}"))
+            })?)
+        } else {
+            Representation::new(ReprType::new(TEXT), status.text().into_bytes())
+        })
+    }
+
+    fn name(&self) -> &str {
+        "onboard-status"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("layers-onboard-status")
+            .title("Onboarding status")
+            .summary(
+                "What this host saw on its grants layer: each entitlement applied, revoked, \
+                 superseded, expired or refused and why, what is in force by certificate \
+                 fingerprint, and whether the door must be restarted",
+            )
+            .verb(Verb::Source)
+            .requires(self.cap.clone())
             .input(as_spec(&[TEXT, JSON]))
             .output(TEXT)
             .output(JSON)
