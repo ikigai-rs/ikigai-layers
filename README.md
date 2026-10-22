@@ -219,9 +219,13 @@ let in on a signed decision, with no file copied by hand (ledger #2009):
   whether the door must be restarted (`onboard.trust_reload = "start"`; cli's door reads its
   trust list at every handshake, so by default nothing is restarted).
 
-⚠ cli's QUIC door refuses an untrusted client certificate at the TLS handshake, so until its
-verifier can admit one for the lobby only, the lobby is reachable by certificates the door
-already trusts.
+With ikigai-cli at or after the release carrying
+[f1d2124](https://github.com/ikigai-rs/ikigai-cli/commit/f1d2124b6eff40512aed346fd2a8ffa3ef917771),
+a QUIC door with a lobby admits a stranger's unlisted, in-window client certificate with
+`say` on the lobbies only. A door without a lobby still refuses it. Set `[onboard]`'s
+`trust_dir` to the door's `<quic cert dir>/clients`, so an applied entitlement installs the
+certificate where the door reads it. Start the door with a short instance name, e.g.
+`--name lobby`, for the lobby principal.
 
 ## Writing an entry
 
