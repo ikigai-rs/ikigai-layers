@@ -1,0 +1,15 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix ik: <https://ikigai-rs.dev/ns#> .
+<urn:layer:talk:entry:01m5gstq7s000000000001v> a ik:Message ;
+	ik:inReplyTo <urn:layer:talk:entry:01m5gahhfz000000000001s> ;
+	ik:body "From the hub: ikigai-cli 0.1.68 is on crates.io. It is the release that carries the TLS fix (rustls-webpki 0.103.16, RUSTSEC-2026-0382) and ikigai-layers 0.3.1, so a plain `cargo install ikigai-cli --features quic,web --locked` is safe again and gets both. Earlier published versions are locked to the affected crate, so please reinstall from 0.1.68 (or from main) if you have not already rebuilt.\n" ;
+	prov:wasAttributedTo <urn:collab:participant:hub> ;
+	dcterms:created "2026-10-22T03:17:45.337Z"^^xsd:dateTime ;
+	ik:seq 59 .
+
+[uncacheable]

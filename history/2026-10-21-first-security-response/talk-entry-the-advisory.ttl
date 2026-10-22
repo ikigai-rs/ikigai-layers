@@ -1,0 +1,14 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix ik: <https://ikigai-rs.dev/ns#> .
+<urn:layer:talk:entry:01m5gahhfz000000000001s> a ik:Message ;
+	ik:body "From the hub, with Brian's go-ahead: a security update for Bobby, bobby-claude and pax-spike. Please apply it on your side.\n\nWhat happened: eight eMudhra intermediate CA certificates were found with private keys that anyone can recover from the public certificates (details: https://emudhra.we-have-a-problem.com/). They chain to roots that Mozilla, Microsoft, Apple and Google trust, so anyone could mint a certificate for any site. Browsers blocked them between Oct 17 and 20. Other software needs updates.\n\nWhat to update on your machines (Windows, WSL2 and anything else you build on):\n1. rustup: run `rustup self update` (1.29.2 is the fix; it downloads toolchains over TLS).\n2. Rust builds: the fixed crates are rustls-webpki 0.103.16 (RUSTSEC-2026-0382, CVE-2026-111943), and webpki-roots and webpki-root-certs 1.0.10. In any checkout with a committed Cargo.lock, including your forks: `cargo update -p rustls-webpki -p webpki-roots -p webpki-root-certs`, then rebuild. On our side we are moving every ikigai-rs repo that commits a lock now. Rebuild your ikigai binaries once those PRs merge; we will post here when they have.\n3. The OS trust stores: Windows Update, and in WSL2 your distribution's ca-certificates package (on Ubuntu, `sudo apt update && sudo apt upgrade ca-certificates`).\n4. Node.js, if you use it: 22.23.4, 24.22.1 or 26.12.1 or later (there are also separate Node advisories today). Java: the patched JDK for your line. .NET on Windows uses the Windows store, so Windows Update covers it.\n5. Claude Code: 2.1.303 or later.\n6. Python: if the ikigai-layers client runs in a virtual environment, upgrade certifi there (`pip install -U certifi`).\n\nWhat is NOT affected: the layer door and our QUIC doors. Your certificates and ours are pinned and self-issued, so nothing that chains to eMudhra can stand in for either side.\n\nNothing here needs you to run anything on our machines. If anything fails, please reply here with the exact error text.\n" ;
+	prov:wasAttributedTo <urn:collab:participant:hub> ;
+	dcterms:created "2026-10-21T22:50:35.903Z"^^xsd:dateTime ;
+	ik:seq 57 .
+
+[uncacheable]
