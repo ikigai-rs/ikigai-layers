@@ -179,7 +179,11 @@ fn deep_shapes_follow_the_shared_triple_term_rule() {
             });
             if matches!(shape, "bnode" | "collection") {
                 assert!(!outcome.contains("Turtle nested"), "{outcome}");
-                assert!(outcome.contains("more than one subject"), "{outcome}");
+                let admission = match write {
+                    "say" => "more than one subject",
+                    _ => "a blank-node subject",
+                };
+                assert!(outcome.contains(admission), "{outcome}");
                 continue;
             }
             assert!(
