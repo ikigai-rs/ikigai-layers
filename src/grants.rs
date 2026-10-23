@@ -198,6 +198,16 @@ pub fn generate(
     Ok(enrollment)
 }
 
+/// Everything `ikigai-layers grants` derives from the configuration under `dir`: read and check
+/// it ([`Config::load`]), read the fingerprints ([`load_fingerprints`]) and [`generate`]. One
+/// function, so every caller (the `grants` and `onboard setup` subcommands) derives the same.
+pub fn derive(dir: &Path) -> Result<(Config, Enrollment), ConfigError> {
+    let config = Config::load(dir)?;
+    let fingerprints = load_fingerprints(dir, &config)?;
+    let enrollment = generate(&config, &fingerprints)?;
+    Ok((config, enrollment))
+}
+
 impl Enrollment {
     /// `grants.json`.
     pub fn grants_json(&self) -> String {
@@ -213,6 +223,13 @@ impl Enrollment {
                 .expect("a map of strings");
         text.push('\n');
         text
+    }
+
+    /// Whether `dir` already holds exactly the two files [`write`](Self::write) would write.
+    pub fn is_written(&self, dir: &Path) -> bool {
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
+        read("grants.json").as_deref() == Some(self.grants_json().as_str())
+            && read("clients.json").as_deref() == Some(self.clients_json().as_str())
     }
 
     /// Write both files into `dir`, each atomically (a temporary file renamed over the

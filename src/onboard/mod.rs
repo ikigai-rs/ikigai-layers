@@ -72,6 +72,8 @@ use crate::rdf::{self, node};
 
 #[cfg(feature = "host")]
 pub(crate) mod apply;
+#[cfg(feature = "host")]
+pub mod setup;
 
 #[cfg(feature = "host")]
 pub use apply::{Effective, Record, Status, Verdict};

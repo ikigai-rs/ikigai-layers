@@ -1,5 +1,12 @@
 # The layer host's [onboard] table (ledger #2009), in the host's layers.toml beside layers/.
-# Without it nothing is applied; with it, the first three keys are required.
+# Without it nothing is applied; with it, grants, controller, controller_key and trust_dir are
+# required.
+#
+# You need not write it by hand: `ikigai-layers onboard setup <config dir> --door-dir <the door's
+# quic cert dir> --door-name <name> --controller-key -` (ledger #2125) appends this table, with
+# trust_dir derived from the door's directory, writes the controller key beside it and the
+# layers and manifest in this directory, and regenerates grants.json and clients.json. Pipe
+# `ikigai-gonk onboard init` into it. `--check` reports what would leave a node in the lobby.
 [onboard]
 # The channel layer whose entries are entitlements.
 grants = "grants"
@@ -11,7 +18,9 @@ controller = "brian"
 controller_key = "controller.pub.pem"
 # Where an entitled certificate is written, as {fingerprint}.crt: the directory the door trusts
 # client certificates from. For cli's `serve quic://` that is the quic directory's `clients/`.
-# Relative paths are resolved against the config directory.
+# Relative paths are resolved against the config directory. setup writes it absolute, and
+# refuses a --door-dir that holds no server.crt and server.key. With any other directory an
+# approved node waits in the lobby forever and nothing says why.
 trust_dir = "quic/clients"
 # "live" (the default): the door reads trust_dir at every handshake (cli since ledger #1825), so
 # nothing is restarted. "start": the door reads it only when it starts, and the host says

@@ -975,6 +975,32 @@ pub fn load_onboard(
     }))
 }
 
+/// Only the controller says entitlements: a manifest that grants `say` on `onboard.grants` to
+/// anyone else is the operator's error. [`crate::Host::open`] refuses to open on it, and
+/// `ikigai-layers onboard setup --check` reports it, both through this one check.
+pub fn check_controller_says(
+    onboard: &OnboardConfig,
+    collabs: &BTreeMap<String, Manifest>,
+) -> Result<(), ConfigError> {
+    for manifest in collabs.values() {
+        for mount in manifest.mounts.iter().filter(|m| m.layer == onboard.grants) {
+            for (who, verbs) in &mount.grants {
+                if verbs.contains("say") && who.iri() != onboard.controller {
+                    return err(format!(
+                        "collabs/{}.toml grants `say` on `{}` to {}, and only \
+                         onboard.controller ({}) says entitlements",
+                        manifest.name,
+                        onboard.grants,
+                        who.iri(),
+                        onboard.controller
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The file the host writes what its verified entitlements grant into (ledger #2009), beside
 /// the manifests: the grants generator reads it as a second source of grants, so the operator
 /// running `ikigai-layers grants` by hand derives exactly what the host's apply step derived.
