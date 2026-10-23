@@ -968,3 +968,70 @@ fn an_opted_in_layer_takes_a_template_and_offers_it() {
     let meta = meta(&f);
     assert!(meta.contains("\"match\""), "{meta}");
 }
+
+/// Ledger #2017: a crash between intray's claim (the rename into `tuples/.taking/`) and its
+/// removal leaves the claim behind after the layer has committed the take's receipt. Intray
+/// puts a claim older than five minutes back in the inbox on its next `rd` or `take`, which
+/// would make the tuple pending again beside its receipt (and the next open refuse it as
+/// stored twice). The host owns the tree and records its takes itself, so it discards every
+/// staged claim and drop at open, before serving: the take happened.
+#[test]
+fn a_claim_a_crashed_take_left_behind_is_discarded_at_open() {
+    let mut f = fixture();
+    out(&f.kernel, &plasma(), &offer("a")).unwrap();
+    let cid = pending_cid(&f);
+    let space = f.state.path().join(TASKS).join("tuples");
+    let stored = std::fs::read(space.join("inbox").join(format!("{cid}.tuple"))).unwrap();
+    take(&f.kernel, &bobby_gonk(), &offer_iri("a")).unwrap();
+    let before = (
+        rd(&f.kernel, &[]),
+        rd(&f.kernel, &[("state", "taken")]),
+        feed(&f.kernel),
+    );
+    // Intray's claim name (`{id}.{millis}.{pid}.{n}.claim`), claimed at the epoch's first
+    // millisecond: long past its five minutes.
+    let claim = space.join(".taking").join(format!("{cid}.1.1.0.claim"));
+    std::fs::write(&claim, &stored).unwrap();
+    f.reopen();
+    assert!(!claim.exists(), "the claim is discarded at open");
+    let after = (
+        rd(&f.kernel, &[]),
+        rd(&f.kernel, &[("state", "taken")]),
+        feed(&f.kernel),
+    );
+    assert_eq!(before, after);
+    assert!(
+        !space.join("inbox").join(format!("{cid}.tuple")).exists(),
+        "never pending again"
+    );
+    let again = take(&f.kernel, &plasma(), &offer_iri("a"));
+    assert!(matches!(again, Err(Error::Conflict(_))), "{again:?}");
+    f.reopen();
+    assert_eq!(rd(&f.kernel, &[]), before.0);
+}
+
+/// Ledger #2017: a pending tuple that does not open (sealed to a key this host does not hold,
+/// planted past the host) refuses a `match=` with intray's typed `Conflict` naming it, where
+/// the host's own copy of the match used to skip it as if it were absent.
+#[test]
+fn a_tuple_that_does_not_open_refuses_a_match_naming_it() {
+    let f = matching_fixture();
+    out(&f.kernel, &plasma(), &offer("a")).unwrap();
+    let other = Scratch::new("other-key");
+    key(other.path());
+    let planted = sealed(other.path(), offer("x").as_bytes());
+    let id = ikigai_intray::tuple_id(&planted);
+    let inbox = f.state.path().join(TASKS).join("tuples").join("inbox");
+    std::fs::write(inbox.join(format!("{id}.tuple")), planted).unwrap();
+    let refused = issue(
+        &f.kernel,
+        Verb::Source,
+        TUPLES,
+        &[("match", "ASK { ?s ?p ?o }")],
+        &tasker(&participant("bobby")),
+    );
+    assert!(
+        matches!(refused, Err(Error::Conflict(ref m)) if m.contains(&id) && m.contains("does not decode")),
+        "{refused:?}"
+    );
+}

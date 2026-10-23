@@ -36,26 +36,33 @@
 //!
 //! # Sealed at rest
 //!
-//! Every tuple is sealed ([`crate::at_rest`]) BEFORE intray stores it, so the intray id is the
-//! hash of the ciphertext, and every receipt, staged or committed, is sealed too. Intray's own
-//! `match=` reads the Turtle of each tuple it holds, which it no longer can, so a template is
-//! evaluated here instead, over the opened pending tuples, with the bounds intray uses
-//! ([`Store::matching`]).
+//! Every tuple is sealed ([`crate::at_rest`]) by intray itself, through the host's
+//! [`TupleCodec`] (ikigai-intray 0.1.69, ledger #2017): `out` seals, and `rd`, `take` and every
+//! `match=` open, so the intray id is the hash of the ciphertext and a template is matched
+//! against the opened Turtle by intray's own evaluator, within the host's one budget. A pending
+//! tuple that does not open refuses a `match=` with intray's typed `Conflict` naming it, never
+//! reads as absent. Every receipt, staged or committed, is sealed too, by this module.
+//!
+//! At open, before anything is served, every staged drop and claim intray left under the space
+//! is discarded ([`SpaceEndpoint::discard_staging`]): the host holds the state directory, so
+//! none is live. A staged drop was never published, and a staged claim is a take whose receipt
+//! the open then commits; left in place, intray would put a claim back in the inbox after five
+//! minutes, pending again beside its receipt.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ikigai_core::{
     ArgRef, Bindings, Capability, Endpoint, Error, Invocation, Iri, Request, Result, Verb,
 };
-use ikigai_intray::{SpaceEndpoint, PROCESSING_DIR};
-use ikigai_store::budget::{check_query, EvaluationBudget};
-use ikigai_store::limits;
-use ikigai_store::service::{self, refuse_service_with};
-use oxigraph::io::{RdfFormat, RdfParser};
-use oxigraph::sparql::{CancellationToken, QueryResults};
+use ikigai_intray::{
+    tuple_id, SpaceEndpoint, TupleCodec, ERROR_DIR, INBOX_DIR, OUTBOX_DIR, PROCESSING_DIR,
+    SPACE_DIRS,
+};
+use ikigai_store::budget::EvaluationBudget;
 use oxrdf::{Literal, NamedOrBlankNode, Term, Triple};
 
 use crate::at_rest::{self, Sealer, Unsealed};
@@ -68,11 +75,6 @@ use crate::rdf::{self, node, object_iri, subject_iri};
 
 /// The intray space a tuplespace layer fronts: `<state>/{layer}/tuples/`.
 pub const SPACE_NAME: &str = "tuples";
-
-/// The directories intray keeps under a space: its live drops, and where a drop and a take
-/// stage their file (ikigai-intray 0.1.66's layout, which this host made itself so they are
-/// `0700`, and whose leftovers a [`crate::Migration::Reseal`] clears).
-const INTRAY_DIRS: [&str; 3] = ["inbox", ".dropping", ".taking"];
 
 /// The words a tuple's subject may not begin with after `urn:layer:{layer}:`: the host's own
 /// resources (and `new`, the channel's placeholder), so a tuple's name never reads as one.
@@ -91,8 +93,10 @@ pub struct TupleMeta {
     pub seq: u64,
     /// Its name: the one subject, under `urn:layer:{layer}:`.
     pub subject: String,
-    /// Its intray id (the blake3 of its stamped Turtle) while it is pending; empty once
-    /// taken, when its bytes have left the space.
+    /// Its intray id while it is pending: the blake3 of its STORED bytes, the stamped Turtle as
+    /// sealed (intray names a tuple by what its codec stored), so it changes when the tuple is
+    /// sealed again ([`crate::Migration::Reseal`]). Empty once taken, when its bytes have left
+    /// the space.
     pub cid: String,
     /// Who dropped it.
     pub dropper: String,
@@ -267,9 +271,31 @@ pub struct Store {
     receipts: PathBuf,
     staging: PathBuf,
     authority: Capability,
-    /// The host's one budget, which [`matching`](Self::matching) evaluates within.
-    budget: EvaluationBudget,
+    /// Seals the receipts; the space seals the tuples with a clone ([`SealCodec`]).
     sealer: Sealer,
+}
+
+/// The host's [`Sealer`] as intray's [`TupleCodec`]: a tuple is sealed as intray stores it and
+/// opened wherever intray reads it, and a tuple not sealed to the current identity is what
+/// [`SpaceEndpoint::reencode`] seals again. A migrating sealer passes plaintext through, so a
+/// [`crate::Migration::Reseal`] reads the tuples it seals.
+struct SealCodec(Sealer);
+
+impl TupleCodec for SealCodec {
+    fn encode(&self, plain: &[u8]) -> std::result::Result<Vec<u8>, String> {
+        self.0.seal(plain)
+    }
+
+    fn decode(&self, stored: &[u8]) -> std::result::Result<Vec<u8>, String> {
+        // Intray's refusal names the space and the tuple; this is the reason inside it.
+        self.0
+            .open(stored)
+            .map_err(|why| why.about(Path::new("the stored tuple")))
+    }
+
+    fn is_current(&self, stored: &[u8]) -> bool {
+        self.0.is_current(stored)
+    }
 }
 
 fn space_iri() -> Iri {
@@ -279,6 +305,8 @@ fn space_iri() -> Iri {
 impl Store {
     /// The space under `dir`, its `match=` evaluations run within `budget`: the HOST's one,
     /// shared by every tuplespace layer, so one overdue count caps them all (ledger #1362).
+    /// Every staged drop and claim intray left is discarded before anything reads the space
+    /// (see the module's "Sealed at rest"; ledger #2017).
     fn open(
         dir: &Path,
         budget: EvaluationBudget,
@@ -290,15 +318,22 @@ impl Store {
         let tuples = dir.join(SPACE_NAME);
         // Intray creates these with the process's umask when it first needs them; made here
         // first, they are `0700` like every other directory of the host's state.
-        for stage in INTRAY_DIRS {
+        for stage in SPACE_DIRS {
             at_rest::private_dir(&tuples.join(stage))?;
         }
+        let space = SpaceEndpoint::new(dir.to_path_buf())
+            .with_evaluation_budget(budget)
+            .with_codec(Arc::new(SealCodec(sealer.clone())));
+        // Before the first `rd`: intray puts a claim older than five minutes back in the inbox
+        // on every `rd` and `take`, and the open's own listing is one.
+        space
+            .discard_staging(SPACE_NAME)
+            .map_err(|e| format!("clear {}'s staging: {e}", tuples.display()))?;
         Ok(Store {
-            space: SpaceEndpoint::new(dir.to_path_buf()).with_evaluation_budget(budget.clone()),
+            space,
             tuples,
             receipts,
             staging,
-            budget,
             sealer: sealer.clone(),
             authority: Capability::scoped([
                 ikigai_intray::CAP_OUT.to_string(),
@@ -319,15 +354,10 @@ impl Store {
         self.space.invoke(&inv).await.map(|r| r.bytes)
     }
 
-    /// Seal `bytes` and drop them into the space; answers the intray id (the hash of the
+    /// Drop `bytes` into the space, which seals them; answers the intray id (the hash of the
     /// sealed bytes).
     pub async fn drop_tuple(&self, bytes: &[u8]) -> Result<String> {
-        let sealed = self.sealer.seal(bytes).map_err(Error::Endpoint)?;
-        self.drop_sealed(&sealed).await
-    }
-
-    async fn drop_sealed(&self, sealed: &[u8]) -> Result<String> {
-        let id = self.call(Verb::Sink, &[("content", sealed)]).await?;
+        let id = self.call(Verb::Sink, &[("content", bytes)]).await?;
         let id = String::from_utf8(id)
             .map_err(|_| Error::Endpoint("intray answered a non-UTF-8 id".into()))?;
         // Intray writes the file with the process's umask; the bytes are sealed and the
@@ -338,18 +368,12 @@ impl Store {
     }
 
     fn tuple_path(&self, cid: &str) -> PathBuf {
-        self.tuples.join("inbox").join(format!("{cid}.tuple"))
+        self.tuples.join(INBOX_DIR).join(format!("{cid}.tuple"))
     }
 
-    /// Open a tuple's sealed bytes; the refusal names its file.
-    fn unseal(&self, cid: &str, sealed: &[u8]) -> Result<Vec<u8>> {
-        self.sealer
-            .open(sealed)
-            .map_err(|why| Error::Endpoint(why.about(&self.tuple_path(cid))))
-    }
-
-    /// A pending tuple's sealed bytes, as intray holds them, or `None`.
-    async fn read_sealed(&self, cid: &str) -> Result<Option<Vec<u8>>> {
+    /// A pending tuple's bytes, opened, or `None` when it is not in the space. One that does
+    /// not open is intray's `Conflict` naming it.
+    pub async fn read(&self, cid: &str) -> Result<Option<Vec<u8>>> {
         match self.call(Verb::Source, &[("tuple", cid.as_bytes())]).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(Error::NotFound(_)) => Ok(None),
@@ -357,18 +381,11 @@ impl Store {
         }
     }
 
-    /// A pending tuple's bytes, opened, or `None` when it is not in the space.
-    pub async fn read(&self, cid: &str) -> Result<Option<Vec<u8>>> {
-        match self.read_sealed(cid).await? {
-            Some(sealed) => self.unseal(cid, &sealed).map(Some),
-            None => Ok(None),
-        }
-    }
-
     /// Take a tuple by its intray id: its bytes, opened, or `None` when another taker won it.
+    /// One that does not open is intray's `Conflict` and stays in the space.
     pub async fn take(&self, cid: &str) -> Result<Option<Vec<u8>>> {
         match self.call(Verb::Delete, &[("tuple", cid.as_bytes())]).await {
-            Ok(sealed) => self.unseal(cid, &sealed).map(Some),
+            Ok(bytes) => Ok(Some(bytes)),
             Err(Error::NotFound(_)) => Ok(None),
             Err(e) => Err(e),
         }
@@ -380,45 +397,15 @@ impl Store {
         Ok(ids(&bytes))
     }
 
-    /// The intray ids of the pending tuples a SPARQL ASK holds for: intray's associative
-    /// match, evaluated HERE over the opened tuples, since intray holds only sealed bytes.
-    ///
-    /// ⚠ This is intray's `with_template`, `parse_match` and `tuple_matches` (ikigai-intray
-    /// 0.1.66) over opened bytes, built from the same shared pieces of ikigai-store, and it
-    /// must keep their bounds: the text refused over 1 MiB or nested past 64 before anything
-    /// is parsed ([`limits::check_sparql`]); only an ASK; the algebra bounds
-    /// ([`check_query`]); `SERVICE` refused anywhere in the algebra
-    /// ([`refuse_service_with`]) and refused again by the evaluator
-    /// ([`service::evaluator`]); and the parse and every evaluation inside the host's one
-    /// [`EvaluationBudget`], on a thread sized for the text, cancelled between tuples. The
-    /// tuples are opened before the budget starts (their cost is the layer's size, never the
-    /// caller's template). A tuple that does not open never matches, as intray skips a file
-    /// that is not the tuple its name says. When intray can hold sealed tuples itself (a
-    /// codec it calls), this copy should go.
+    /// The intray ids of the pending tuples a SPARQL ASK holds for: intray's own `rd match=`,
+    /// which opens each tuple through the codec inside the host's one budget, with every bound
+    /// intray keeps. A pending tuple that does not open refuses the match (intray's typed
+    /// `Conflict` naming it), never reads as absent.
     pub async fn matching(&self, query: &str) -> Result<Vec<String>> {
-        limits::check_sparql(query, "match")?;
-        let mut tuples = Vec::new();
-        for cid in self.list().await? {
-            if let Ok(Some(bytes)) = self.read(&cid).await {
-                tuples.push((cid, bytes));
-            }
-        }
-        let text = query.to_string();
-        self.budget.run(query, &self.authority, None, move |token| {
-            let template = parse_match(&text)?;
-            let mut hits = Vec::new();
-            for (cid, bytes) in tuples {
-                if token.is_cancelled() {
-                    return Err(Error::Timeout(
-                        "match: canceled at its time budget".to_string(),
-                    ));
-                }
-                if tuple_matches(&template, &bytes, token)? {
-                    hits.push(cid);
-                }
-            }
-            Ok(hits)
-        })
+        let bytes = self
+            .call(Verb::Source, &[("match", query.as_bytes())])
+            .await?;
+        Ok(ids(&bytes))
     }
 
     fn receipt_path(&self, id: &str) -> PathBuf {
@@ -531,8 +518,10 @@ impl Tuplespace {
     /// ledger #1362).
     ///
     /// Two pending tuples that open to the same bytes are one tuple stored twice (a
-    /// [`crate::Migration::Reseal`] stores the sealed copy before it takes the old one, and
-    /// may stop between the two): one is kept and the other taken out of the space.
+    /// [`crate::Migration::Reseal`] stores the sealed copy before it removes the old one, and
+    /// may stop between the two; intray's re-encoding stages the old one as a claim, which this
+    /// open discards, but a host before it took the old copy as an ordinary take): one is kept
+    /// and the other taken out of the space.
     pub fn open_with_budget(
         def: &LayerDef,
         dir: &Path,
@@ -606,14 +595,16 @@ impl Tuplespace {
     /// plaintext or sealed only to an older identity ([`crate::Migration::Reseal`]):
     ///
     /// - each receipt, committed or staged, replaced whole;
-    /// - each pending tuple, STORED AGAIN: sealed bytes are a new intray id, so the sealed
-    ///   copy is dropped first and the old one taken after (a stop between the two leaves the
-    ///   tuple twice, which the next open resolves, see [`open_with_budget`](Self::open_with_budget));
-    /// - intray's leftovers: a staged drop (`.dropping/`, never published) and a staged claim
-    ///   (`.taking/`, a take the layer has already settled: the host holds the state
-    ///   directory, so neither is live) are removed, and any other file under the space
-    ///   (`error/`, `outbox/`, `.processing/`; never read by the layer host) is sealed in
-    ///   place, but for intray's `.err` notes, which hold an id and a fixed sentence.
+    /// - each pending tuple, STORED AGAIN by intray ([`SpaceEndpoint::reencode`]): sealed bytes
+    ///   are a new intray id, and the index follows each one to its new id, keeping its seq. A
+    ///   stop part way can leave a tuple twice, which the next open resolves (see
+    ///   [`open_with_budget`](Self::open_with_budget));
+    /// - intray's staged drops and claims, discarded ([`SpaceEndpoint::discard_staging`]; the
+    ///   open already did, and a re-encoding that stopped part way may leave one);
+    /// - a tuple in a SETTLED stage (`error/`, `outbox/`, `.processing/`; never read by the
+    ///   layer host, and intray re-encodes only the inbox) is sealed again under its NEW id,
+    ///   since a file sealed again in place no longer hashes to its name and intray would take
+    ///   it for a corrupt one: [`reseal_settled`].
     ///
     /// Answers how many files it rewrote or removed.
     pub(crate) fn reseal(&self) -> std::result::Result<usize, String> {
@@ -627,54 +618,27 @@ impl Tuplespace {
                 }
             }
         }
-        let pending: Vec<TupleMeta> = self
-            .index
-            .read()
-            .expect("tuplespace lock")
-            .pending()
-            .cloned()
-            .collect();
-        for meta in pending {
-            let sealed = block_on(store.read_sealed(&meta.cid))
-                .map_err(|e| format!("read tuple {}: {e}", meta.cid))?
-                .ok_or_else(|| format!("tuple {} vanished while the layer resealed", meta.cid))?;
-            if sealer.is_current(&sealed) {
-                continue;
-            }
-            let opened = store
-                .unseal(&meta.cid, &sealed)
-                .map_err(|e| e.to_string())?;
-            let resealed = sealer.seal(&opened)?;
-            let cid = block_on(store.drop_sealed(&resealed))
-                .map_err(|e| format!("store tuple {} sealed: {e}", meta.subject))?;
-            block_on(store.call(Verb::Delete, &[("tuple", meta.cid.as_bytes())]))
-                .map_err(|e| format!("take the old copy of tuple {}: {e}", meta.subject))?;
-            self.index
-                .write()
-                .expect("tuplespace lock")
-                .recid(meta.seq, cid);
-            changed += 1;
-        }
-        for stage in [".dropping", ".taking"] {
-            for file in read_dir(&store.tuples.join(stage))? {
-                std::fs::remove_file(&file)
-                    .map_err(|e| format!("remove {}: {e}", file.display()))?;
-                changed += 1;
-            }
-        }
-        for stage in ["error", "outbox", PROCESSING_DIR] {
-            let dir = store.tuples.join(stage);
-            if !dir.is_dir() {
-                continue;
-            }
-            for file in read_dir(&dir)? {
-                if file.extension().is_some_and(|x| x == "err") {
-                    continue;
-                }
-                if reseal_file(sealer, &file)? {
-                    changed += 1;
+        let moved = store
+            .space
+            .reencode(SPACE_NAME)
+            .map_err(|e| format!("seal the pending tuples again: {e}"))?;
+        {
+            let mut index = self.index.write().expect("tuplespace lock");
+            for pair in &moved {
+                // Intray writes the file with the process's umask (see `drop_tuple`).
+                let _ = at_rest::private(&store.tuple_path(&pair.new));
+                if let Some(seq) = index.pending_by_cid(&pair.old).map(|meta| meta.seq) {
+                    index.recid(seq, pair.new.clone());
                 }
             }
+        }
+        changed += moved.len();
+        changed += store
+            .space
+            .discard_staging(SPACE_NAME)
+            .map_err(|e| format!("clear {}'s staging: {e}", store.tuples.display()))?;
+        for stage in [ERROR_DIR, OUTBOX_DIR, PROCESSING_DIR] {
+            changed += reseal_settled(sealer, &store.tuples.join(stage))?;
         }
         Ok(changed)
     }
@@ -774,62 +738,60 @@ fn reseal_file(sealer: &Sealer, path: &Path) -> std::result::Result<bool, String
     Ok(true)
 }
 
-/// What a `match=` refused for `SERVICE` should do instead (intray's sentence).
-const MATCH_REMEDY: &str = "A match is evaluated against one tuple's graph and never leaves \
-     this host: put the data it needs in the tuple.";
-
-/// Parse a `match=` into the template every tuple is tested against: only an ASK, within the
-/// store's algebra bounds, with no `SERVICE` anywhere (intray's `parse_match`, see
-/// [`Store::matching`]). Called only inside the budget, which sizes the thread's stack.
-fn parse_match(query: &str) -> Result<spargebra::Query> {
-    let invalid = |detail: String| Error::InvalidArgument {
-        name: "match".to_string(),
-        detail,
-    };
-    let parsed = spargebra::SparqlParser::new()
-        .parse_query(query)
-        .map_err(|e| invalid(format!("SPARQL syntax error: {e}")))?;
-    if !matches!(parsed, spargebra::Query::Ask { .. }) {
-        return Err(invalid(
-            "an associative match must be an ASK query".to_string(),
-        ));
+/// Seal again every file of a settled stage of the space (`dir`, absent for a space no reactor
+/// ever ran over) not sealed to the current identity, and answer how many changed.
+///
+/// A tuple (`{id}.tuple`) is named by the hash of its stored bytes, so it is sealed again under
+/// its NEW id: the new file written whole, then its notes (`{id}.err`, `{id}.out`) renamed to
+/// the new id, then the old file removed. A stop between leaves the tuple twice, which is a
+/// dead letter or a settled answer seen twice, never a tuple lost. A file that does not hash to
+/// its name is one intray already holds as corrupt: it is sealed again in place, keeping its
+/// name and so its standing. Then each `.out` note (what a handler answered, so possibly tuple
+/// content) is sealed in place; an `.err` note, intray's sentence or a handler's error, is left
+/// as it is, as before.
+fn reseal_settled(sealer: &Sealer, dir: &Path) -> std::result::Result<usize, String> {
+    if !dir.is_dir() {
+        return Ok(0);
     }
-    check_query(&parsed, "match")?;
-    refuse_service_with(&parsed, "match", Some(MATCH_REMEDY))?;
-    Ok(parsed)
-}
-
-/// Whether a tuple's graph (its Turtle as the default graph) satisfies the template, with an
-/// evaluator that refuses every service call and stops when `token` fires (intray's
-/// `tuple_matches`). A tuple that is not RDF never matches, and neither does one that nests
-/// RDF 1.2 triple terms past ikigai-store's bound: it is never parsed, since the parse
-/// recurses once per level and a stack overflow aborts the host (intray 0.1.66, ledger #992).
-fn tuple_matches(
-    template: &spargebra::Query,
-    bytes: &[u8],
-    token: &CancellationToken,
-) -> Result<bool> {
-    if ikigai_store::depth::check_rdf_nesting(bytes, RdfFormat::Turtle, "content").is_err() {
-        return Ok(false);
+    let mut changed = 0;
+    for file in read_dir(dir)? {
+        let Some(id) = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".tuple"))
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let bytes = std::fs::read(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
+        if sealer.is_current(&bytes) {
+            continue;
+        }
+        let opened = sealer.open(&bytes).map_err(|why| why.about(&file))?;
+        let sealed = sealer.seal(&opened)?;
+        changed += 1;
+        if tuple_id(&bytes) != id {
+            at_rest::replace(&file, &sealed)?;
+            continue;
+        }
+        let new = tuple_id(&sealed);
+        at_rest::replace(&dir.join(format!("{new}.tuple")), &sealed)?;
+        for note in ["err", "out"] {
+            let from = dir.join(format!("{id}.{note}"));
+            if from.is_file() {
+                let to = dir.join(format!("{new}.{note}"));
+                std::fs::rename(&from, &to)
+                    .map_err(|e| format!("rename {} to {}: {e}", from.display(), to.display()))?;
+            }
+        }
+        std::fs::remove_file(&file).map_err(|e| format!("remove {}: {e}", file.display()))?;
     }
-    let store = ikigai_store::Store::new()
-        .map_err(|e| Error::Endpoint(format!("match: store init: {e}")))?;
-    if store
-        .load_from_slice(RdfParser::from_format(RdfFormat::Turtle), bytes)
-        .is_err()
-    {
-        return Ok(false);
+    for file in read_dir(dir)? {
+        if file.extension().is_some_and(|x| x == "out") && reseal_file(sealer, &file)? {
+            changed += 1;
+        }
     }
-    match service::evaluator()
-        .with_cancellation_token(token.clone())
-        .for_query(template.clone())
-        .on_store(&store)
-        .execute()
-        .map_err(|e| Error::Endpoint(format!("match: evaluation: {e}")))?
-    {
-        QueryResults::Boolean(b) => Ok(b),
-        _ => Ok(false),
-    }
+    Ok(changed)
 }
 
 /// The `out` event a stored tuple carries.

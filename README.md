@@ -636,9 +636,12 @@ at `<state>/{layer}/tuples/`, which the host links and calls under its own
 `urn:cap:space:*`: participants never hold a space capability, and the space is never
 bound into the kernel. Intray's take is a rename, which is what makes it atomic. Receipts
 are `<state>/{layer}/receipts/{id}.ttl`. Keep the state directory out of any intray root a
-reactor watches. The space holds each tuple sealed, so intray cannot read a tuple's Turtle:
-the host evaluates a `match=` template itself, over the opened pending tuples, within the same
-bounds and the same time budget intray applies.
+reactor watches. The space holds each tuple sealed: intray seals it as it stores it and opens
+it wherever it reads it, through a codec the host gives it, so a `match=` template is
+evaluated by intray itself, within its bounds and the host's one time budget. A pending tuple
+that does not open refuses a `match=`, naming the tuple, rather than reading as absent. At
+open, before it serves, the host discards any drop or take intray had staged when the host
+last stopped: a staged take is one the host's receipts already record.
 
 ### State, sealed at rest
 

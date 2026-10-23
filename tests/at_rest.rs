@@ -509,3 +509,105 @@ fn files_are_0600_and_directories_0700() {
     f.reopen();
     check(f.state.path());
 }
+
+/// The names of the files directly in `dir`, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Ledger #2017: a rotation re-encodes each pending tuple through intray (a new id, since an id
+/// is the hash of the stored bytes) and the index follows it, keeping its seq; a tuple in a
+/// settled stage moves to its new id with its note, rather than being sealed in place under a
+/// name it no longer hashes to.
+#[test]
+fn a_reseal_moves_tuples_to_new_ids_and_keeps_their_seqs() {
+    let mut f = matching_fixture();
+    out(&f.kernel, &gonk(), &offer_named("a")).unwrap();
+    out(&f.kernel, &gonk(), &offer("b")).unwrap();
+    let space = f.state.path().join(TASKS).join("tuples");
+    let inbox = space.join("inbox");
+    let old_ids = names(&inbox);
+    assert_eq!(old_ids.len(), 2);
+    let reader = tasker(&participant("bobby"));
+    let listed = source(&f.kernel, TUPLES, &[], &reader);
+    // A dead letter and a settled answer, as a reactor over this space would leave them.
+    let dead = sealed(f.config.path(), b"a dead letter");
+    let dead_id = ikigai_intray::tuple_id(&dead);
+    std::fs::write(space.join("error").join(format!("{dead_id}.tuple")), &dead).unwrap();
+    std::fs::write(
+        space.join("error").join(format!("{dead_id}.err")),
+        "a note\n",
+    )
+    .unwrap();
+    let done = sealed(f.config.path(), b"a settled tuple");
+    let done_id = ikigai_intray::tuple_id(&done);
+    std::fs::write(space.join("outbox").join(format!("{done_id}.tuple")), &done).unwrap();
+    std::fs::write(
+        space.join("outbox").join(format!("{done_id}.out")),
+        sealed(f.config.path(), b"what the handler said"),
+    )
+    .unwrap();
+
+    let parked = park(&mut f);
+    let old = identity(f.config.path());
+    let new = age::x25519::Identity::generate();
+    let both = f.config.path().join("rotating.key");
+    write_identities(&both, &[&new, &old]);
+    let rotating = StateKey::load(&both).unwrap();
+    let host = open_with(&f, &rotating, Migration::Reseal).expect("the rotation");
+    install(&mut f, host);
+    drop(parked);
+
+    let new_ids = names(&inbox);
+    assert_eq!(new_ids.len(), 2);
+    assert!(new_ids.iter().all(|n| !old_ids.contains(n)), "{new_ids:?}");
+    for name in &new_ids {
+        let bytes = std::fs::read(inbox.join(name)).unwrap();
+        assert_eq!(format!("{}.tuple", ikigai_intray::tuple_id(&bytes)), *name);
+        age::decrypt(&new, &bytes).expect("sealed to the new key");
+    }
+    // The same tuples, the same seqs, in the same order.
+    assert_eq!(source(&f.kernel, TUPLES, &[], &reader), listed);
+    let ask = format!("ASK {{ ?o <http://purl.org/dc/terms/title> \"{TITLE}\" }}");
+    let hits = source(&f.kernel, TUPLES, &[("match", &ask)], &reader);
+    assert_eq!(hits.lines().count(), 1, "{hits}");
+    assert!(hits.contains(&offer_iri("a")), "{hits}");
+    take(&f.kernel, &bobby_gonk(), &offer_iri("a")).unwrap();
+
+    for (stage, old_id, note, plain) in [
+        ("error", &dead_id, "err", b"a dead letter".as_slice()),
+        ("outbox", &done_id, "out", b"a settled tuple".as_slice()),
+    ] {
+        let dir = space.join(stage);
+        let left = names(&dir);
+        assert_eq!(left.len(), 2, "{stage}: {left:?}");
+        assert!(
+            left.iter().all(|n| !n.starts_with(old_id.as_str())),
+            "{left:?}"
+        );
+        let tuple = left.iter().find(|n| n.ends_with(".tuple")).unwrap();
+        let bytes = std::fs::read(dir.join(tuple)).unwrap();
+        let id = ikigai_intray::tuple_id(&bytes);
+        assert_eq!(format!("{id}.tuple"), *tuple);
+        assert_eq!(age::decrypt(&new, &bytes).unwrap(), plain);
+        assert!(left.contains(&format!("{id}.{note}")), "{left:?}");
+    }
+    let answer = std::fs::read(
+        space.join("outbox").join(
+            names(&space.join("outbox"))
+                .iter()
+                .find(|n| n.ends_with(".out"))
+                .unwrap(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        age::decrypt(&new, &answer).unwrap(),
+        b"what the handler said"
+    );
+}
