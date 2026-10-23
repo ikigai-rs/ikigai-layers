@@ -40,13 +40,11 @@ host = [
     "dep:ikigai-store",
     "dep:ikigai-shacl",
     "dep:ikigai-jsonld",
-    "dep:oxigraph",
     "dep:oxrdfio",
     "dep:oxsdatatypes",
     "dep:pem-rfc7468",
     "dep:serde",
     "dep:sha2",
-    "dep:spargebra",
     "dep:toml",
 ]
 
@@ -72,13 +70,16 @@ ikigai-rdf = "0.2.1"
 # The space a tuplespace layer fronts: intray's `urn:space:{name}` endpoint, linked and
 # invoked privately under the host's own `urn:cap:space:*` (core gives an endpoint no way to
 # issue above its caller's capability, so the space is a value the host owns, never a name it
-# resolves). Its rename-based take is the atomic step every take here turns on. **0.1.55 is
-# the floor this crate needs**: it runs every `match=` within an `EvaluationBudget` and takes
-# one from its mounter (`SpaceEndpoint::with_evaluation_budget`, ledger #1327), which is how
-# every tuplespace layer of a host shares ONE overdue count (ledger #1362). The unique staging
-# names two concurrent takes depend on (ledger #877) arrived by 0.1.45.
-# ⚠ `"0.1.55"` is `<0.2.0`.
-ikigai-intray = { version = "0.1.55", optional = true }
+# resolves). Its rename-based take is the atomic step every take here turns on. **0.1.69 is
+# the floor this crate needs**: its `TupleCodec` hook (`SpaceEndpoint::with_codec`,
+# ikigai-rs/ikigai-cli PR 570, ledger #2017) is how a tuple is sealed at rest while intray
+# itself stores it, decodes it for `rd`, `take` and every `match=`, and re-encodes it after a key
+# rotation (`reencode`); its `discard_staging` clears a crashed drop or claim at open, and
+# `SPACE_DIRS` names every directory a space may hold. Every `match=` runs within an
+# `EvaluationBudget` taken from its mounter (`with_evaluation_budget`, 0.1.55, ledger #1327),
+# which is how every tuplespace layer of a host shares ONE overdue count (ledger #1362).
+# ⚠ `"0.1.69"` is `<0.2.0`.
+ikigai-intray = { version = "0.1.69", optional = true }
 # The time budget a `match=` runs within (`ikigai_store::budget::{EvaluationBudget,
 # TimeBudget}`): the host builds ONE from `layers.toml` and hands a clone to every tuplespace
 # layer, and `Host::match_budget` exposes it. Named directly because those types are in this
@@ -149,18 +150,6 @@ oxrdfio = { version = "0.2.6", optional = true }
 # every recipient is the host's own (`Identity::to_public`), never a low-order point.
 # ⚠ `"0.2.1"` is `<0.3.0`.
 ikigai-encrypt = { version = "0.2.1", default-features = false, optional = true }
-# A tuple is sealed before intray stores it, so intray's own `match=` (a SPARQL ASK over the
-# Turtle of each tuple it holds) can no longer read it: the host opens the pending tuples and
-# evaluates the template itself, with ikigai-store's bounds (`limits::check_sparql`, the
-# algebra bounds `budget::check_query`, `service::refuse_service_with` and the refusing
-# `service::evaluator`, all inside the host's one `EvaluationBudget`), exactly as intray does.
-# These two are the parser and the store that evaluation runs on, the lines ikigai-store and
-# intray already put in the graph (oxigraph 0.5.11 pins spargebra =0.4.7), so nothing new is
-# compiled. Without default features: no RocksDB from this edge (intray's oxigraph brings its
-# own defaults, as before). ⚠ `"0.5.11"` is `<0.6.0` and `"0.4.7"` is `<0.5.0`: move them with
-# oxigraph.
-oxigraph = { version = "0.5.11", default-features = false, optional = true }
-spargebra = { version = "0.4.7", optional = true }
 # Onboarding (ledger #2009, `onboard`): an entitlement is applied only when its signature verifies
 # against the controller's public key, and the host verifies through ikigai-sign's `urn:sign:verify`,
 # evaluated in a kernel of the host's OWN that no door binds (the pattern `json::Egress` set): the
