@@ -764,7 +764,7 @@ fn append_participants(
 
 /// Write `text` to `path` through a temporary file renamed over it, so a reader never sees
 /// half of it.
-fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

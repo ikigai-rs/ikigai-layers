@@ -158,24 +158,7 @@ impl Host {
         let match_budget = EvaluationBudget::new(config::load_match_budget(&config.dir)?);
         let onboard = config::load_onboard(&config.dir, &config.layers)?;
         if let Some(onboard) = &onboard {
-            // Only the controller says entitlements: a manifest that lets anyone else is the
-            // operator's error, refused here rather than discovered by a node.
-            for manifest in config.collabs.values() {
-                for mount in manifest.mounts.iter().filter(|m| m.layer == onboard.grants) {
-                    for (who, verbs) in &mount.grants {
-                        if verbs.contains("say") && who.iri() != onboard.controller {
-                            return Err(ConfigError(format!(
-                                "collabs/{}.toml grants `say` on `{}` to {}, and only \
-                                 onboard.controller ({}) says entitlements",
-                                manifest.name,
-                                onboard.grants,
-                                who.iri(),
-                                onboard.controller
-                            )));
-                        }
-                    }
-                }
-            }
+            config::check_controller_says(onboard, &config.collabs)?;
         }
         let onboard = onboard.map(Onboard::new);
         let json = Egress::new();
