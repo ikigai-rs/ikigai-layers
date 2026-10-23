@@ -557,7 +557,7 @@ no JSON-LD processor, and so no oxigraph and no RocksDB:
 
 ```toml
 [dependencies]
-ikigai-layers = { version = "0.5.0", default-features = false }
+ikigai-layers = { version = "0.5.1", default-features = false }
 ```
 
 A participant over the QUIC door went from 241 packages to 101 with it. The `Door` it hands
