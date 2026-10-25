@@ -92,10 +92,6 @@ async-trait = "0.1"
 # `futures::lock::Mutex` serializes a layer's writes ACROSS the validation sub-request (an
 # await), and `select` joins a feed's notifier with its timer.
 futures = "0.3"
-# A feed's `wait=` is a real-time bound with no runtime of this crate's choosing: one helper
-# thread for every timer in the process, the shape core's own "no executor" rule asks for.
-# ⚠ `"3"` is `>=3, <4`.
-futures-timer = "3"
 # A gateway reply carries a representation's bytes as `xsd:base64Binary` (`gateway`), so any
 # participant, one that is not ikigai included, reads them with a standard decoder. 0.22.1 is the line the
 # lock already held through the RDF stack. ⚠ `"0.22.1"` is `<0.23.0`.
@@ -172,6 +168,16 @@ sha2 = { version = "0.10.9", optional = true }
 # XSD datatype library oxigraph's SPARQL evaluation already links (0.2.4 is that line), never
 # by a date parser of this crate's own. ⚠ `"0.2.4"` is `<0.3.0`: move it with oxigraph.
 oxsdatatypes = { version = "0.2.4", optional = true }
+
+# A feed's `wait=` is a real-time bound with no runtime of this crate's choosing: one helper
+# thread for every timer in the process, the shape core's own "no executor" rule asks for. It is
+# also a native asker's default `Timer` (`timer`, `native`). **Native targets only** (ledger
+# #2193): on wasm32-unknown-unknown its backend's helper thread and `Instant` compile and fail
+# when used, so a participant there takes the timer its host installs (`Asker::with_timer`), and
+# `tests/wasm_clean.rs` holds this line. The host is native: its feed reads files.
+# ⚠ `"3"` is `>=3, <4`.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-timer = "3"
 
 [dev-dependencies]
 # The module recipe as one test. 0.8.0 is the CURRENT published definition of "done", and

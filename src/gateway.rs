@@ -91,18 +91,19 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
 use futures::future::{select, Either};
 use ikigai_core::{
-    ArgRef, Capability, Error, Iri, Kernel, ReprType, Representation, Request, Result, Verb,
+    ArgRef, Capability, Clock, Error, Iri, Kernel, ReprType, Representation, Request, Result, Verb,
 };
 use oxrdf::{Literal, Term, Triple};
 
 use crate::rdf::{self, node, object_iri, subject_iri};
+use crate::timer::{self, Timer};
 
 /// The namespace of the gateway's own terms (`gw:`): layer-local, never core's `ik:`.
 pub const NS: &str = "urn:layers:gateway:";
@@ -767,19 +768,19 @@ async fn wait_feed<D: Door + ?Sized>(
         .ok_or_else(|| Error::Endpoint(format!("layer `{layer}`'s feed names no `last`")))
 }
 
-/// [`wait_feed`], cut short at `deadline`: `None` when the deadline came first.
+/// [`wait_feed`], cut short by `timer` after `remaining`: `None` when the timer came first.
 async fn wait_feed_until<D: Door + ?Sized>(
     door: &D,
     layer: &str,
     after: u64,
-    deadline: Instant,
+    remaining: Duration,
+    timer: &dyn Timer,
 ) -> Result<Option<u64>> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Ok(None);
     }
     let feed = Box::pin(wait_feed(door, layer, after, remaining));
-    let timer = futures_timer::Delay::new(remaining);
+    let timer = timer.sleep(remaining);
     match select(feed, timer).await {
         Either::Left((last, _)) => last.map(Some),
         Either::Right(((), _)) => Ok(None),
@@ -787,11 +788,20 @@ async fn wait_feed_until<D: Door + ?Sized>(
 }
 
 /// The ASKING participant on one ask layer: drops requests, waits for their answers.
+///
+/// **Time is injected** (ledger #2193): a deadline is measured on the asker's [`Clock`]
+/// ([`with_clock`](Self::with_clock)) and each wait is raced against its [`Timer`]
+/// ([`with_timer`](Self::with_timer)). A native target defaults to a monotonic clock and
+/// futures-timer; wasm32-unknown-unknown has neither, since Rust's clocks and futures-timer's
+/// helper thread compile there and fail when used, so a browser or runtime host installs
+/// both, and an asker without them refuses to ask rather than panic.
 pub struct Asker<D: Door> {
     door: D,
     layer: String,
     cursor: Mutex<u64>,
     minted: AtomicU64,
+    clock: Option<Arc<dyn Clock>>,
+    timer: Option<Arc<dyn Timer>>,
 }
 
 impl<D: Door> Asker<D> {
@@ -804,19 +814,83 @@ impl<D: Door> Asker<D> {
             layer: layer.to_string(),
             cursor: Mutex::new(0),
             minted: AtomicU64::new(0),
+            clock: timer::default_clock(),
+            timer: timer::default_timer(),
         }
     }
 
-    /// A fresh correlation id: the time and a per-process count, unique for this asker.
-    fn mint(&self) -> String {
-        let millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or_default();
+    /// Measure deadlines, and stamp correlation ids, with `clock` (builder), instead of the
+    /// default: a monotonic clock on a native target, and **none on wasm32**, where an asker
+    /// without a clock refuses to ask. Give it the clock the host gave its kernel
+    /// (`Kernel::with_clock`): a browser host's `Date.now()`-backed one, say.
+    ///
+    /// The clock must advance for a deadline to pass on it; the [`Timer`] still bounds every
+    /// wait, so a stopped clock (a test's `FixedClock`) ends an ask the first time the timer
+    /// fires.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// Race each wait for an answer against `timer` (builder), instead of the default:
+    /// futures-timer on a native target, and **none on wasm32**, where an asker without a
+    /// timer refuses to ask (see [`crate::timer`]).
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    /// use ikigai_core::{Capability, EndpointSpace, FixedClock, Kernel};
+    /// use ikigai_layers::gateway::{Asker, KernelDoor};
+    /// use ikigai_layers::timer::Timer;
+    ///
+    /// /// A timer that never fires: every wait lasts until the layer answers.
+    /// struct Never;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Timer for Never {
+    ///     async fn sleep(&self, _delay: Duration) {
+    ///         futures::future::pending::<()>().await
+    ///     }
+    /// }
+    ///
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new()));
+    /// let asker = Asker::new(KernelDoor::new(&kernel, Capability::root()), "gateway-a")
+    ///     .with_clock(Arc::new(FixedClock::at(1_791_000_000_000)))
+    ///     .with_timer(Arc::new(Never));
+    /// # drop(asker);
+    /// ```
+    pub fn with_timer(mut self, timer: Arc<dyn Timer>) -> Self {
+        self.timer = Some(timer);
+        self
+    }
+
+    /// The asker's clock and timer, or the refusal that names the builder a host forgot.
+    fn time(&self) -> Result<(&dyn Clock, &dyn Timer)> {
+        let Some(clock) = &self.clock else {
+            return Err(Error::Endpoint(format!(
+                "the asker on layer `{}` has no clock to measure its deadline: install one \
+                 with Asker::with_clock",
+                self.layer
+            )));
+        };
+        let Some(timer) = &self.timer else {
+            return Err(Error::Endpoint(format!(
+                "the asker on layer `{}` has no timer to bound its wait: install one with \
+                 Asker::with_timer",
+                self.layer
+            )));
+        };
+        Ok((clock.as_ref(), timer.as_ref()))
+    }
+
+    /// A fresh correlation id: the clock's time and a per-process count, unique for this
+    /// asker.
+    fn mint(&self, clock: &dyn Clock) -> String {
+        let millis = clock.now().as_millis();
         let count = self.minted.fetch_add(1, Ordering::SeqCst);
         crate::id::mint(
             millis,
-            (u64::from(std::process::id()) << 40) | (count & 0xff_ffff_ffff),
+            (timer::process_tag() << 40) | (count & 0xff_ffff_ffff),
         )
     }
 
@@ -830,13 +904,15 @@ impl<D: Door> Asker<D> {
     /// when the shapes refuse it, `Denied` without the grant); and `Timeout` when no answer
     /// came within `deadline`. A request nobody took by then is WITHDRAWN (the asker takes it
     /// back, so no resolver runs it late); one a resolver already took is left to it, and its
-    /// late answer stays addressed to this asker, pending.
+    /// late answer stays addressed to this asker, pending. `Endpoint`, before anything is
+    /// asked, for an asker with no clock or no timer (wasm32, until the host installs them).
     pub async fn ask(&self, ask: &Ask, deadline: Duration) -> Result<Representation> {
+        let (clock, _) = self.time()?;
         // A reused name is a Conflict; another id is the cure (two askers of one principal
         // minting the same id in one millisecond is the only way here).
         let mut tries = 0;
         loop {
-            match self.ask_as(&self.mint(), ask, deadline).await {
+            match self.ask_as(&self.mint(clock), ask, deadline).await {
                 Err(Error::Conflict(m)) if m.contains("already names") && tries < 3 => tries += 1,
                 other => return other,
             }
@@ -855,8 +931,9 @@ impl<D: Door> Asker<D> {
         ask: &Ask,
         deadline: Duration,
     ) -> Result<Representation> {
-        let started = Instant::now();
-        let deadline_at = started + deadline;
+        let (clock, timer) = self.time()?;
+        let started = clock.now().as_millis();
+        let elapsed = || Duration::from_millis(clock.now().as_millis().saturating_sub(started));
         let request = request_turtle(&self.layer, correlation, ask)?;
         let subject = request_subject(&self.layer, correlation);
         let reply = reply_subject(&self.layer, correlation);
@@ -872,7 +949,8 @@ impl<D: Door> Asker<D> {
                 return answer;
             }
             let after = *self.cursor.lock().expect("cursor lock");
-            match wait_feed_until(&self.door, &self.layer, after, deadline_at).await {
+            let remaining = deadline.saturating_sub(elapsed());
+            match wait_feed_until(&self.door, &self.layer, after, remaining, timer).await {
                 Ok(Some(last)) => *self.cursor.lock().expect("cursor lock") = last,
                 Ok(None) => break,
                 // A cursor past the feed's end: this host's feed is not the one it came
@@ -891,7 +969,7 @@ impl<D: Door> Asker<D> {
                 &[("tuple", subject.as_bytes())],
             ))
             .await;
-        let waited = format!("{:.3}s", started.elapsed().as_secs_f64());
+        let waited = format!("{:.3}s", elapsed().as_secs_f64());
         match withdrawn {
             Ok(_) => Err(Error::Timeout(format!(
                 "no resolver took <{subject}> within {waited}; it is withdrawn"
@@ -1264,5 +1342,131 @@ mod tests {
             Err(Error::Endpoint(m)) => assert_eq!(m.chars().count(), MAX_MESSAGE),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A clock the test's timer moves: a wait "lasts" exactly its delay, in no real time.
+    struct Stepping(Arc<AtomicU64>);
+
+    impl Clock for Stepping {
+        fn now(&self) -> ikigai_core::Time {
+            ikigai_core::Time::from_millis(self.0.load(Ordering::SeqCst))
+        }
+    }
+
+    /// Records each delay it is asked to wait and moves the [`Stepping`] clock past it.
+    struct Moving(Arc<AtomicU64>, Mutex<Vec<Duration>>);
+
+    #[async_trait]
+    impl Timer for Moving {
+        async fn sleep(&self, delay: Duration) {
+            self.1.lock().unwrap().push(delay);
+            self.0
+                .fetch_add(u64::try_from(delay.as_millis()).unwrap(), Ordering::SeqCst);
+        }
+    }
+
+    /// A layer whose feed never answers and that holds no reply: only the asker's timer can
+    /// end its wait. Records each call as `verb target`, and the request it was asked.
+    #[derive(Default)]
+    struct Silent(Mutex<Vec<String>>, Mutex<String>);
+
+    #[async_trait]
+    impl Door for Silent {
+        async fn call(&self, request: Request) -> Result<Representation> {
+            let target = request.target.as_str().to_string();
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("{} {target}", verb_word(request.verb)));
+            match (request.verb, target.ends_with(":feed")) {
+                (Verb::Source, true) => futures::future::pending().await,
+                (Verb::Sink, _) => {
+                    let Some(ArgRef::Inline(content)) = request.args.get("content") else {
+                        panic!("a drop with no inline content");
+                    };
+                    *self.1.lock().unwrap() = String::from_utf8(content.clone()).unwrap();
+                    Ok(Representation::new(
+                        ReprType::new("text/plain"),
+                        b"ok".to_vec(),
+                    ))
+                }
+                (Verb::Delete, _) => {
+                    let Some(ArgRef::Inline(tuple)) = request.args.get("tuple") else {
+                        panic!("a take with no tuple");
+                    };
+                    if String::from_utf8_lossy(tuple).contains(":reply:") {
+                        Err(Error::NotFound("no answer yet".into()))
+                    } else {
+                        Ok(Representation::new(
+                            ReprType::new("text/turtle"),
+                            Vec::new(),
+                        ))
+                    }
+                }
+                other => panic!("unexpected call {other:?}"),
+            }
+        }
+    }
+
+    /// Ledger #2193: the deadline is measured on the injected clock and kept by the injected
+    /// timer, and the correlation id is stamped from the clock. Before, it read `Instant`,
+    /// `SystemTime` and futures-timer, so this wait lasted the deadline in real time (an hour,
+    /// here), and on wasm32 panicked.
+    #[test]
+    fn an_asker_keeps_its_deadline_on_the_injected_clock_and_timer() {
+        const T: u64 = 1_791_000_000_000;
+        let now = Arc::new(AtomicU64::new(T));
+        let timer = Arc::new(Moving(now.clone(), Mutex::new(Vec::new())));
+        let asker = Asker::new(Silent::default(), "gw")
+            .with_clock(Arc::new(Stepping(now.clone())))
+            .with_timer(timer.clone());
+        let ask = Ask::new(Verb::Source, Iri::parse("urn:data:a").unwrap());
+        let hour = Duration::from_secs(3600);
+
+        let answer = futures::executor::block_on(asker.ask(&ask, hour));
+
+        match answer {
+            Err(Error::Timeout(m)) => {
+                assert!(m.contains("within 3600.000s; it is withdrawn"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(*timer.1.lock().unwrap(), [hour]);
+        assert_eq!(now.load(Ordering::SeqCst), T + 3_600_000);
+        assert_eq!(
+            *asker.door.0.lock().unwrap(),
+            [
+                "Sink urn:layer:gw:tuples",
+                "Delete urn:layer:gw:tuples",
+                "Source urn:layer:gw:feed",
+                "Delete urn:layer:gw:tuples",
+            ]
+        );
+        // The id's first ten characters are the clock's milliseconds at the ask.
+        let stamp = &crate::id::mint(T, 0)[..10];
+        let request = asker.door.1.lock().unwrap().clone();
+        assert!(
+            request.contains(&format!("urn:layer:gw:request:{stamp}")),
+            "{request}"
+        );
+    }
+
+    /// What `new` leaves on wasm32: no clock and no timer. The asker refuses before it drops
+    /// anything, naming the builder, rather than panic or wait unbounded.
+    #[test]
+    fn an_asker_without_a_clock_or_timer_refuses_before_asking() {
+        let ask = Ask::new(Verb::Source, Iri::parse("urn:data:a").unwrap());
+        let mut asker = Asker::new(Silent::default(), "gw");
+        asker.clock = None;
+        let err = futures::executor::block_on(asker.ask(&ask, Duration::from_secs(1))).unwrap_err();
+        assert!(err.to_string().contains("Asker::with_clock"), "{err}");
+        assert!(asker.door.0.lock().unwrap().is_empty());
+
+        let mut asker = Asker::new(Silent::default(), "gw");
+        asker.timer = None;
+        let err = futures::executor::block_on(asker.ask_as("c", &ask, Duration::from_secs(1)))
+            .unwrap_err();
+        assert!(err.to_string().contains("Asker::with_timer"), "{err}");
+        assert!(asker.door.0.lock().unwrap().is_empty());
     }
 }

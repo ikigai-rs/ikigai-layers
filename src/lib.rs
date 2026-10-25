@@ -51,9 +51,11 @@
 //! binds, the configuration, both access models, the feeds, the JSON faces and the enrollment
 //! generator. A PARTICIPANT, a tool that only talks to a layer door (the [`gateway`]'s `Asker`
 //! and `Resolver` over QUIC, say), takes the crate with `default-features = false` and gets the
-//! modules that need no host: [`gateway`], [`name`], [`rdf`], [`id`] and [`time`]. That build
-//! links no store, no space, no validator and no JSON-LD processor, so no oxigraph and no
-//! RocksDB (ledger #1403).
+//! modules that need no host: [`gateway`], [`name`], [`rdf`], [`id`], [`time`] and [`timer`].
+//! That build links no store, no space, no validator and no JSON-LD processor, so no oxigraph
+//! and no RocksDB (ledger #1403). It also builds for wasm32-unknown-unknown (a browser or a
+//! runtime) and reads no platform time there: its host gives the asker a clock and a timer
+//! (`Asker::with_clock`, `Asker::with_timer`; ledger #2193).
 //!
 //! ```toml
 //! [dependencies]
@@ -143,9 +145,12 @@ pub mod id;
 #[cfg(feature = "host")]
 pub mod json;
 pub mod name;
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
 pub mod onboard;
 pub mod rdf;
 pub mod time;
+pub mod timer;
 #[cfg(feature = "host")]
 pub mod tuplespace;
 
