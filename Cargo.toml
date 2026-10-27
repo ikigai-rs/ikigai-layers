@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-layers"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 # The toolchain the shared CI's msrv job builds and tests on: the line the ecosystem's other
 # declared crates (ikigai-script, ikigai-log, ikigai-cms-web) hold. Nothing here needs more
@@ -55,18 +55,16 @@ path = "src/bin/ikigai-layers.rs"
 required-features = ["host"]
 
 [dependencies]
-# The published kernel, the SAME one the hosts link. **0.1.98 is a TESTED floor**: the API
-# this crate calls arrived earlier (the principal a door mints into the capability,
-# `Capability::principal`, and `Invocation::depends_on` on a failure, both 0.1.93; the layer
-# vocabulary these graphs emit, 0.1.96), and 0.1.98 is the head every test here ran against,
-# the one ikigai-intray 0.1.55 and ikigai-store 0.2.19 were released beside. (0.1.97 is
-# YANKED; a resolve never picks it.)
-# ⚠ `"0.1.98"` is a RANGE, `>=0.1.98, <0.2.0`: when core reaches 0.2 this line must move or
-# the crate freezes out of it.
-ikigai-core = "0.1.98"
-# Shared triple-term nesting guard; 0.2.1 first exports the check and bound (0.2.0 does not).
-# Also used by participants: adds oxrdfio and quick-xml, but no store or RocksDB.
-ikigai-rdf = "0.2.1"
+# The published kernel, the SAME one the hosts link. **0.2.0 is the streams release** (ledger
+# #2261), and the line the whole ecosystem moved onto together (core 0.2.0 sweep, ledger
+# #2352): the old `"0.1.98"` pin meant `<0.2.0` under 0.x rules, so this crate could not link
+# a 0.2 core. Core's types are in this crate's API, so the move is this crate's 0.6.0.
+# ⚠ `"0.2.0"` is `<0.3.0`.
+ikigai-core = "0.2.0"
+# Shared triple-term nesting guard. Also used by participants: adds oxrdfio and quick-xml, but
+# no store or RocksDB. 0.3.1 is the newest release, the line on core 0.2.
+# ⚠ `"0.3.1"` is `<0.4.0`.
+ikigai-rdf = "0.3.1"
 # The space a tuplespace layer fronts: intray's `urn:space:{name}` endpoint, linked and
 # invoked privately under the host's own `urn:cap:space:*` (core gives an endpoint no way to
 # issue above its caller's capability, so the space is a value the host owns, never a name it
@@ -78,15 +76,15 @@ ikigai-rdf = "0.2.1"
 # `SPACE_DIRS` names every directory a space may hold. Every `match=` runs within an
 # `EvaluationBudget` taken from its mounter (`with_evaluation_budget`, 0.1.55, ledger #1327),
 # which is how every tuplespace layer of a host shares ONE overdue count (ledger #1362).
-# ⚠ `"0.1.69"` is `<0.2.0`.
-ikigai-intray = { version = "0.1.69", optional = true }
+# 0.2.0 is that API on core 0.2 (ledger #2352). ⚠ `"0.2.0"` is `<0.3.0`.
+ikigai-intray = { version = "0.2.0", optional = true }
 # The time budget a `match=` runs within (`ikigai_store::budget::{EvaluationBudget,
 # TimeBudget}`): the host builds ONE from `layers.toml` and hands a clone to every tuplespace
 # layer, and `Host::match_budget` exposes it. Named directly because those types are in this
-# crate's API; it is the same store intray links (cargo unifies them). 0.2.19 is the current
-# line and the one every test here ran against; `EvaluationBudget` arrived in 0.2.18.
-# ⚠ `"0.2.19"` is `<0.3.0`.
-ikigai-store = { version = "0.2.19", optional = true }
+# crate's API; it is the same store intray links (cargo unifies them). 0.3.1 is the line on
+# core 0.2 and the one every test here ran against; `EvaluationBudget` arrived in 0.2.18.
+# ⚠ `"0.3.1"` is `<0.4.0`.
+ikigai-store = { version = "0.3.1", optional = true }
 # `Endpoint::invoke` is `async_trait`, and every endpoint here carries the host's state.
 async-trait = "0.1"
 # `futures::lock::Mutex` serializes a layer's writes ACROSS the validation sub-request (an
@@ -116,16 +114,16 @@ toml = { version = "0.8", optional = true }
 # enables `ikigai-shacl/rudof` itself, and cargo unifies (cli does). **0.3.6 is the floor**: the
 # first whose subset implements `sh:closed` and `sh:ignoredProperties`, which every layer's
 # shapes use (`config.rs` refuses an open node shape); 0.3.5's subset refused every layer at
-# open. `tests/subset.rs` validates every shipped shapes graph with the subset by name.
-# ⚠ `"0.3.6"` is `<0.4.0`.
-ikigai-shacl = { version = "0.3.6", default-features = false, optional = true }
+# open. `tests/subset.rs` validates every shipped shapes graph with the subset by name. 0.5.0
+# is the release on core 0.2. ⚠ `"0.5.0"` is `<0.6.0`.
+ikigai-shacl = { version = "0.5.0", default-features = false, optional = true }
 # The JSON-LD faces (ledger #1371): every graph answer `as=application/ld+json` is the layer's
 # egress context, pruned and compacted by `urn:jsonld:prune`, which the host evaluates in a
 # kernel of its OWN (`json::Egress`) and binds into no space a door serves: the prune declares
 # no capability, so bound in a door it would be offered to every participant (ledger #1266's
-# shape). 0.2.2 is the first with `prune` and the line every test here ran against.
-# ⚠ `"0.2.2"` is `<0.3.0`.
-ikigai-jsonld = { version = "0.2.2", optional = true }
+# shape). `prune` arrived in 0.2.2; 0.3.0 is the release on core 0.2.
+# ⚠ `"0.3.0"` is `<0.4.0`.
+ikigai-jsonld = { version = "0.3.0", optional = true }
 # Turtle and JSON-LD in (`say`'s content, the shapes and the participants graph), Turtle out.
 # 0.3.4 / 0.2.4 / 0.2.6 are the model, serializer and parser oxigraph 0.5.11 uses, so the
 # graph carries one of each beside ikigai-shacl in a host. oxrdfio's JSON-LD parser has no
@@ -143,16 +141,16 @@ oxrdfio = { version = "0.2.6", optional = true }
 # no ikigai-core endpoints, no async-trait and no armor, so `seal` writes binary age and `open`
 # reads it (armored input too if something else in the graph turns `armor` on, which the MAGIC
 # prefix checks in `at_rest` make harmless). Its low-order recipient check is not needed here:
-# every recipient is the host's own (`Identity::to_public`), never a low-order point.
-# ⚠ `"0.2.1"` is `<0.3.0`.
-ikigai-encrypt = { version = "0.2.1", default-features = false, optional = true }
+# every recipient is the host's own (`Identity::to_public`), never a low-order point. 0.3.1 is
+# the release on core 0.2. ⚠ `"0.3.1"` is `<0.4.0`.
+ikigai-encrypt = { version = "0.3.1", default-features = false, optional = true }
 # Onboarding (ledger #2009, `onboard`): an entitlement is applied only when its signature verifies
 # against the controller's public key, and the host verifies through ikigai-sign's `urn:sign:verify`,
 # evaluated in a kernel of the host's OWN that no door binds (the pattern `json::Egress` set): the
-# ecosystem's one Ed25519 verifier, so no signature code here. 0.3.2 is the current release and the
-# one every test here ran against; its `verify` (bytes, signature graph, SPKI key IRI) is older.
-# ⚠ `"0.3.2"` is `<0.4.0`.
-ikigai-sign = { version = "0.3.2", optional = true }
+# ecosystem's one Ed25519 verifier, so no signature code here. 0.4.1 is the release on core 0.2
+# and the one every test here ran against; its `verify` (bytes, signature graph, SPKI key IRI) is
+# older. ⚠ `"0.4.1"` is `<0.5.0`.
+ikigai-sign = { version = "0.4.1", optional = true }
 # An enrollment request carries its certificate as PEM, and the host checks that the certificate's
 # leaf DER hashes to the fingerprint the request states, which must be the poster's own. PEM is
 # decoded by RustCrypto's RFC 7468 decoder and the DER is checked as one well-formed DER document,
@@ -180,19 +178,20 @@ oxsdatatypes = { version = "0.2.4", optional = true }
 futures-timer = "3"
 
 [dev-dependencies]
-# The module recipe as one test. 0.8.0 is the CURRENT published definition of "done", and
-# the floor this suite needs: `Fixture::capability` (0.6.2) probes `urn:layers:me` and the
-# write doors AS a minted participant instead of waiving their checks (ledger #1321), and
-# `Suite::required_on_mutating` (0.8.0) holds `say` and `out` to REQUIRED (ledger #329).
-# ⚠ `"0.8.0"` is `<0.9.0`: raise it when conformance moves, or this crate keeps reporting
+# The module recipe as one test. 0.11.0 is the CURRENT published definition of "done", the
+# release on core 0.2, and it turns on the DATATYPES and FAILURES checks by default:
+# `Fixture::capability` (0.6.2) probes `urn:layers:me` and the write doors AS a minted
+# participant instead of waiving their checks (ledger #1321), and `Suite::required_on_mutating`
+# (0.8.0) holds `say` and `out` to REQUIRED (ledger #329).
+# ⚠ `"0.11.0"` is `<0.12.0`: raise it when conformance moves, or this crate keeps reporting
 # green against an old rulebook.
-ikigai-conformance = "0.8.0"
+ikigai-conformance = "0.11.0"
 # `TurtleRenderer` gives the test kernels a JSON Meta face (without one the engine's routing
 # cannot be observed), and its `VOCABULARY` is the conformance suite's oracle: 0.1.96 is the
-# first that defines the layer family these graphs use, so the dev pin is what makes the
-# vocabulary check judge against it (cargo unifies the conformance crate's own `0.1.91`).
-# 0.1.98 moves with core: one workspace, one version.
-ikigai-vocab = "0.1.98"
+# first that defines the layer family these graphs use. 0.2.0 moves with core: the streams
+# release (ledger #2261); the old `"0.1.98"` meant `<0.2.0` under 0.x rules.
+# ⚠ `"0.2.0"` is `<0.3.0`.
+ikigai-vocab = "0.2.0"
 # RDF 1.2 in the TEST build, as in every host that links this crate: a host's graph turns
 # `rdf-12` on (rudof, through ikigai-shacl's default features, in gonk and the cli), and with
 # it Turtle triple terms `<<( … )>>` parse. Through oxigraph's own feature, so oxrdf, oxttl,
