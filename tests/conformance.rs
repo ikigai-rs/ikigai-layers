@@ -24,6 +24,11 @@
 //!   `tuples` thread**, which the kernel cuts after every out and take through it.
 //! - **`space(&host)` is HOST-named** (`SPACE-NAME`, ledger #987): its doors are the layers
 //!   the configuration defines.
+//! - **BODIES is handed the kernel's own root** (`Suite::body_space`, conformance 0.12.0):
+//!   core keeps a kernel's root private, so the kernel here is built from `root_over`'s
+//!   `Arc` and the suite gets the same one. It leaves only the live reads unprobed, and
+//!   `conforms` pins that list. BODY-INPUTS has nothing to probe: no argument here is
+//!   declared `reads_body` (every `content` is read inline), so no content store is wired.
 //! - **No `Suite::own` scope**: the kernel binds the layer space alone, as a door does, so
 //!   every endpoint walked is this crate's and nothing would be inherited. The second test
 //!   pins the walked list exactly, which is what an `own` scope plus an `inherited` pin
@@ -37,8 +42,8 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
-use ikigai_conformance::{Fixture as Probe, Suite};
-use ikigai_core::{Capability, Verb};
+use ikigai_conformance::{Check, Fixture as Probe, Suite};
+use ikigai_core::{Capability, Fallback, Verb};
 use ikigai_layers::grants::{generate, load_fingerprints};
 use ikigai_layers::Config;
 
@@ -73,9 +78,18 @@ fn minted(f: &common::Fixture, principal: &str) -> Capability {
     )
 }
 
-fn suite(f: &common::Fixture, entry_ids: &[(String, String)], receipt: &str) -> Suite {
+fn suite(
+    f: &common::Fixture,
+    root: Arc<Fallback>,
+    entry_ids: &[(String, String)],
+    receipt: &str,
+) -> Suite {
     let mut suite = Suite::new()
         .host_named_space(SPACE_LABEL, Arc::new(ikigai_layers::space(&f.host)))
+        // BODIES (conformance 0.12.0) compares each endpoint's `invoke` with its
+        // `invoke_body` in the space the kernel resolves in, so it is handed the kernel's own
+        // root: without it every Source is reported unprobed.
+        .body_space(root)
         // The kernel is a scratch fixture, so the write doors are held to REQUIRED too
         // (conformance 0.8.0, ledger #329): `say` and `out` without their required
         // `content` must be refused, typed. A drop wrongly accepted would write into the
@@ -175,9 +189,41 @@ fn seeded() -> (common::Fixture, Vec<(String, String)>, String) {
 #[test]
 fn conforms() {
     let (f, ids, receipt) = seeded();
-    let report = suite(&f, &ids, &receipt).run_blocking(&f.kernel);
+    let root = root_over(&f.host);
+    let kernel = kernel_from(root.clone());
+    let report = suite(&f, root, &ids, &receipt).run_blocking(&kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
+    // ★ BODIES probes every deterministic Source (the kernel's root reached the suite), so
+    // what it leaves unprobed is exactly the live reads, by the suite's own reason. A
+    // `body_space` that fell off would show every Source here again.
+    let mut unprobed: Vec<String> = report
+        .unprobed
+        .iter()
+        .map(|u| {
+            assert_eq!(u.check, Check::Bodies, "{report}");
+            u.endpoint.clone()
+        })
+        .collect();
+    unprobed.sort_unstable();
+    let mut live: Vec<String> = [
+        "collab",
+        "collab-participants",
+        "layers-feed",
+        "layers-me",
+        "layers-participants",
+    ]
+    .map(String::from)
+    .into_iter()
+    .chain(
+        LAYERS
+            .into_iter()
+            .chain([TASKS])
+            .map(|layer| format!("layer-{layer}-feed")),
+    )
+    .collect();
+    live.sort_unstable();
+    assert_eq!(unprobed, live, "{report}");
     assert!(
         report
             .to_string()
@@ -191,7 +237,9 @@ fn conforms() {
 #[test]
 fn the_walk_reaches_every_resource_this_crate_binds() {
     let (f, ids, receipt) = seeded();
-    let report = suite(&f, &ids, &receipt).run_blocking(&f.kernel);
+    let root = root_over(&f.host);
+    let kernel = kernel_from(root.clone());
+    let report = suite(&f, root, &ids, &receipt).run_blocking(&kernel);
     let mut walked: Vec<&str> = report.walked.iter().map(String::as_str).collect();
     walked.sort_unstable();
     walked.dedup();
