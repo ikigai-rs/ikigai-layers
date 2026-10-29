@@ -178,14 +178,17 @@ oxsdatatypes = { version = "0.2.4", optional = true }
 futures-timer = "3"
 
 [dev-dependencies]
-# The module recipe as one test. 0.11.0 is the CURRENT published definition of "done", the
-# release on core 0.2, and it turns on the DATATYPES and FAILURES checks by default:
+# The module recipe as one test. 0.12.0 is the CURRENT published definition of "done" (ledger
+# #2573): it turns on BODIES (each Source's `invoke` and `invoke_body` agree, and a collect one
+# byte under budget fails `OverBudget`), probed through `Suite::body_space` with the kernel's
+# own root, and BODY-INPUTS, which has nothing to probe here: no argument is `reads_body` (every
+# `content` is read inline). 0.11.0 turned on the DATATYPES and FAILURES checks by default:
 # `Fixture::capability` (0.6.2) probes `urn:layers:me` and the write doors AS a minted
 # participant instead of waiving their checks (ledger #1321), and `Suite::required_on_mutating`
 # (0.8.0) holds `say` and `out` to REQUIRED (ledger #329).
-# ⚠ `"0.11.0"` is `<0.12.0`: raise it when conformance moves, or this crate keeps reporting
+# ⚠ `"0.12.0"` is `<0.13.0`: raise it when conformance moves, or this crate keeps reporting
 # green against an old rulebook.
-ikigai-conformance = "0.11.0"
+ikigai-conformance = "0.12.0"
 # `TurtleRenderer` gives the test kernels a JSON Meta face (without one the engine's routing
 # cannot be observed), and its `VOCABULARY` is the conformance suite's oracle: 0.1.96 is the
 # first that defines the layer family these graphs use. 0.2.0 moves with core: the streams

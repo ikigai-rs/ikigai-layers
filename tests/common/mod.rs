@@ -329,12 +329,20 @@ pub struct Fixture {
 /// A kernel binding the layer space ALONE, as a door does: admission is the host's own call
 /// to the validator, so nothing else is needed (ledger #1266).
 pub fn kernel_over(host: &Arc<Host>) -> Kernel {
+    kernel_from(root_over(host))
+}
+
+/// The root [`kernel_over`] builds its kernel from, for a test that needs the SAME `Arc` the
+/// kernel holds (the conformance suite's `body_space`: core keeps a kernel's root private).
+pub fn root_over(host: &Arc<Host>) -> Arc<Fallback> {
     let spaces: Vec<Arc<dyn Space>> = vec![Arc::new(ikigai_layers::space(host))];
-    Kernel::with_meta_renderer(
-        Arc::new(Fallback::new(spaces)),
-        Arc::new(ikigai_vocab::TurtleRenderer),
-    )
-    .with_clock(Arc::new(TickingClock::default()))
+    Arc::new(Fallback::new(spaces))
+}
+
+/// A kernel over `root` with a JSON Meta face and a clock, as [`kernel_over`] builds one.
+pub fn kernel_from(root: Arc<Fallback>) -> Kernel {
+    Kernel::with_meta_renderer(root, Arc::new(ikigai_vocab::TurtleRenderer))
+        .with_clock(Arc::new(TickingClock::default()))
 }
 
 pub fn fixture() -> Fixture {
