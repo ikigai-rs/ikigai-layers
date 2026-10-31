@@ -737,6 +737,12 @@ assert!(state.join("key-check.age").exists());
 # std::fs::remove_dir_all(&dir).unwrap();
 ```
 
+## Accessibility
+
+People read this crate's write answers, plain listings, refusals and onboarding diagnostics, and
+the `ikigai-layers` binary's terminal text. [ACCESSIBILITY.md](https://github.com/ikigai-rs/ikigai-layers/blob/main/ACCESSIBILITY.md)
+says what that text is, the rules it follows, what is not tested, and how to report a barrier.
+
 ## License
 
 Licensed under either of MIT or Apache-2.0, at your option.
