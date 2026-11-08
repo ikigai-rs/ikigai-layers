@@ -51,7 +51,9 @@ use super::{
     REQUEST, SIGNATURE,
 };
 use crate::at_rest;
-use crate::config::{self, parse_layer_cap, Config, OnboardConfig, TrustReload, ENTITLEMENTS_FILE};
+use crate::config::{
+    self, parse_layer_cap, Config, Manifest, OnboardConfig, TrustReload, ENTITLEMENTS_FILE,
+};
 use crate::grants::{generate, load_enrolled, load_fingerprints};
 use crate::host::Host;
 use crate::name::{fold_fingerprint, Participant, PARTICIPANT_PREFIX};
@@ -80,7 +82,7 @@ pub enum Verdict {
     Expired,
     /// Not applied, and why: a signature that does not verify against the controller key, a
     /// field missing, a replay, a grant on a layer the host cannot grant, a participant another
-    /// certificate holds.
+    /// certificate holds, a participant a manifest grants, the controller.
     Refused {
         /// Why.
         reason: String,
@@ -560,7 +562,9 @@ fn fold(
             _ => Ok(()),
         });
         let certificate = grantable
+            .and_then(|()| principal_is_not_the_controller(v, onboard))
             .and_then(|()| principal_is_free(v, &enrolled, &held, &current))
+            .and_then(|()| principal_has_no_manifest_grant(v, &collabs))
             .and_then(|()| certificate_of(host, v));
         let certificate = match certificate {
             Ok(pem) => pem,
@@ -662,6 +666,50 @@ fn principal_is_free(
         ));
     }
     Ok(())
+}
+
+/// Refuse `v` when it names `onboard.controller`: whoever holds that name says entitlements.
+fn principal_is_not_the_controller(v: &Verified, onboard: &OnboardConfig) -> Result<(), String> {
+    let principal = v.participant.iri();
+    if principal == onboard.controller {
+        return Err(format!(
+            "onb:principal {principal} is onboard.controller, which an entitlement never names: \
+             invite this node under another name"
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse `v` when a manifest grants the participant it names, whether or not a certificate
+/// holds that participant yet: `v`'s certificate would join the manifest's grant. An entitled
+/// node's grant comes from its entitlement alone, and the host writes entitlements beside the
+/// manifests, never into them, so any manifest line naming the participant is an operator's.
+fn principal_has_no_manifest_grant(
+    v: &Verified,
+    collabs: &Option<BTreeMap<String, Manifest>>,
+) -> Result<(), String> {
+    let manifests: Vec<String> = collabs
+        .iter()
+        .flat_map(BTreeMap::values)
+        .filter(|m| {
+            m.mounts
+                .iter()
+                .any(|mount| mount.grants.contains_key(&v.participant))
+        })
+        .map(|m| format!("`{}`", m.name))
+        .collect();
+    let (noun, that) = match manifests.len() {
+        0 => return Ok(()),
+        1 => ("manifest", "that manifest"),
+        _ => ("manifests", "those manifests"),
+    };
+    Err(format!(
+        "onb:principal {} is granted by {noun} {}, and an entitled node's grant comes from its \
+         entitlement alone: invite this node under another name, or take that participant out \
+         of {that} first",
+        v.participant.iri(),
+        manifests.join(", ")
+    ))
 }
 
 /// `grants` with `read` on the grants layer added: an entitled node reads its own entitlement

@@ -56,7 +56,9 @@
 //! Every `onb:layerGrant` is a capability IRI, `urn:cap:layer:{verb}:{layer}`, never a
 //! nested node: a channel entry is ONE subject. Applied, an entitlement also grants `read` on
 //! the grants layer, so the node reads its own entitlement there with the certificate it
-//! names. Only `onboard.controller` may say on the grants layer.
+//! names. Only `onboard.controller` may say on the grants layer. An entitlement never names
+//! the controller, nor a participant a manifest grants: an entitled node's grant is its
+//! entitlement's alone.
 //!
 //! `onb:signature` is ikigai-sign's signature graph (`urn:sign:sign`) over
 //! [`signing_bytes`] of everything else: the controller signs the entry as it will say it,

@@ -1099,18 +1099,155 @@ fn an_expired_entitlement_holds_its_participant_until_it_is_revoked() {
     assert!(door_mint(&edge, &second).is_none());
 }
 
+/// Add a participant to `participants.ttl` that no manifest names.
+fn add_ungranted_participant(edge: &Edge, name: &str) {
+    let text = edge.read("participants.ttl").unwrap();
+    edge.config.write(
+        "participants.ttl",
+        &format!("{text}<{}> a foaf:Person .\n", participant(name)),
+    );
+}
+
 #[test]
 fn a_hand_enrolled_certificate_may_be_entitled_under_its_own_participant() {
-    // enrollment.toml names this very certificate, so no other certificate holds the name.
+    // enrollment.toml names this very certificate, and no manifest grants the participant.
+    let edge = edge("live");
+    let pem = certificate("mini");
+    let fp = fingerprint_of_pem(&pem).unwrap();
+    add_ungranted_participant(&edge, "spare");
+    edge.config
+        .write("enrollment.toml", &format!("spare = \"{fp}\"\n"));
+    entitle_as(&edge, &pem, "spare", None);
+    let s = status(&edge);
+    assert_eq!(s["records"][0]["verdict"], "applied", "{s}");
+    assert!(door_mint(&edge, &fp).is_some());
+}
+
+/// That `reason` refuses `name` for what `manifest` grants it, and says what to do.
+fn assert_manifest_refusal(reason: &str, name: &str, manifest: &str) {
+    assert!(
+        reason.contains(&format!("onb:principal {}", participant(name)))
+            && reason.contains(&format!("`{manifest}`"))
+            && reason.contains("invite this node under another name"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn an_entitlement_naming_a_participant_a_manifest_grants_and_no_certificate_holds_is_refused() {
+    // `hub` is granted by the manifest `bobby`, and no certificate holds it: it is `unenrolled`.
+    let edge = edge("live");
+    let (fp, _) = entitle_as(&edge, &certificate("mini"), "hub", None);
+
+    assert_manifest_refusal(&refusal(&edge, 0), "hub", "bobby");
+    // The new certificate got nothing of the manifest's grant.
+    assert!(door_mint(&edge, &fp).is_none());
+    assert!(edge.read(&format!("trust/{fp}.crt")).is_none());
+    assert!(edge
+        .read("entitlements.toml")
+        .is_none_or(|t| !t.contains("[[entitled]]")));
+}
+
+#[test]
+fn a_refusal_names_every_manifest_granting_the_participant() {
+    let edge = edge("live");
+    edge.config.write(
+        "collabs/chris.toml",
+        &CHRIS_TOML.replacen("[[mount]]\n", "[[mount]]\nhub = [\"read\"]\n", 1),
+    );
+    entitle_as(&edge, &certificate("mini"), "hub", None);
+    let reason = refusal(&edge, 0);
+    assert_manifest_refusal(&reason, "hub", "bobby");
+    assert_manifest_refusal(&reason, "hub", "chris");
+}
+
+#[test]
+fn a_hand_enrolled_certificate_cannot_be_entitled_under_a_participant_a_manifest_grants() {
+    // The certificate is the participant's own, but an entitled node's grant comes from its
+    // entitlement alone, and this participant's comes from a manifest.
     let edge = edge("live");
     let pem = certificate("mini");
     let fp = fingerprint_of_pem(&pem).unwrap();
     edge.config
         .write("enrollment.toml", &format!("bobby = \"{fp}\"\n"));
     entitle_as(&edge, &pem, "bobby", None);
-    let s = status(&edge);
-    assert_eq!(s["records"][0]["verdict"], "applied", "{s}");
+    assert_manifest_refusal(&refusal(&edge, 0), "bobby", "bobby");
+}
+
+/// Take `name`'s certificate out of `enrollment.toml`: the fixture enrolls the controller by hand.
+fn uncertify(edge: &Edge, name: &str) {
+    let without: String = edge
+        .read("enrollment.toml")
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with(&format!("{name} ")))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    edge.config.write("enrollment.toml", &without);
+}
+
+#[test]
+fn an_entitlement_naming_the_uncertified_controller_is_refused() {
+    let edge = edge("live");
+    uncertify(&edge, "brian");
+    let (fp, _) = entitle_as(&edge, &certificate("mini"), "brian", None);
+
+    let reason = refusal(&edge, 0);
+    assert!(
+        reason.contains(&format!("onb:principal {}", participant("brian")))
+            && reason.contains("onboard.controller"),
+        "{reason}"
+    );
+    assert!(door_mint(&edge, &fp).is_none());
+    assert!(edge.read(&format!("trust/{fp}.crt")).is_none());
+}
+
+#[test]
+fn the_controller_is_refused_even_when_no_manifest_grants_it() {
+    let edge = edge("live");
+    uncertify(&edge, "brian");
+    for manifest in ["bobby", "chris", "edge", "onboard"] {
+        let rel = format!("collabs/{manifest}.toml");
+        let without: String = edge
+            .read(&rel)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with("brian"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        edge.config.write(&rel, &without);
+    }
+    let (fp, _) = entitle_as(&edge, &certificate("mini"), "brian", None);
+    assert!(refusal(&edge, 0).contains("onboard.controller"));
+    assert!(door_mint(&edge, &fp).is_none());
+}
+
+#[test]
+fn the_controller_with_its_own_certificate_is_refused_as_the_controller() {
+    // The certificate is the controller's own, so `already held` would not apply.
+    let edge = edge("live");
+    let pem = certificate("mini");
+    let fp = fingerprint_of_pem(&pem).unwrap();
+    edge.config
+        .write("enrollment.toml", &format!("brian = \"{fp}\"\n"));
+    entitle_as(&edge, &pem, "brian", None);
+    assert!(refusal(&edge, 0).contains("onboard.controller"));
+}
+
+#[test]
+fn a_manifest_grant_added_after_an_entitlement_takes_it_out_of_force() {
+    let edge = edge("live");
+    let (fp, _) = entitle_as(&edge, &certificate("mini"), "mini", None);
     assert!(door_mint(&edge, &fp).is_some());
+
+    let text = edge.read("collabs/edge.toml").unwrap();
+    edge.config
+        .write("collabs/edge.toml", &format!("{text}mini = [\"read\"]\n"));
+    // Any new entry recomputes what is in force.
+    entitle_as(&edge, &certificate("other"), "other", None);
+
+    assert_manifest_refusal(&refusal(&edge, 0), "mini", "edge");
+    assert!(edge.read(&format!("trust/{fp}.crt")).is_none());
 }
 
 #[test]

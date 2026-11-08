@@ -31,7 +31,10 @@ repository's.
   event, 4: … resynchronize from 0`` or ``tuple= names one tuple and match= selects by a
   template: give one``. An entitlement naming a participant another certificate holds answers
   ``onb:principal <participant> is already held by certificate <fingerprint>, …`` and says how
-  to free it, on the onboarding status and the stderr line below. A write that fails admission answers ``does not conform to layer
+  to free it, on the onboarding status and the stderr line below. One naming a participant a
+  manifest grants answers ``onb:principal <participant> is granted by manifest `<name>`, …`` and
+  says how to change that, and one naming `onboard.controller` says it is never entitled, both
+  in the same two places. A write that fails admission answers ``does not conform to layer
   `talk`'s shapes (N violation(s)): …``, listing up to 20 violations and a count of the rest.
   A `say` on a feed by a non-publisher answers ``layer `releases` is a feed, written only by
   its publishers, and <participant> is not one of them: ask in a Talk channel instead``; an
@@ -77,7 +80,9 @@ Verified by reading the source:
   shapes is refused with `does not conform`; `tests/feed.rs`
   (`after_is_required_and_a_cursor_from_the_future_is_refused`), `tests/onboard.rs`
   (`an_entitlement_naming_a_hand_enrolled_participant_is_refused`,
-  `an_entitlement_naming_a_participant_entitled_under_another_certificate_is_refused`),
+  `an_entitlement_naming_a_participant_entitled_under_another_certificate_is_refused`,
+  `an_entitlement_naming_a_participant_a_manifest_grants_and_no_certificate_holds_is_refused`,
+  `an_entitlement_naming_the_uncertified_controller_is_refused`),
   `tests/me.rs`
   (`no_principal_is_a_refusal`, `an_unknown_face_is_refused`), `tests/feed_layers.rs`
   (`a_non_publisher_with_a_say_grant_is_refused_naming_the_feed`,
