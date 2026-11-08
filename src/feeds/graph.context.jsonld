@@ -1,0 +1,22 @@
+{ "@context": {
+  "rss": "http://purl.org/rss/1.0/",
+  "skos": "http://www.w3.org/2004/02/skos/core#",
+  "ik": "https://ikigai-rs.dev/ns#",
+  "xsd": "http://www.w3.org/2001/XMLSchema#",
+  "Feed": "ik:Feed",
+  "Item": "rss:item",
+  "Concept": "skos:Concept",
+  "ConceptScheme": "skos:ConceptScheme",
+  "label": "http://www.w3.org/2000/01/rdf-schema#label",
+  "title": "rss:title",
+  "content": "http://purl.org/rss/1.0/modules/content/encoded",
+  "issued": { "@id": "http://purl.org/dc/terms/issued", "@type": "xsd:dateTime" },
+  "creator": { "@id": "http://purl.org/dc/elements/1.1/creator", "@type": "@id" },
+  "subject": { "@id": "http://purl.org/dc/terms/subject", "@type": "@id" },
+  "isPartOf": { "@id": "http://purl.org/dc/terms/isPartOf", "@type": "@id" },
+  "seq": { "@id": "ik:seq", "@type": "xsd:integer" },
+  "prefLabel": "skos:prefLabel",
+  "notation": "skos:notation",
+  "broader": { "@id": "skos:broader", "@type": "@id" },
+  "inScheme": { "@id": "skos:inScheme", "@type": "@id" }
+} }

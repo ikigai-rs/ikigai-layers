@@ -546,7 +546,7 @@ fn fold(
                     .iter()
                     .map(|(n, s)| (n.clone(), s.def.clone()))
                     .collect();
-                config::check_entitled_grants(&v.grants, &defs, collabs)
+                config::check_entitled_grants(v.participant.iri(), &v.grants, &defs, collabs)
                     .map_err(|e| format!("grants {e}"))
             }
             None => Err("the host's manifests do not read".into()),

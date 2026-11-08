@@ -136,6 +136,8 @@ pub mod config;
 pub mod endpoints;
 #[cfg(feature = "host")]
 pub mod feed;
+#[cfg(feature = "host")]
+pub mod feeds;
 pub mod gateway;
 #[cfg(feature = "host")]
 pub mod grants;

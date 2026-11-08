@@ -42,6 +42,8 @@ Layers are inspired by Daniel Suarez's novel *Daemon*
 | --- | --- | --- | --- |
 | `urn:layer:{layer}` | Source | the definition, an `ik:Layer` | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:shapes` | Source | the closed admission shapes | `urn:cap:layer:read:{layer}` |
+| `urn:layer:{layer}:graph` | Source | a feed's entries in ikigai-feed's RDF form, with its scheme ([Feeds](#feeds)) | `urn:cap:layer:read:{layer}` |
+| `urn:layer:{layer}:scheme` | Source | a feed's SKOS concept scheme ([Feeds](#feeds)) | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:context` | Source | the egress context (JSON-LD, no `@vocab`) | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:say` | Sink | append one entry; answers its IRI | `urn:cap:layer:say:{layer}` |
 | `urn:layer:{layer}:entries` | Source | entries `after=` a sequence, `from=` a participant, `type=` a class | `urn:cap:layer:read:{layer}` |
@@ -174,6 +176,28 @@ bobby        = ["read", "feed", "say"]
 bobby-claude = ["read", "feed", "say"]
 brian        = ["read", "feed", "say"]
 ```
+
+A channel may also be a **feed**, read by many and written only by its publishers
+([Feeds](#feeds)):
+
+```toml
+# layers/releases.toml   ->  urn:layer:releases
+model      = "channel"
+shapes     = "msg.shapes.ttl"
+context    = "msg.context.jsonld"
+feed       = true                   # read-only for everyone but its publishers
+publishers = ["brian"]              # required, at least one: manifest names or full IRIs
+scheme     = "releases.scheme.ttl"  # required: one skos:ConceptScheme, with its concepts
+public     = true                   # optional, default false: advertised for joining
+shared     = ["audience"]           # the isolation rule is unchanged
+```
+
+`feed` is a channel's option only, and `publishers`, `scheme` and `public` are refused
+without it. A publisher must be a name `participants.ttl` holds, and a manifest that grants
+`say` on a feed to anyone else is refused, naming both, by the host's open and by
+`ikigai-layers grants` alike. The scheme file sits beside the definition; every concept needs
+a `skos:prefLabel` and a `skos:notation`, and every `skos:broader` must name a concept of the
+same scheme.
 
 ## Enrollment is generated
 
@@ -338,6 +362,46 @@ addressed layer only when it is addressed to that offer's offerer alone, and the
 addressee can take it. The feed records `out` and `taken`
 events, with the tuple's subject and who did it.
 
+## Feeds
+
+A **feed layer** is a channel for announcements: `feed = true`, `publishers`, and a SKOS
+`scheme` (see [Configuration](#configuration)). Its entries are written only by its
+publishers and read by everyone holding its `read` grant.
+
+- **Publishers only.** `say` from a principal not in `publishers` is refused (`Denied`, naming
+  the layer as a feed), even under a grant holding `urn:cap:layer:say:{layer}`.
+- **Membership is invisible.** A feed's definition is typed `ik:Feed` as well as `ik:Layer`
+  and lists no `dcterms:isPartOf`; `urn:collab:{name}` and `urn:collab:{name}:participants`
+  name only a feed's publishers, so no answer counts or names its readers.
+- **One shared copy.** A door's kernel keys its cache by the caller's whole capability, so
+  a feed's reads run in a kernel of the host's own, under the host's authority narrowed to
+  `urn:cap:layer:read:{layer}` with no principal: one request has one cached answer for
+  every reader, and the door checks each reader's own read token and answers from that copy
+  without keeping one per reader. The reads hang from the say thread, and a publish cuts it
+  and then computes the default `entries` page and the `graph`, so the first reader finds
+  them cached. `Host::feed_computations(layer)` counts what was actually computed.
+- **The scheme.** `urn:layer:{layer}:scheme` serves the `skos:ConceptScheme` as Turtle or
+  JSON. An entry's `dcterms:subject` values must be concepts of that scheme, refused otherwise,
+  naming the concept.
+- **The graph.** `urn:layer:{layer}:graph` is the entries in
+  [ikigai-feed](https://github.com/ikigai-rs/ikigai-linkeddata/tree/main/crates/ikigai-feed)'s
+  RDF form (`rss:item`, `rss:title`, `content:encoded`, `dcterms:issued`, `dc:creator`,
+  `dcterms:subject`, `dcterms:isPartOf <urn:layer:{layer}>`), unioned with the scheme, from one
+  SPARQL CONSTRUCT kept as a file (`src/feeds/graph.rq`). An entry's title is its
+  `dcterms:title` and its content its `ik:body`; `dcterms:issued` and `dc:creator` are the
+  stamps the host wrote.
+- **Filtered entries.** `entries concept=<c>[,<c>...]` answers the entries whose
+  `dcterms:subject/skos:broader*` reaches any given concept, from one SPARQL SELECT over the
+  graph (`src/feeds/entries.rq`, property paths, no reasoner), keyed by the concepts and never
+  by the caller. An unknown concept is `invalid-argument` naming it.
+- **Atom.** `entries as=application/atom+xml`, with or without `concept=`, is an Atom 1.0
+  document from the same SELECT through a stylesheet kept as a file (`src/feeds/atom.xsl`).
+
+A reader asks about a feed entry in its own Talk channel, not on the feed. Opening a
+feed to a clean installation, and approving a join, are a door's concern: gonk's and the
+Python client's, not this host's; `public = true` is only what the definition's JSON face
+advertises.
+
 ## JSON faces
 
 Every answer a participant reads also comes as JSON, so a participant with only an HTTP client
@@ -353,6 +417,9 @@ front, MCP and the action manifold all offer the same ones.
 | `receipt:{id}` | `application/ld+json` | the receipt, a graph |
 | `tuples` Source listing | `application/json` | `{"layer", "tuples": [{"seq", "created", "subject", "dropper"}]}`, the text face's lines as objects; with `state=taken`, `{"layer", "receipts": [{"seq", "time", "subject", "taker", "receipt"}]}` |
 | `say`, `tuples` Sink (out) | `application/json` | `{"@id": "<the IRI the write named>"}` |
+| `urn:layer:{layer}` | `application/json` | `{"layer", "label", "model", "types": [...], "feed": bool, "public": bool}`, with `types` as compact terms (`"Layer"`, `"Feed"`); a feed's names no collaboration |
+| `urn:layer:{layer}:scheme` (a feed) | `application/json` | `{"scheme": "<IRI>", "label", "concepts": [{"@id", "prefLabel", "notation", "broader": ["<IRI>"]}]}`, concepts by notation |
+| `urn:layer:{layer}:graph` (a feed) | `application/ld+json` | the graph under the host's feed context (`src/feeds/graph.context.jsonld`), not the layer's egress context |
 | `feed`, `urn:layers:feed`, `urn:layers:me`, `urn:collab:{name}` | `application/json` | as before |
 
 A face a resource does not offer is refused (`invalid-argument` on `as`), never answered in

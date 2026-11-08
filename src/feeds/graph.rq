@@ -1,0 +1,41 @@
+# A feed layer's graph (ledger #3284): the entries lifted to ikigai-feed's RDF form, unioned with
+# the layer's SKOS scheme. `?layer` is the feed itself, named by the definition triples the host
+# puts beside the entries, so this one query serves every feed.
+PREFIX rss: <http://purl.org/rss/1.0/>
+PREFIX content: <http://purl.org/rss/1.0/modules/content/>
+PREFIX dc: <http://purl.org/dc/elements/1.1/>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+PREFIX ik: <https://ikigai-rs.dev/ns#>
+
+CONSTRUCT {
+  ?layer a ik:Feed ; rdfs:label ?feedLabel .
+  ?entry a rss:item ;
+         rss:title ?title ;
+         content:encoded ?body ;
+         dcterms:issued ?created ;
+         dc:creator ?creator ;
+         dcterms:subject ?subject ;
+         dcterms:isPartOf ?layer ;
+         ik:seq ?seq .
+  ?term ?p ?o .
+}
+WHERE {
+  ?layer a ik:Feed ; rdfs:label ?feedLabel .
+  {
+    # ?layer is named again here: a FILTER sees only its own group's variables.
+    ?layer a ik:Feed .
+    ?entry ik:seq ?seq ; dcterms:created ?created ; prov:wasAttributedTo ?creator .
+    FILTER(STRSTARTS(STR(?entry), CONCAT(STR(?layer), ":entry:")))
+    OPTIONAL { ?entry dcterms:title ?title }
+    OPTIONAL { ?entry ik:body ?body }
+    OPTIONAL { ?entry dcterms:subject ?subject }
+  }
+  UNION
+  {
+    ?term a ?kind ; ?p ?o .
+    FILTER(?kind IN (skos:Concept, skos:ConceptScheme))
+  }
+}

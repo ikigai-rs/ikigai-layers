@@ -10,6 +10,7 @@ use crate::at_rest::{self, KeyCheck, Migration, Sealer, StateKey};
 use crate::channel::Channel;
 use crate::config::{self, Config, ConfigError, LayerDef, Model, Participants};
 use crate::feed::{self, Event, FeedLog, Notify};
+use crate::feeds::FeedShare;
 use crate::json::{egress_context, Egress};
 use crate::onboard::apply::{LobbyRate, Onboard};
 use crate::tuplespace::Tuplespace;
@@ -111,6 +112,8 @@ pub struct Host {
     match_budget: EvaluationBudget,
     /// The host's own JSON-LD processor, bound into no space (ledger #1371).
     json: Egress,
+    /// Every feed layer's one shared copy, in a kernel of the host's own (ledger #3284).
+    feeds: FeedShare,
     /// Onboarding (ledger #2009): the `[onboard]` table, when `layers.toml` has one.
     onboard: Option<Onboard>,
     /// Every lobby's rate of says.
@@ -201,15 +204,19 @@ impl Host {
         check
             .settle(key, migration == Migration::Reseal)
             .map_err(ConfigError)?;
-        let host = Arc::new(Host {
-            config_dir: config.dir,
-            layers,
-            notify: Arc::new(Notify::default()),
-            match_budget,
-            json,
-            onboard,
-            lobby_rate: LobbyRate::default(),
-            _lock: lock,
+        let host = Arc::new_cyclic(|weak| {
+            let feeds = FeedShare::new(weak.clone(), &layers);
+            Host {
+                config_dir: config.dir,
+                layers,
+                notify: Arc::new(Notify::default()),
+                match_budget,
+                json,
+                feeds,
+                onboard,
+                lobby_rate: LobbyRate::default(),
+                _lock: lock,
+            }
         });
         // Catch up on the grants layer: an entitlement said while no host ran is applied now,
         // and one already applied changes nothing (ledger #2009).
@@ -310,6 +317,19 @@ impl Host {
     /// The host's own JSON-LD processor, which every layer's JSON-LD faces compact through.
     pub(crate) fn json(&self) -> &Egress {
         &self.json
+    }
+
+    /// Every feed layer's one shared copy (ledger #3284).
+    pub(crate) fn feeds(&self) -> &FeedShare {
+        &self.feeds
+    }
+
+    /// How many of `layer`'s reads the host has computed rather than served from its one shared
+    /// copy: the default `entries` page and the `graph` once each for every publish, and a
+    /// read no earlier read has asked for. Every other read, by any reader, is served from the
+    /// copy, so this stays still no matter how many read. Zero for a layer that is not a feed.
+    pub fn feed_computations(&self, layer: &str) -> u64 {
+        self.feeds.computed(layer)
     }
 
     /// The change signal every feed append bumps.

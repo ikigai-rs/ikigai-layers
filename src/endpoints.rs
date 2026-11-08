@@ -11,6 +11,8 @@
 //! urn:layer:{layer}:entry:{id}     Source  layer-{layer}-entry       urn:cap:layer:read:{layer}
 //! urn:layer:{layer}:graph:{slug}   Source  layer-{layer}-graph       urn:cap:layer:read:{layer}
 //! urn:layer:{layer}:latest         Source  layer-{layer}-latest      urn:cap:layer:read:{layer}
+//! urn:layer:{layer}:graph          Source  layer-{layer}-feed-graph  urn:cap:layer:read:{layer}  (feed)
+//! urn:layer:{layer}:scheme         Source  layer-{layer}-scheme      urn:cap:layer:read:{layer}  (feed)
 //! urn:layer:{layer}:tuples         Sink    layer-{layer}-tuples      urn:cap:layer:out:{layer}   (out)
 //!                                  Source                            urn:cap:layer:read:{layer}  (rd)
 //!                                  Delete                            urn:cap:layer:take:{layer}  (take)
@@ -40,19 +42,20 @@
 //! rest by name.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ActionSpec, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, ReprType,
-    Representation, Result, UriTemplate, Verb,
+    ActionSpec, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
+    Iri, ReprType, Representation, Request, Result, UriTemplate, Verb,
 };
 use oxrdf::{Literal, Triple};
 
 use crate::channel::{self, entry_prefix};
 use crate::config::{ConfigError, LayerDef, Manifest, Model, Participants};
 use crate::feed::{self, Event, MAX_WAIT_SECS};
+use crate::feeds;
 use crate::host::{Host, LayerState};
 use crate::id;
 use crate::name::{collab_cap, collab_iri, endpoint_id, layer_cap, layer_iri, Participant};
@@ -66,6 +69,9 @@ const TURTLE: &str = "text/turtle";
 const JSON: &str = "application/json";
 const JSON_LD: &str = "application/ld+json";
 const TEXT: &str = "text/plain";
+const ATOM: &str = feeds::ATOM;
+const SPARQL_JSON: &str = "application/sparql-results+json";
+const SPARQL_XML: &str = "application/sparql-results+xml";
 
 /// ikigai-shacl's validator, by its resource name. **Admission no longer composes it**
 /// (since 0.2.1): the host links the validator and calls it itself, so a door binds the
@@ -105,9 +111,9 @@ pub fn space(host: &Arc<Host>) -> EndpointSpace {
     let mut space = EndpointSpace::new();
     for (name, state) in host.layers() {
         let base = layer_iri(name);
-        for action in Action::of(state.def.model) {
+        for action in Action::of(&state.def) {
             let endpoint = LayerEndpoint {
-                host: Arc::clone(host),
+                host: HostRef::Door(Arc::clone(host)),
                 state: Arc::clone(state),
                 action,
             };
@@ -271,6 +277,9 @@ fn named(iri: &str, as_json: bool) -> Representation {
 /// The faces of a graph answer: Turtle, as stored, or JSON-LD (see [`crate::json`]).
 const GRAPH_FACES: [&str; 2] = [TURTLE, JSON_LD];
 
+/// A feed's `entries` faces: a plain channel's, and Atom.
+const FEED_ENTRY_FACES: [&str; 3] = [TURTLE, JSON_LD, ATOM];
+
 /// `rd`'s faces: the list as text (the default) or JSON, the graphs as Turtle or JSON-LD.
 const RD_FACES: [&str; 4] = [TEXT, TURTLE, JSON, JSON_LD];
 
@@ -288,18 +297,22 @@ enum Action {
     Latest,
     Tuples,
     Receipt,
+    /// A feed's graph, `urn:layer:{layer}:graph` (ledger #3284).
+    FeedGraph,
+    /// A feed's scheme.
+    Scheme,
 }
 
 impl Action {
-    /// Every layer's actions, then its model's.
-    fn of(model: Model) -> Vec<Action> {
+    /// Every layer's actions, then its model's, then a feed's own.
+    fn of(def: &LayerDef) -> Vec<Action> {
         let mut actions = vec![
             Action::Definition,
             Action::Shapes,
             Action::Context,
             Action::Feed,
         ];
-        actions.extend_from_slice(match model {
+        actions.extend_from_slice(match def.model {
             Model::Channel => &[
                 Action::Say,
                 Action::Entries,
@@ -309,7 +322,18 @@ impl Action {
             ][..],
             Model::Tuplespace => &[Action::Tuples, Action::Receipt][..],
         });
+        if def.is_feed() {
+            actions.extend_from_slice(&[Action::FeedGraph, Action::Scheme]);
+        }
         actions
+    }
+
+    /// The reads of a feed that come from its one shared copy.
+    fn is_shared_feed_read(self) -> bool {
+        matches!(
+            self,
+            Action::Entries | Action::Entry | Action::Graph | Action::Latest | Action::FeedGraph
+        )
     }
 
     fn word(self) -> &'static str {
@@ -325,6 +349,8 @@ impl Action {
             Action::Latest => "latest",
             Action::Tuples => "tuples",
             Action::Receipt => "receipt",
+            Action::FeedGraph => "feed-graph",
+            Action::Scheme => "scheme",
         }
     }
 
@@ -343,6 +369,7 @@ impl Action {
             Action::Definition => base.to_string(),
             Action::Entry => format!("{base}:entry:{{id}}"),
             Action::Graph => format!("{base}:graph:{{slug}}"),
+            Action::FeedGraph => format!("{base}:graph"),
             Action::Receipt => format!("{base}:receipt:{{id}}"),
             other => format!("{base}:{}", other.word()),
         }
@@ -359,8 +386,81 @@ impl Action {
     }
 }
 
+/// Who this endpoint serves. A door's endpoint keeps its host alive, as every endpoint in the
+/// door's space does. An endpoint of a feed's private kernel is held BY the host, so it holds
+/// the host weakly: a strong reference back would keep the host, and its lock on the state
+/// directory, alive forever.
+enum HostRef {
+    Door(Arc<Host>),
+    Share(Weak<Host>),
+}
+
+impl LayerEndpoint {
+    /// The host. `Share` is reached only through the host's own private kernel, so the host
+    /// is alive whenever one of its endpoints runs.
+    fn host(&self) -> Arc<Host> {
+        match &self.host {
+            HostRef::Door(host) => Arc::clone(host),
+            HostRef::Share(host) => host.upgrade().expect("the host owns this kernel"),
+        }
+    }
+
+    /// Whether this endpoint computes a feed's shared answer rather than fronting it.
+    fn is_share(&self) -> bool {
+        matches!(self.host, HostRef::Share(_))
+    }
+}
+
+/// The IRI of a layer's say door, the thread all its reads hang from.
+pub(crate) fn say_thread_of(layer: &str) -> String {
+    format!("{}:say", layer_iri(layer))
+}
+
+/// The private kernel's endpoints for one feed: its shared reads, computed under the host's
+/// own narrowed authority ([`feeds`]).
+pub(crate) fn feed_share_space(host: Weak<Host>, state: Arc<LayerState>) -> EndpointSpace {
+    let base = layer_iri(&state.def.name);
+    let mut space = EndpointSpace::new();
+    for action in Action::of(&state.def)
+        .into_iter()
+        .filter(|a| a.is_shared_feed_read())
+    {
+        let endpoint = LayerEndpoint {
+            host: HostRef::Share(host.clone()),
+            state: Arc::clone(&state),
+            action,
+        };
+        space = match action.binding() {
+            None => space.bind(Exact::new(action.iri(&base)), endpoint),
+            Some(_) => space.bind(
+                UriTemplate::parse(action.iri(&base)).expect("layer names are template-safe"),
+                endpoint,
+            ),
+        };
+    }
+    space
+}
+
+/// The request a reader's default `entries` read normalizes to: no arguments, as every default
+/// is omitted (see `LayerEndpoint::normalized`). What a publish warms.
+pub(crate) fn feed_entries_request(layer: &str) -> Request {
+    source_request(&format!("{}:entries", layer_iri(layer)))
+}
+
+/// The request a reader's default `graph` read normalizes to.
+pub(crate) fn feed_graph_request(layer: &str) -> Request {
+    source_request(&format!("{}:graph", layer_iri(layer)))
+}
+
+fn source_request(iri: &str) -> Request {
+    Request::new(
+        Verb::Source,
+        Iri::parse(iri).expect("an IRI this crate built"),
+    )
+}
+
 struct LayerEndpoint {
-    host: Arc<Host>,
+    host: HostRef,
     state: Arc<LayerState>,
     action: Action,
 }
@@ -378,7 +478,7 @@ impl LayerEndpoint {
     /// which the kernel cuts after every Sink through it. So the reads are cacheable, and a
     /// new entry invalidates exactly them.
     fn say_thread(&self) -> String {
-        format!("{}:say", layer_iri(self.layer()))
+        say_thread_of(self.layer())
     }
 
     /// A NotFound that a later `say` can end: it hangs from the say thread too (ledger
@@ -401,7 +501,7 @@ impl LayerEndpoint {
             ))
         })?;
         let doc = self
-            .host
+            .host()
             .json()
             .compact(&self.state.egress, &triples)
             .await
@@ -414,8 +514,25 @@ impl LayerEndpoint {
         ))
     }
 
-    fn definition(&self) -> Representation {
+    /// The definition as JSON or Turtle. A feed's is typed `ik:Feed` too and lists no
+    /// collaboration, so it never says who mounts it (ledger #3284); no answer does.
+    fn definition(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let def = self.def();
+        if face(inv, &[TURTLE, JSON])? == JSON {
+            let mut types = vec!["Layer"];
+            if def.is_feed() {
+                types.push("Feed");
+            }
+            return Ok(json_repr(serde_json::json!({
+                "layer": def.name,
+                "label": def.label.as_deref().unwrap_or(&def.name),
+                "model": def.model.as_str(),
+                "types": types,
+                "feed": def.is_feed(),
+                "public": def.feed.as_ref().is_some_and(|f| f.public),
+            }))
+            .cacheable());
+        }
         let base = layer_iri(&def.name);
         let s = node(&base);
         let mut triples = vec![
@@ -431,9 +548,17 @@ impl LayerEndpoint {
                 Literal::new_simple_literal(def.model.as_str()),
             ),
         ];
-        let parts: &[&str] = match def.model {
-            Model::Channel => &["shapes", "context", "feed"],
-            Model::Tuplespace => &["shapes", "context", "feed", "tuples"],
+        if def.is_feed() {
+            triples.push(Triple::new(
+                s.clone(),
+                node(rdf::RDF_TYPE),
+                node(&rdf::ik_feed_class()),
+            ));
+        }
+        let parts: &[&str] = match (def.model, def.is_feed()) {
+            (Model::Channel, false) => &["shapes", "context", "feed"],
+            (Model::Channel, true) => &["shapes", "context", "feed", "scheme", "graph"],
+            (Model::Tuplespace, _) => &["shapes", "context", "feed", "tuples"],
         };
         for part in parts {
             triples.push(Triple::new(
@@ -442,14 +567,329 @@ impl LayerEndpoint {
                 node(&format!("{base}:{part}")),
             ));
         }
-        for collab in def.shared.iter().flatten() {
-            triples.push(Triple::new(
-                s.clone(),
-                node(rdf::DCT_IS_PART_OF),
-                node(&collab_iri(collab)),
-            ));
+        if !def.is_feed() {
+            for collab in def.shared.iter().flatten() {
+                triples.push(Triple::new(
+                    s.clone(),
+                    node(rdf::DCT_IS_PART_OF),
+                    node(&collab_iri(collab)),
+                ));
+            }
         }
-        turtle(rdf::to_turtle(&triples)).cacheable()
+        Ok(turtle(rdf::to_turtle(&triples)).cacheable())
+    }
+
+    /// `urn:layer:{layer}:scheme`: the skolemized Turtle, or the same concepts as JSON, sorted
+    /// by notation.
+    fn scheme(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let scheme = &self.feed_def().scheme;
+        if face(inv, &[TURTLE, JSON])? == JSON {
+            let concepts: Vec<serde_json::Value> = scheme
+                .concepts
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "@id": c.iri,
+                        "prefLabel": c.pref_label,
+                        "notation": c.notation,
+                        "broader": c.broader,
+                    })
+                })
+                .collect();
+            return Ok(json_repr(serde_json::json!({
+                "scheme": scheme.iri,
+                "label": scheme.label,
+                "concepts": concepts,
+            }))
+            .cacheable());
+        }
+        Ok(turtle(scheme.turtle.clone()).cacheable())
+    }
+
+    /// The feed's options.
+    ///
+    /// # Panics
+    /// On a layer that is not a feed: `scheme` and the shared reads are bound only on feeds, so
+    /// this is a bug in this crate, never a caller's input.
+    fn feed_def(&self) -> &crate::config::FeedDef {
+        self.def()
+            .feed
+            .as_ref()
+            .expect("feed actions are bound only on feed layers")
+    }
+
+    /// `concept=`, comma-separated: each named a concept of the layer's scheme, sorted and
+    /// unique, so a request's identity depends on which concepts and not how they were
+    /// written.
+    fn concepts(&self, inv: &Invocation<'_>) -> Result<Vec<String>> {
+        let Some(list) = optional_str(inv, "concept")? else {
+            return Ok(Vec::new());
+        };
+        let scheme = &self.feed_def().scheme;
+        let mut wanted = std::collections::BTreeSet::new();
+        for concept in list.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+            if !scheme.has(concept) {
+                return Err(Error::InvalidArgument {
+                    name: "concept".into(),
+                    detail: format!(
+                        "`{concept}` is no concept of layer `{}`'s scheme <{}>",
+                        self.layer(),
+                        scheme.iri
+                    ),
+                });
+            }
+            wanted.insert(concept.to_string());
+        }
+        if wanted.is_empty() {
+            return Err(Error::InvalidArgument {
+                name: "concept".into(),
+                detail: "it names no concept: give one or more concept IRIs, comma-separated"
+                    .into(),
+            });
+        }
+        Ok(wanted.into_iter().collect())
+    }
+
+    /// `from=`, checked and as the participants graph writes it.
+    fn from_arg(&self, inv: &Invocation<'_>) -> Result<Option<String>> {
+        match optional_str(inv, "from")? {
+            None => Ok(None),
+            Some(iri) => Ok(Some(
+                Participant::parse(iri)
+                    .map_err(|detail| Error::InvalidArgument {
+                        name: "from".into(),
+                        detail,
+                    })?
+                    .iri()
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// A shared feed read, at the door: the caller's own read token, then the one request every
+    /// reader would send for this answer, answered from the shared copy with no copy of its
+    /// own here, so no answer is cached per reader.
+    async fn front_feed_read(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let token = layer_cap("read", self.layer());
+        if !inv.capability.allows(&token) {
+            return Err(Error::Denied(format!(
+                "reading layer `{}` needs {token}",
+                self.layer()
+            )));
+        }
+        let request = self.normalized(inv)?;
+        inv.depends_on(self.say_thread());
+        let answer = self.host().feeds().read(self.layer(), request).await?;
+        Ok(Representation::new(answer.repr_type, answer.bytes))
+    }
+
+    /// The request a shared read normalizes to: its IRI, and only the arguments that differ from
+    /// the defaults, in one form, so two readers asking for the same answer send the same
+    /// request and a default read finds what a publish warmed.
+    fn normalized(&self, inv: &Invocation<'_>) -> Result<Request> {
+        let mut request = source_request(inv.request.target.as_str());
+        fn arg(request: &mut Request, name: &str, value: String) {
+            *request = request
+                .clone()
+                .with_arg(name.to_string(), ArgRef::Inline(value.into_bytes()));
+        }
+        match self.action {
+            Action::Entries => {
+                let asked = face(inv, &FEED_ENTRY_FACES)?;
+                let (after, limit) = self.page(inv)?;
+                let concepts = self.concepts(inv)?;
+                let from = self.from_arg(inv)?;
+                let class = optional_str(inv, "type")?;
+                if asked == ATOM && (from.is_some() || class.is_some()) {
+                    return Err(Error::InvalidArgument {
+                        name: "as".into(),
+                        detail: format!(
+                            "{ATOM} answers the entries of `concept=` or of the whole layer; \
+                             from= and type= filter the graph faces, {TURTLE} and {JSON_LD}"
+                        ),
+                    });
+                }
+                if asked != TURTLE {
+                    arg(&mut request, "as", asked.to_string());
+                }
+                if after != 0 {
+                    arg(&mut request, "after", after.to_string());
+                }
+                if limit != DEFAULT_LIMIT {
+                    arg(&mut request, "limit", limit.to_string());
+                }
+                if !concepts.is_empty() {
+                    arg(&mut request, "concept", concepts.join(","));
+                }
+                if let Some(from) = from {
+                    arg(&mut request, "from", from);
+                }
+                if let Some(class) = class {
+                    arg(&mut request, "type", class.to_string());
+                }
+            }
+            Action::FeedGraph | Action::Entry => {
+                let asked = face(inv, &GRAPH_FACES)?;
+                if asked != TURTLE {
+                    arg(&mut request, "as", asked.to_string());
+                }
+            }
+            Action::Graph => {
+                let asked = face(inv, &GRAPH_FACES)?;
+                let (after, limit) = self.page(inv)?;
+                if asked != TURTLE {
+                    arg(&mut request, "as", asked.to_string());
+                }
+                if after != 0 {
+                    arg(&mut request, "after", after.to_string());
+                }
+                if limit != DEFAULT_LIMIT {
+                    arg(&mut request, "limit", limit.to_string());
+                }
+            }
+            Action::Latest => {
+                let asked = face(inv, &GRAPH_FACES)?;
+                arg(&mut request, "about", inv.inline_str("about")?.to_string());
+                if asked != TURTLE {
+                    arg(&mut request, "as", asked.to_string());
+                }
+            }
+            _ => unreachable!("only a shared feed read is normalized"),
+        }
+        Ok(request)
+    }
+
+    /// A shared feed read, computed in the private kernel (once per request between publishes:
+    /// the kernel caches the answer, and it hangs from the say thread).
+    async fn share_read(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        self.host().feeds().count(self.layer());
+        match self.action {
+            Action::Entries => self.feed_entries(inv).await,
+            Action::Entry => self.entry(inv).await,
+            Action::Graph => self.graph(inv).await,
+            Action::Latest => self.latest(inv).await,
+            Action::FeedGraph => self.feed_graph(inv).await,
+            _ => unreachable!("only a shared feed read is computed here"),
+        }
+    }
+
+    /// The entries, filtered by concept and faced as asked: one SELECT over the graph when a
+    /// concept is named or Atom asked for, the stored Turtle otherwise.
+    async fn feed_entries(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let asked = face(inv, &FEED_ENTRY_FACES)?;
+        let (after, limit) = self.page(inv)?;
+        let concepts = self.concepts(inv)?;
+        if asked == ATOM {
+            let rows = self
+                .select(inv, &concepts, after, limit, SPARQL_XML)
+                .await?;
+            let atom = feeds::atom_from_rows(&rows)?;
+            return Ok(Representation::new(ReprType::new(ATOM), atom.into_bytes())
+                .cacheable()
+                .depends_on(self.say_thread()));
+        }
+        if concepts.is_empty() {
+            return self.entries(inv).await;
+        }
+        let rows = self
+            .select(inv, &concepts, after, limit, SPARQL_JSON)
+            .await?;
+        let rows: serde_json::Value = serde_json::from_str(&rows).map_err(|e| {
+            Error::Endpoint(format!(
+                "layer `{}`: its entries SELECT answered no JSON: {e}",
+                self.layer()
+            ))
+        })?;
+        let matching: std::collections::BTreeSet<String> = rows["results"]["bindings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row["entry"]["value"].as_str().map(str::to_string))
+            .collect();
+        let from = self.from_arg(inv)?;
+        let class = optional_str(inv, "type")?.map(str::to_string);
+        self.entries_where(inv, |m| {
+            matching.contains(&m.iri)
+                && from.as_ref().is_none_or(|a| &m.author == a)
+                && class.as_ref().is_none_or(|c| m.types.contains(c))
+        })
+        .await
+    }
+
+    /// The rows of the entries SELECT, over the graph, in `media`.
+    async fn select(
+        &self,
+        inv: &Invocation<'_>,
+        concepts: &[String],
+        after: u64,
+        limit: u64,
+        media: &str,
+    ) -> Result<String> {
+        let request = Request::new(
+            Verb::Source,
+            Iri::parse("urn:sparql:select").expect("a constant IRI"),
+        )
+        .with_arg(
+            "query",
+            ArgRef::Inline(feeds::entries_query(concepts, after, limit).into_bytes()),
+        )
+        .with_arg(
+            "graph",
+            ArgRef::Inline(format!("{}:graph", layer_iri(self.layer())).into_bytes()),
+        )
+        .with_arg("as", ArgRef::Inline(media.as_bytes().to_vec()));
+        let answer = inv.issue(request).await?;
+        String::from_utf8(answer.bytes).map_err(|e| {
+            Error::Endpoint(format!(
+                "layer `{}`: its entries SELECT answered no UTF-8: {e}",
+                self.layer()
+            ))
+        })
+    }
+
+    /// `urn:layer:{layer}:graph`: the CONSTRUCT's answer, as Turtle, or compacted with the
+    /// graph's own context, so its terms cross whatever the layer's egress context names.
+    async fn feed_graph(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let as_ld = face(inv, &GRAPH_FACES)? == JSON_LD;
+        let request = Request::new(
+            Verb::Source,
+            Iri::parse("urn:sparql:construct").expect("a constant IRI"),
+        )
+        .with_arg(
+            "query",
+            ArgRef::Inline(feeds::GRAPH_QUERY.as_bytes().to_vec()),
+        )
+        .with_arg(
+            "graph",
+            ArgRef::Inline(format!("{}:source", layer_iri(self.layer())).into_bytes()),
+        )
+        .with_arg("as", ArgRef::Inline(TURTLE.as_bytes().to_vec()));
+        let answer = inv.issue(request).await?;
+        let text = String::from_utf8(answer.bytes).map_err(|e| {
+            Error::Endpoint(format!(
+                "layer `{}`: its graph CONSTRUCT answered no UTF-8: {e}",
+                self.layer()
+            ))
+        })?;
+        let repr = if as_ld {
+            let context: serde_json::Value = serde_json::from_str(feeds::GRAPH_CONTEXT)
+                .map_err(|e| Error::Endpoint(format!("the feed graph context: {e}")))?;
+            let triples = rdf::parse_turtle(&text).map_err(|e| {
+                Error::Endpoint(format!(
+                    "layer `{}`: its graph does not parse: {e}",
+                    self.layer()
+                ))
+            })?;
+            let doc = self
+                .host()
+                .json()
+                .compact(&context["@context"], &triples)
+                .await?;
+            Representation::new(ReprType::new(JSON_LD), doc.to_string().into_bytes())
+        } else {
+            turtle(text)
+        };
+        Ok(repr.cacheable().depends_on(self.say_thread()))
     }
 
     fn feed(&self, events: &[Event], as_json: bool) -> Representation {
@@ -484,7 +924,7 @@ impl LayerEndpoint {
             )));
         }
         let state = &self.state;
-        feed::wait_until(self.host.notify(), wait, || state.last_seq() > after).await;
+        feed::wait_until(self.host().notify(), wait, || state.last_seq() > after).await;
         Ok(self.feed(&self.state.events_after(after), as_json))
     }
 
@@ -502,7 +942,7 @@ impl LayerEndpoint {
                 ))
             })?
             .to_string();
-        let participants = self.host.participants().map_err(host_error)?;
+        let participants = self.host().participants().map_err(host_error)?;
         // A lobby is where a certificate nobody enrolled says its request, so its author need
         // not be a participant, only a name the host can attribute and tie to a certificate.
         let lobby_author = self.def().lobby
@@ -542,7 +982,7 @@ impl LayerEndpoint {
         match settled {
             Ok(0) => Ok(next),
             Ok(_) => {
-                self.host.notify().bump();
+                self.host().notify().bump();
                 Ok(next)
             }
             Err(e) => Err(Error::Endpoint(format!(
@@ -567,7 +1007,7 @@ impl LayerEndpoint {
         let as_json = face(inv, &[TEXT, JSON])? == JSON;
         let (author, _) = self.attributed(inv, "say")?;
         if let Some(c) = self
-            .host
+            .host()
             .onboard_config()
             .filter(|c| c.grants == self.layer() && c.controller != author)
         {
@@ -577,6 +1017,15 @@ impl LayerEndpoint {
                 self.layer()
             )));
         }
+        if let Some(feed) = &self.def().feed {
+            if !feed.publishers.contains(&author) {
+                return Err(Error::Denied(format!(
+                    "layer `{}` is a feed, written only by its publishers, and {author} is not \
+                     one of them: ask in a Talk channel instead",
+                    self.layer()
+                )));
+            }
+        }
         if self.def().lobby {
             // Counted before anything is parsed: the rate bounds the work a stranger causes.
             let who = Participant::parse(&author)
@@ -584,11 +1033,30 @@ impl LayerEndpoint {
                 .and_then(|p| p.fingerprint().map(str::to_string))
                 .unwrap_or_else(|| author.clone());
             let now = self.now(inv)?;
-            self.host
+            self.host()
                 .lobby_rate()
                 .admit(self.layer(), &who, now.as_millis())?;
         }
         let draft = channel::draft(self.def(), inv.inline_arg("content")?)?;
+        if let Some(feed) = &self.def().feed {
+            for t in draft
+                .triples()
+                .iter()
+                .filter(|t| t.predicate.as_str() == rdf::DCT_SUBJECT)
+            {
+                if !rdf::object_iri(&t.object).is_some_and(|c| feed.scheme.has(c)) {
+                    return Err(Error::InvalidArgument {
+                        name: "content".into(),
+                        detail: format!(
+                            "dcterms:subject {} is no concept of layer `{}`'s scheme <{}>",
+                            t.object,
+                            self.layer(),
+                            feed.scheme.iri
+                        ),
+                    });
+                }
+            }
+        }
         if draft.triples().iter().any(|t| {
             t.predicate.as_str() == rdf::RDF_TYPE
                 && rdf::object_iri(&t.object) == Some(onboard::ENROLLMENT_REQUEST)
@@ -627,6 +1095,10 @@ impl LayerEndpoint {
             by: author,
         });
         drop(_write);
+        // The entry is stored either way: the shared copy must not keep answering without it.
+        if self.def().is_feed() {
+            self.host().feeds().published(self.layer()).await;
+        }
         if let Err(e) = logged {
             return Err(Error::Endpoint(format!(
                 "entry <{iri}> is stored, with ik:seq {seq}, but its feed event could not be \
@@ -634,14 +1106,14 @@ impl LayerEndpoint {
                  next opens. Saying it again would store it twice"
             )));
         }
-        self.host.notify().bump();
+        self.host().notify().bump();
         if self
-            .host
+            .host()
             .onboard_config()
             .is_some_and(|c| c.grants == self.layer())
         {
             // The entry is stored whatever applying it decides: the decision is the status's.
-            self.host.apply_entitlements(now).await;
+            self.host().apply_entitlements(now).await;
         }
         Ok(named(&iri, as_json))
     }
@@ -688,18 +1160,7 @@ impl LayerEndpoint {
     }
 
     async fn entries(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let from = match optional_str(inv, "from")? {
-            None => None,
-            Some(iri) => Some(
-                Participant::parse(iri)
-                    .map_err(|detail| Error::InvalidArgument {
-                        name: "from".into(),
-                        detail,
-                    })?
-                    .iri()
-                    .to_string(),
-            ),
-        };
+        let from = self.from_arg(inv)?;
         let class = optional_str(inv, "type")?.map(str::to_string);
         self.entries_where(inv, |m| {
             from.as_ref().is_none_or(|a| &m.author == a)
@@ -855,7 +1316,7 @@ impl LayerEndpoint {
         }
         space.record_out(meta);
         drop(_write);
-        self.host.notify().bump();
+        self.host().notify().bump();
         Ok(answer(&draft.subject))
     }
 
@@ -963,7 +1424,7 @@ impl LayerEndpoint {
                 failures.join("; and ")
             )));
         }
-        self.host.notify().bump();
+        self.host().notify().bump();
         // The take stands whatever this answers: a JSON-LD face that failed here (its context
         // was checked when the host opened) leaves the taker reading it back from its receipt.
         self.graph_face(text, as_ld).await
@@ -1402,8 +1863,15 @@ fn take_subject(inv: &Invocation<'_>) -> Result<String> {
 #[async_trait]
 impl Endpoint for LayerEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if self.def().is_feed() && self.action.is_shared_feed_read() {
+            return if self.is_share() {
+                self.share_read(inv).await
+            } else {
+                self.front_feed_read(inv).await
+            };
+        }
         match self.action {
-            Action::Definition => Ok(self.definition()),
+            Action::Definition => self.definition(inv),
             Action::Shapes => Ok(turtle(self.def().shapes.clone()).cacheable()),
             Action::Context => Ok(Representation::new(
                 ReprType::new(JSON_LD),
@@ -1426,6 +1894,8 @@ impl Endpoint for LayerEndpoint {
                 ))),
             },
             Action::Receipt => self.receipt(inv).await,
+            Action::Scheme => self.scheme(inv),
+            Action::FeedGraph => unreachable!("a feed read, handled above"),
         }
     }
 
@@ -1442,11 +1912,15 @@ impl Endpoint for LayerEndpoint {
             Action::Definition => base
                 .title(format!("Layer {layer}"))
                 .summary(format!(
-                    "Layer `{layer}`'s definition: an ik:Layer with its access model and the \
-                     IRIs of its shapes, context and feed"
+                    "Layer `{layer}`'s definition: an ik:Layer (and ik:Feed, for a feed) with \
+                     its access model and the IRIs of its shapes, context and feed; a feed's \
+                     never lists a collaboration. As JSON: layer, label, model, types, feed, \
+                     public"
                 ))
                 .verb(Verb::Source)
-                .output(TURTLE),
+                .input(as_spec(&[TURTLE, JSON]))
+                .output(TURTLE)
+                .output(JSON),
             Action::Shapes => base
                 .title(format!("Layer {layer}: shapes"))
                 .summary(format!(
@@ -1499,6 +1973,67 @@ impl Endpoint for LayerEndpoint {
                 .input(as_spec(&[TEXT, JSON]))
                 .output(TEXT)
                 .output(JSON),
+            Action::FeedGraph => base
+                .title(format!("Feed {layer}: graph"))
+                .summary(format!(
+                    "Feed `{layer}`'s entries as ikigai-feed's RDF form (rss:item, rss:title, \
+                     content:encoded, dcterms:issued, dc:creator, dcterms:subject, \
+                     dcterms:isPartOf this layer), unioned with its SKOS scheme"
+                ))
+                .verb(Verb::Source)
+                .input(as_spec(&GRAPH_FACES))
+                .output(TURTLE)
+                .output(JSON_LD),
+            Action::Scheme => base
+                .title(format!("Feed {layer}: scheme"))
+                .summary(format!(
+                    "The SKOS concept scheme of feed `{layer}`: its concepts and their \
+                     skos:broader hierarchy, which an entry's dcterms:subject must come from. \
+                     As JSON: scheme, label, concepts (each @id, prefLabel, notation, \
+                     broader), by notation"
+                ))
+                .verb(Verb::Source)
+                .input(as_spec(&[TURTLE, JSON]))
+                .output(TURTLE)
+                .output(JSON),
+            Action::Entries if self.def().is_feed() => base
+                .title(format!("Feed {layer}: entries"))
+                .summary(format!(
+                    "Feed `{layer}`'s entries in feed order, after a sequence number, optionally \
+                     from one participant or of one class, or only those whose dcterms:subject \
+                     reaches a concept= of its scheme through skos:broader; as=application/atom+xml \
+                     answers an Atom 1.0 feed. One shared answer per request, whoever reads"
+                ))
+                .verb(Verb::Source)
+                .input(
+                    after_spec("answer entries after this ik:seq (default 0)").default_value("0"),
+                )
+                .input(
+                    ArgSpec::new("from")
+                        .summary("only the entries this publisher said, by its IRI")
+                        .class(xsd("anyURI"))
+                        .optional(),
+                )
+                .input(
+                    ArgSpec::new("type")
+                        .summary("only the entries of this class")
+                        .class(xsd("anyURI"))
+                        .optional(),
+                )
+                .input(
+                    ArgSpec::new("concept")
+                        .summary(
+                            "only the entries about these concepts or anything narrower, \
+                             comma-separated concept IRIs of this feed's scheme",
+                        )
+                        .class(xsd("string"))
+                        .optional(),
+                )
+                .input(limit_spec())
+                .input(as_spec(&FEED_ENTRY_FACES))
+                .output(TURTLE)
+                .output(JSON_LD)
+                .output(ATOM),
             Action::Entries => base
                 .title(format!("Layer {layer}: entries"))
                 .summary(format!(
@@ -2084,6 +2619,7 @@ impl Endpoint for CollabParticipants {
         let manifest = collabs
             .get(name)
             .ok_or_else(|| Error::NotFound(format!("no collaboration `{name}`")))?;
+        let manifest = readable_manifest(manifest, &self.host);
         let members: std::collections::BTreeSet<&str> = manifest
             .mounts
             .iter()
@@ -2126,6 +2662,20 @@ impl Endpoint for CollabParticipants {
             )
             .output(TURTLE)
     }
+}
+
+/// A manifest as a participant may read it: on a feed it mounts, only the publishers are named,
+/// so no answer counts or names a feed's readers (ledger #3284).
+fn readable_manifest(manifest: &Manifest, host: &Host) -> Manifest {
+    let mut readable = manifest.clone();
+    for mount in &mut readable.mounts {
+        if let Some(feed) = host.layer(&mount.layer).and_then(|s| s.def.feed.as_ref()) {
+            mount
+                .grants
+                .retain(|p, _| feed.publishers.contains(p.iri()));
+        }
+    }
+    readable
 }
 
 /// `urn:collab:{name}`: a collaboration's manifest.
@@ -2201,10 +2751,11 @@ impl Endpoint for CollabEndpoint {
         let manifest = collabs
             .get(name)
             .ok_or_else(|| Error::NotFound(format!("no collaboration `{name}`")))?;
+        let manifest = readable_manifest(manifest, &self.host);
         let repr = if face(inv, &[TURTLE, JSON])? == JSON {
-            Representation::new(ReprType::new(JSON), Self::json(manifest).into_bytes())
+            Representation::new(ReprType::new(JSON), Self::json(&manifest).into_bytes())
         } else {
-            turtle(Self::turtle(manifest))
+            turtle(Self::turtle(&manifest))
         };
         Ok(repr)
     }

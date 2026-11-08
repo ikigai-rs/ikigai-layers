@@ -47,6 +47,16 @@ pub const XSD_DATE_TIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 pub const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 /// `xsd:string`.
 pub const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+/// `skos:ConceptScheme`.
+pub const SKOS_CONCEPT_SCHEME: &str = "http://www.w3.org/2004/02/skos/core#ConceptScheme";
+/// `skos:Concept`.
+pub const SKOS_CONCEPT: &str = "http://www.w3.org/2004/02/skos/core#Concept";
+/// `skos:broader`.
+pub const SKOS_BROADER: &str = "http://www.w3.org/2004/02/skos/core#broader";
+/// `skos:prefLabel`.
+pub const SKOS_PREF_LABEL: &str = "http://www.w3.org/2004/02/skos/core#prefLabel";
+/// `skos:notation`.
+pub const SKOS_NOTATION: &str = "http://www.w3.org/2004/02/skos/core#notation";
 /// `sh:NodeShape`.
 pub const SH_NODE_SHAPE: &str = "http://www.w3.org/ns/shacl#NodeShape";
 /// `sh:closed`.
@@ -79,6 +89,11 @@ pub fn ik_offer() -> String {
 /// `rdfs:domain ik:Consultation`, and writing it would type the subject a consultation.
 pub fn ik_layer_class() -> String {
     format!("{IK}Layer")
+}
+
+/// `ik:Feed`: a feed layer, typed so beside `ik:Layer`.
+pub fn ik_feed_class() -> String {
+    format!("{IK}Feed")
 }
 
 /// `ik:layerModel`.
