@@ -1,0 +1,14 @@
+# The JOIN lobby (ledger #3290), served as urn:layer:join: where a certificate nobody enrolled asks
+# to read this host's public feeds, and is answered by policy with no person deciding.
+#
+# `join = "public"` needs `lobby = true`, and a `[join]` table in layers.toml (the host's signing
+# key and its limits). A door mints a stranger `say` on it and nothing else, and the host answers
+# the request itself: read and feed on exactly the layers it names, each of which must say
+# `public = true`, or a refusal naming the layer. The closed shapes admit one entry type,
+# onb:JoinRequest.
+model   = "channel"
+label   = "Join requests"
+shapes  = "join.shapes.ttl"
+context = "join.context.jsonld"
+lobby   = true
+join    = "public"

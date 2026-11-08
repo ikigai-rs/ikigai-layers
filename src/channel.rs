@@ -394,7 +394,9 @@ pub fn draft(def: &LayerDef, content: &[u8]) -> Result<Draft, Error> {
             NamedOrBlankNode::NamedNode(n) if n.as_str() == NEW_SUBJECT => placeholder = true,
             NamedOrBlankNode::NamedNode(n)
                 if def.lobby
-                    && crate::onboard::request_subject_fingerprint(n.as_str()).is_some() =>
+                    && (crate::onboard::request_subject_fingerprint(n.as_str()).is_some()
+                        || (def.join
+                            && crate::onboard::join_subject_fingerprint(n.as_str()).is_some())) =>
             {
                 match &posted {
                     None => posted = Some(n.clone()),

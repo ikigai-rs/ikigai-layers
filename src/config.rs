@@ -13,6 +13,8 @@
 //!                                (crate::onboard), read by the grants generator beside the
 //!                                manifests
 //!   layers.toml                  optional: the host's own options ([`load_match_budget`])
+//!   deny.txt                     optional: fingerprints the public join refuses
+//!   joined/                      WRITTEN by the host: who joined (crate::onboard::join)
 //! ```
 //!
 //! Everything is checked when it is read, and a broken file is the OPERATOR's error: it is
@@ -138,6 +140,10 @@ pub struct LayerDef {
     /// certificate's fingerprint, and holds every lobby to the bounds in [`crate::onboard`]:
     /// at most [`crate::onboard::LOBBY_ENTRY_MAX`] bytes an entry, and a rate.
     pub lobby: bool,
+    /// A lobby's only: whether it is the host's public JOIN lobby (`join = "public"`, ledger
+    /// #3290): a request on it is answered by policy, with no person deciding
+    /// ([`crate::onboard::join`]).
+    pub join: bool,
     /// A channel's only: what makes it a feed layer (`feed = true`, ledger #3284).
     pub feed: Option<FeedDef>,
 }
@@ -154,8 +160,8 @@ impl LayerDef {
 pub struct FeedDef {
     /// Who may `say` on it, by IRI: nobody else, whatever a grant holds.
     pub publishers: BTreeSet<String>,
-    /// Whether it is advertised for joining without a person approving (`public = true`, read
-    /// by the door's own join; never read here beyond the definition's JSON face).
+    /// Whether a certificate nobody enrolled may join it without a person approving
+    /// (`public = true`, ledger #3290): [`crate::onboard::join`] grants read and feed on it.
     pub public: bool,
     /// The SKOS scheme its entries' `dcterms:subject` values come from.
     pub scheme: Scheme,
@@ -208,6 +214,7 @@ struct LayerToml {
     matching: Option<bool>,
     shared: Option<Vec<String>>,
     lobby: Option<bool>,
+    join: Option<String>,
     feed: Option<bool>,
     publishers: Option<Vec<String>>,
     scheme: Option<String>,
@@ -357,6 +364,32 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
             crate::onboard::LOBBY_ENTRY_MAX
         ));
     }
+    let join = match parsed.join.as_deref() {
+        None => false,
+        Some("public") if !lobby => {
+            return err(format!(
+                "{at}: `join` is a lobby option, and this definition does not say `lobby = true`"
+            ))
+        }
+        Some("public") => true,
+        Some(other) => {
+            return err(format!(
+                "{at}: `join` is `{other}`; the one join this version builds is \"public\""
+            ))
+        }
+    };
+    if join && (target_classes.len() != 1 || !target_classes.contains(crate::onboard::JOIN_REQUEST))
+    {
+        return err(format!(
+            "{at}: a join lobby's shapes target one class, <{}>, and these target {}",
+            crate::onboard::JOIN_REQUEST,
+            target_classes
+                .iter()
+                .map(|c| format!("<{c}>"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     let shared = match parsed.shared {
         None => None,
         Some(names) => {
@@ -393,6 +426,7 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         matching: parsed.matching.unwrap_or(false),
         shared,
         lobby,
+        join,
         feed,
     })
 }
@@ -1038,6 +1072,18 @@ struct HostToml {
     #[serde(rename = "match")]
     matching: Option<MatchToml>,
     onboard: Option<OnboardToml>,
+    join: Option<JoinToml>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JoinToml {
+    host_key: Option<String>,
+    join_idle_days: Option<u64>,
+    per_certificate: Option<usize>,
+    per_address: Option<usize>,
+    per_hour: Option<usize>,
+    max_joined: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1281,6 +1327,126 @@ pub fn check_controller_says(
         }
     }
     Ok(())
+}
+
+/// How long a joined identity stays without a read, by default (ledger #3290).
+pub const DEFAULT_JOIN_IDLE_DAYS: u64 = 90;
+
+/// The public join's options: the `[join]` table of [`HOST_FILE`] (ledger #3290).
+///
+/// ```toml
+/// # layers.toml
+/// [join]
+/// host_key        = "/run/credentials/layers/join.pem" # the host's Ed25519 private key (PKCS8)
+/// join_idle_days  = 90     # a joined identity lapses after this long without a read
+/// per_certificate = 5      # requests an hour from one certificate
+/// per_address     = 20     # requests an hour from one source address, where the door says it
+/// per_hour        = 120    # requests an hour from everyone together
+/// max_joined      = 10000  # live joined identities the host holds
+/// ```
+///
+/// Required when a layer says `join = "public"`, and refused when none does: a table with no
+/// lobby to answer means an operator expected a join this host cannot make. `host_key` signs
+/// every entitlement; give a path outside the configuration's git tree. A relative path is
+/// resolved against the config directory.
+#[derive(Clone, Debug)]
+pub struct JoinConfig {
+    /// The join lobby's name.
+    pub lobby: String,
+    /// The host's private signing key, as the PEM the file holds.
+    pub host_key: String,
+    /// `join_idle_days`.
+    pub idle_days: u64,
+    /// Requests an hour from one certificate.
+    pub per_certificate: usize,
+    /// Requests an hour from one source address.
+    pub per_address: usize,
+    /// Requests an hour from everyone together.
+    pub per_hour: usize,
+    /// Live joined identities the host holds.
+    pub max_joined: usize,
+}
+
+/// The `[join]` table of [`HOST_FILE`] under `dir`, checked against `layers`: `None` when no
+/// layer says `join = "public"`. See [`JoinConfig`].
+pub fn load_join(
+    dir: &Path,
+    layers: &BTreeMap<String, LayerDef>,
+) -> Result<Option<JoinConfig>, ConfigError> {
+    let lobbies: Vec<&str> = layers
+        .values()
+        .filter(|d| d.join)
+        .map(|d| d.name.as_str())
+        .collect();
+    if lobbies.len() > 1 {
+        return err(format!(
+            "layers {} all say `join = \"public\"`, and a host has one join lobby",
+            lobbies
+                .iter()
+                .map(|l| format!("`{l}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let path = dir.join(HOST_FILE);
+    let at = path.display();
+    let table = match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            toml::from_str::<HostToml>(&text)
+                .map_err(|e| ConfigError(format!("{at}: {e}")))?
+                .join
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return err(format!("read {at}: {e}")),
+    };
+    let (lobby, table) = match (lobbies.first(), table) {
+        (None, None) => return Ok(None),
+        (None, Some(_)) => {
+            return err(format!(
+                "{at}: a `[join]` table, and no layer says `join = \"public\"`: nothing would \
+                 answer a join"
+            ))
+        }
+        (Some(lobby), None) => {
+            return err(format!(
+                "layer `{lobby}` says `join = \"public\"` and {at} has no `[join]` table: the \
+                 host needs `join.host_key` to sign what it grants"
+            ))
+        }
+        (Some(lobby), Some(table)) => (lobby.to_string(), table),
+    };
+    let key_file = table
+        .host_key
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| {
+            ConfigError(format!(
+                "{at}: `join.host_key` is required: the file holding the host's Ed25519 private \
+                 key (PKCS8 PEM), which signs every entitlement a join grants"
+            ))
+        })?;
+    let host_key = read(&dir.join(&key_file))?;
+    let positive = |key: &str, value: Option<usize>, default: usize| match value {
+        Some(0) => err(format!(
+            "{at}: `join.{key}` is 0, so no one could ever join; give a positive number, or \
+             leave it out for the default"
+        )),
+        Some(n) => Ok(n),
+        None => Ok(default),
+    };
+    let idle_days = positive(
+        "join_idle_days",
+        table.join_idle_days.map(|d| d as usize),
+        DEFAULT_JOIN_IDLE_DAYS as usize,
+    )? as u64;
+    Ok(Some(JoinConfig {
+        lobby,
+        host_key,
+        idle_days,
+        per_certificate: positive("per_certificate", table.per_certificate, 5)?,
+        per_address: positive("per_address", table.per_address, 20)?,
+        per_hour: positive("per_hour", table.per_hour, 120)?,
+        max_joined: positive("max_joined", table.max_joined, 10_000)?,
+    }))
 }
 
 /// The file the host writes what its verified entitlements grant into (ledger #2009), beside

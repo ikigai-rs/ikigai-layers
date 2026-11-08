@@ -39,16 +39,24 @@ repository's.
   A `say` on a feed by a non-publisher answers ``layer `releases` is a feed, written only by
   its publishers, and <participant> is not one of them: ask in a Talk channel instead``; an
   entry whose `dcterms:subject` is outside the feed's scheme, and a `concept=` the scheme does
-  not hold, each name the concept.
+  not hold, each name the concept. A public join (`src/onboard/join.rs`) answers
+  ``entitlement <iri>``, ``principal <iri>``, ``expires <time>`` and one ``granted <capability>``
+  line each as `text/plain`, and the same as JSON. It refuses in sentences naming what it is
+  about: a layer outside the public set (``layer `<name>` is not a public layer of this host: a
+  join grants read and feed on public layers only, so nothing in this request was granted``),
+  a limit (``join lobby `<name>` takes at most 5 requests an hour from one certificate, and
+  <fingerprint> has made them; try again later``), the deny list, a certificate that has already
+  joined, and an identity that has lapsed (which says it may join again).
 - **Host diagnostics on stderr** (`src/onboard/apply.rs`, `src/feeds/mod.rs`): lines starting
   `ikigai-layers: onboard:`, one per onboarding verdict, and one when applying entitlements
-  fails or needs the door restarted; and one starting ``ikigai-layers: feed `<layer>`:`` when
+  fails or needs the door restarted; one starting `ikigai-layers: join:` when recording a
+  joined identity's read fails; and one starting ``ikigai-layers: feed `<layer>`:`` when
   warming a feed's shared copy after a publish fails (the entry stands, and the first reader
   computes the answer).
 - **The `ikigai-layers` binary** (`src/bin/ikigai-layers.rs`): usage text; `grants` prints one
   line per grant, client, unenrolled participant and idle certificate, then what it wrote;
   `onboard setup` prints what it did and a `stuck: …` line for each way a node would be left in
-  the lobby. Failures go to stderr.
+  the lobby; `descriptor` prints `wrote <path> and <path>`. Failures go to stderr.
 
 Not this repository's: the text participants write into entries and tuples, which is stored and
 answered as written; and how a door, a client or a terminal presents any of this.
@@ -63,7 +71,8 @@ Verified by reading the source:
 - Every answer a participant reads has a JSON face, so a client can present it its own way
   without an RDF parser.
 - The binary's lines start with a word that says what the line is (`grant`, `client`,
-  `unenrolled`, `idle`, `stuck:`, `checked`, `wrote`); `--check` ends by saying nothing was
+  `unenrolled`, `idle`, `stuck:`, `checked`, `wrote`), and a join's plain answer the same
+  (`entitlement`, `principal`, `expires`, `granted`); `--check` ends by saying nothing was
   written; `-h`/`--help` prints the usage on stdout; a usage error exits 2 and a failure exits 1,
   each with its message on stderr.
 - No color, no terminal control sequences and no markup are written.
@@ -89,6 +98,11 @@ Verified by reading the source:
   `an_entry_subject_outside_the_scheme_is_refused_naming_it`,
   `an_unknown_concept_is_refused_naming_it`) and `tests/door.rs`
   (`a_second_host_over_one_state_directory_is_refused_naming_the_first`) pin other refusals.
+- `tests/join.rs` pins the public join's refusals and answers
+  (`a_request_naming_a_non_public_layer_gets_nothing`, `the_plain_answer_labels_each_line`,
+  `a_denied_fingerprint_is_refused_at_join`, `the_per_certificate_limit_survives_a_restart`,
+  `an_expired_identity_is_refused_and_can_join_again`,
+  `the_descriptor_refuses_a_bad_address_and_a_host_with_nothing_to_offer`).
 
 These test wording and exit codes for correctness; none was written as an accessibility test.
 **No automated accessibility checker, browser or assistive technology has been used on this
@@ -134,3 +148,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-10-31 | First version. |
 | 2026-11-08 | The refusal of an entitlement naming a participant another certificate holds. |
 | 2026-11-08 | Feed layers: their refusals, the Atom face and the warm-failure stderr line. |
+| 2026-11-08 | The public join: its answer, its refusals, its stderr line, and `descriptor`. |

@@ -1026,6 +1026,9 @@ impl LayerEndpoint {
                 )));
             }
         }
+        if self.def().join {
+            return self.join(inv, as_json, author).await;
+        }
         if self.def().lobby {
             // Counted before anything is parsed: the rate bounds the work a stranger causes.
             let who = Participant::parse(&author)
@@ -1116,6 +1119,87 @@ impl LayerEndpoint {
             self.host().apply_entitlements(now).await;
         }
         Ok(named(&iri, as_json))
+    }
+
+    /// A request on the join lobby (ledger #3290): the deny list, the persisted rate, the
+    /// request's own checks and the live-identity cap, then the request stored and the host's
+    /// answer written, or a refusal that names why. Answered synchronously, because the joiner
+    /// cannot read the lobby.
+    async fn join(
+        &self,
+        inv: &Invocation<'_>,
+        as_json: bool,
+        author: String,
+    ) -> Result<Representation> {
+        let host = self.host();
+        let join = host.join().ok_or_else(|| {
+            Error::Endpoint(format!(
+                "layer `{}` is a join lobby, and this host has no `[join]` table",
+                self.layer()
+            ))
+        })?;
+        let now = self.now(inv)?;
+        // Who the poster is, before anything is counted: the certificate's own name.
+        let fingerprint = Participant::parse(&author)
+            .ok()
+            .and_then(|p| p.fingerprint().map(str::to_string))
+            .ok_or_else(|| {
+                Error::Denied(format!(
+                    "a join request is said by the certificate it joins; {author} carries no \
+                     fingerprint"
+                ))
+            })?;
+        join.check_deny(&fingerprint)?;
+        // Counted before anything is parsed: the rate bounds the work a stranger causes.
+        join.admit(self.layer(), &fingerprint, now)?;
+        let draft = channel::draft(self.def(), inv.inline_arg("content")?)?;
+        let layers = onboard::join::check_request(&host, draft.triples(), draft.posted(), &author)?;
+        let certificate = onboard::one_literal(draft.triples(), onboard::CERTIFICATE)
+            .expect("check_request saw exactly one")
+            .to_string();
+        // One step per request, as a `say` is: the cap on live identities holds under this lock.
+        let _write = self.state.write.lock().await;
+        join.check_room(&fingerprint, now)?;
+        let seq = self.settle_feed()?;
+        let id = id::mint(now.as_millis(), seq);
+        let iri = format!("{}{id}", entry_prefix(self.layer()));
+        let created = xsd_date_time(now);
+        let stamped = draft.stamp(&iri, &author, &created, seq);
+        admit(self.def(), &stamped)?;
+        self.state
+            .channel()
+            .write()
+            .expect("channel lock")
+            .append(&stamped)
+            .map_err(Error::Endpoint)?;
+        let logged = self.log_stored(Event {
+            seq,
+            time: created,
+            kind: "say".into(),
+            iri: iri.clone(),
+            by: author.clone(),
+        });
+        let granted = join
+            .grant(&iri, &author, &certificate, &layers, &id, now)
+            .await
+            .map_err(|e| {
+                Error::Endpoint(format!(
+                    "request <{iri}> is stored, but the host could not grant it ({e}): ask again"
+                ))
+            })?;
+        drop(_write);
+        if let Err(e) = logged {
+            return Err(Error::Endpoint(format!(
+                "request <{iri}> is stored and granted, but its feed event could not be logged \
+                 ({e}): it is logged before the layer's next event, or when the host next opens"
+            )));
+        }
+        host.notify().bump();
+        Ok(if as_json {
+            json_repr(granted.json())
+        } else {
+            Representation::new(ReprType::new(TEXT), granted.text().into_bytes())
+        })
     }
 
     fn page(&self, inv: &Invocation<'_>) -> Result<(u64, u64)> {
@@ -1863,6 +1947,9 @@ fn take_subject(inv: &Invocation<'_>) -> Result<String> {
 #[async_trait]
 impl Endpoint for LayerEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if let (false, Some(principal)) = (self.is_share(), inv.capability.principal()) {
+            self.host().gate(principal, inv.now())?;
+        }
         if self.def().is_feed() && self.action.is_shared_feed_read() {
             return if self.is_share() {
                 self.share_read(inv).await
@@ -2275,6 +2362,9 @@ struct MultiFeed {
 #[async_trait]
 impl Endpoint for MultiFeed {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if let Some(principal) = inv.capability.principal() {
+            self.host.gate(principal, inv.now())?;
+        }
         let cursor = feed::parse_cursor(inv.inline_str("after")?).map_err(|detail| {
             Error::InvalidArgument {
                 name: "after".into(),

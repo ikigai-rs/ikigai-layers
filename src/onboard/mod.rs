@@ -75,6 +75,8 @@ use crate::rdf::{self, node};
 #[cfg(feature = "host")]
 pub(crate) mod apply;
 #[cfg(feature = "host")]
+pub mod join;
+#[cfg(feature = "host")]
 pub mod setup;
 
 #[cfg(feature = "host")]
@@ -88,6 +90,10 @@ pub const ONB: &str = "https://ikigai-rs.dev/ns/onboard#";
 pub const ENROLLMENT_REQUEST: &str = "https://ikigai-rs.dev/ns/onboard#EnrollmentRequest";
 /// `onb:Entitlement`: what the controller says on the grants layer.
 pub const ENTITLEMENT: &str = "https://ikigai-rs.dev/ns/onboard#Entitlement";
+/// `onb:JoinRequest`: what a certificate says on a join lobby ([`join`]).
+pub const JOIN_REQUEST: &str = "https://ikigai-rs.dev/ns/onboard#JoinRequest";
+/// `onb:layer`: a public layer a join request asks for, `urn:layer:{name}`.
+pub const LAYER: &str = "https://ikigai-rs.dev/ns/onboard#layer";
 /// `onb:invite`: the invitation a request answers.
 pub const INVITE: &str = "https://ikigai-rs.dev/ns/onboard#invite";
 /// `onb:certificate`: the requester's certificate, PEM.
@@ -326,6 +332,31 @@ pub const REQUEST_SUBJECT_PREFIX: &str = "urn:iki:onboard:request:";
 /// ```
 pub fn request_subject_fingerprint(iri: &str) -> Option<&str> {
     let fp = iri.strip_prefix(REQUEST_SUBJECT_PREFIX)?;
+    (fp.len() == 64
+        && fp
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(fp)
+}
+
+/// The prefix of the subject the join contract names a request by:
+/// `urn:iki:onboard:join:{fingerprint}`. A join lobby takes it as the entry's placeholder.
+pub const JOIN_SUBJECT_PREFIX: &str = "urn:iki:onboard:join:";
+
+/// The fingerprint in a join request's subject, `urn:iki:onboard:join:{64 lowercase hex}`.
+///
+/// ```
+/// use ikigai_layers::onboard::join_subject_fingerprint;
+///
+/// let fp = "ab".repeat(32);
+/// assert_eq!(
+///     join_subject_fingerprint(&format!("urn:iki:onboard:join:{fp}")),
+///     Some(fp.as_str())
+/// );
+/// assert_eq!(join_subject_fingerprint("urn:iki:onboard:join:AB"), None);
+/// ```
+pub fn join_subject_fingerprint(iri: &str) -> Option<&str> {
+    let fp = iri.strip_prefix(JOIN_SUBJECT_PREFIX)?;
     (fp.len() == 64
         && fp
             .bytes()

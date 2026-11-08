@@ -302,6 +302,97 @@ node would be left in the lobby: no lobby layer, no `[onboard]` table or one tha
 pair the manifests do not derive, and a manifest granting `say` on the grants layer to anyone
 but the controller. Setup runs the same check after it writes.
 
+## Public layers and joining
+
+A feed that says `public = true` may be read by a certificate nobody enrolled, and a **join
+lobby** lets one ask to, with no person deciding (ledger #3290):
+
+```toml
+# layers/join.toml   ->  urn:layer:join   (the example is onboard/layers/join.toml)
+model   = "channel"
+shapes  = "join.shapes.ttl"             # admit one class, onb:JoinRequest
+context = "join.context.jsonld"
+lobby   = true
+join    = "public"
+
+# layers.toml
+[join]
+host_key        = "/run/credentials/layers/join.pem"  # required: `openssl genpkey -algorithm ed25519`
+join_idle_days  = 90     # a joined identity lapses after this long without a read
+per_certificate = 5      # requests an hour from one certificate
+per_address     = 20     # requests an hour from one source address, where the door says it
+per_hour        = 120    # requests an hour from everyone together
+max_joined      = 10000  # live joined identities
+```
+
+Only a feed may be public (a plain channel saying `public` is refused), and a host has one join
+lobby. A stranger's request, said with the capability `Host::lobby_capability` mints for it:
+
+```turtle
+@prefix onb: <https://ikigai-rs.dev/ns/onboard#> .
+<urn:iki:onboard:join:{fingerprint}> a onb:JoinRequest ;   # or <urn:layer:new>
+    onb:certificate "-----BEGIN CERTIFICATE-----…" ;
+    onb:fingerprint "{lowercase hex SHA-256 of the leaf DER}" ;
+    onb:layer <urn:layer:releases> .
+```
+
+The host checks that the poster holds the certificate (the fingerprint in its principal equals
+the request's, and the posted PEM hashes to it) and that every `onb:layer` is public. **Anything
+else refuses the whole request**, naming the layer, in the same words whether that layer is
+private or absent, so a refusal never says which private layers exist. Otherwise it signs an
+`onb:Entitlement` with `join.host_key` and answers the request synchronously, since the joiner
+cannot read the lobby; `as=application/json` carries these members:
+
+```json
+{ "granted": ["urn:cap:layer:feed:releases", "urn:cap:layer:read:releases"],
+  "entitlement": "urn:iki:host:edge:entitlement:01…", "principal": "urn:iki:host:edge:client:ab…",
+  "expires": "2027-02-06T00:00:00Z", "layers": ["urn:layer:releases"],
+  "@id": "urn:layer:join:entry:01…" }
+```
+
+The grant is live on the joiner's next connection, under the principal
+`urn:iki:host:{door}:client:{fingerprint}` and never a participant's name. A door that mints
+through `Host::lobby_capability` needs no change: for a joined certificate it now answers `read`
+and `feed` on the joined layers and nothing else. `Host::door_capability` does the same and
+also takes the connection's address, which the per-address limit counts.
+
+**The guards.** The three rates are persisted, sealed at rest in `<state>/.join-limits.age`, so
+a restart forgets nothing; they count every request, and a request refused for a private layer
+counts too. `max_joined` caps the live set. A fingerprint in `deny.txt` (in the config home, one
+sha256 per line, `#` starts a comment) is refused at join, gets no capability at a connection,
+and is refused on a connection it already holds; a list that does not read stops joins and
+says which line. An identity lapses after `join_idle_days` without a read: its certificate
+leaves the trust set, a read on a connection already open is refused, and it may join again.
+`onb:expires` says when it lapses if it is never read; each read moves that later on the
+host's record.
+
+**Where it lives.** `<config>/joined/`, which only the host writes: `identities/{fp}.json`
+(the record), `identities/{fp}.ttl` (the signed entitlement), `clients/{fp}.crt` (the trust set)
+and a `grants.json` and `clients.json` in the form the door reads. It sits beside
+`participants.ttl`, `grants.json` and `clients.json` and never inside them, so an apply from git
+leaves it alone; when your apply deletes unknown files, exclude `joined/`.
+
+A joined identity holds read and feed on public layers and nothing else, so a `say` anywhere
+is refused and `urn:layers:me` (which needs a collaboration token it does not hold) is refused
+too: it lists no collaboration for it.
+
+### The door descriptor
+
+```text
+ikigai-layers descriptor <config dir> --door quic://host:port --door-dir <dir> --out <dir>
+```
+
+writes `layers.json` and `server.crt` into `--out`, for the deployment to publish at
+`https://<host>/.well-known/ikigai/layers.json`. `url` is relative to the descriptor; `label`
+is present for a layer whose definition has one:
+
+```json
+{ "door": "quic://host:port",
+  "server_cert": { "url": "server.crt", "sha256": "<64 hex>" },
+  "join": "urn:layer:join:say",
+  "public_layers": [ { "name": "releases", "type": "ik:Feed", "read_only": true, "label": "Releases" } ] }
+```
+
 ## Writing an entry
 
 ```text
