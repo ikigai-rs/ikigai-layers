@@ -30,7 +30,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::config::{Config, ConfigError};
+use crate::config::{Config, ConfigError, Participants};
 use crate::name::{collab_cap, fold_fingerprint, layer_cap, Participant};
 
 /// One `clients.json` entry, in the object form cli's door reads.
@@ -58,18 +58,32 @@ pub struct Enrollment {
     pub idle: Vec<String>,
 }
 
-/// Read `enrollment.toml` under `dir`: participant (as a manifest names it) → fingerprint
-/// or fingerprints, with every fingerprint `config`'s entitlements record added. Absent is
-/// no hand-enrolled certificate.
+/// Every certificate fingerprint, participant → fingerprints: `enrollment.toml`'s, with
+/// every one `config`'s entitlements record added.
 pub fn load_fingerprints(
     dir: &Path,
     config: &Config,
+) -> Result<BTreeMap<String, BTreeSet<String>>, ConfigError> {
+    let mut fingerprints = load_enrolled(dir, &config.participants)?;
+    for entitled in &config.entitled {
+        fingerprints
+            .entry(entitled.participant.iri().to_string())
+            .or_default()
+            .insert(entitled.fingerprint.clone());
+    }
+    Ok(fingerprints)
+}
+
+/// Read `enrollment.toml` under `dir`: participant (as a manifest names it) → fingerprint
+/// or fingerprints. Absent is no hand-enrolled certificate.
+pub(crate) fn load_enrolled(
+    dir: &Path,
+    participants: &Participants,
 ) -> Result<BTreeMap<String, BTreeSet<String>>, ConfigError> {
     let path = dir.join("enrollment.toml");
     let at = path.display();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        // Absent is no hand-enrolled certificate; entitled ones are still read below.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(ConfigError(format!("read {at}: {e}"))),
     };
@@ -79,7 +93,7 @@ pub fn load_fingerprints(
     for (key, value) in table {
         let participant =
             Participant::from_manifest_key(&key).map_err(|e| ConfigError(format!("{at}: {e}")))?;
-        if !config.participants.names(participant.iri()) {
+        if !participants.names(participant.iri()) {
             return Err(ConfigError(format!(
                 "{at}: `{key}` is no participant in participants.ttl"
             )));
@@ -109,12 +123,6 @@ pub fn load_fingerprints(
                 ))
             })?);
         }
-    }
-    for entitled in &config.entitled {
-        fingerprints
-            .entry(entitled.participant.iri().to_string())
-            .or_default()
-            .insert(entitled.fingerprint.clone());
     }
     Ok(fingerprints)
 }

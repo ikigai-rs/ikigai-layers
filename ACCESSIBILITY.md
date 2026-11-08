@@ -26,7 +26,9 @@ repository's.
 - **Refusals** (`src/endpoints.rs`, `src/channel.rs`, `src/tuplespace.rs`, `src/onboard/`):
   sentences that name the layer and the argument, such as ``cursor 9 is past layer `talk`'s last
   event, 4: … resynchronize from 0`` or ``tuple= names one tuple and match= selects by a
-  template: give one``. A write that fails admission answers ``does not conform to layer
+  template: give one``. An entitlement naming a participant another certificate holds answers
+  ``onb:principal <participant> is already held by certificate <fingerprint>, …`` and says how
+  to free it, on the onboarding status and the stderr line below. A write that fails admission answers ``does not conform to layer
   `talk`'s shapes (N violation(s)): …``, listing up to 20 violations and a count of the rest.
 - **Host diagnostics on stderr** (`src/onboard/apply.rs`): lines starting
   `ikigai-layers: onboard:`, one per onboarding verdict, and one when applying entitlements
@@ -64,7 +66,10 @@ Verified by reading the source:
   `nothing written (--check)`.
 - `tests/channel.rs`, `tests/tuplespace.rs` and `tests/door.rs` check that a write outside the
   shapes is refused with `does not conform`; `tests/feed.rs`
-  (`after_is_required_and_a_cursor_from_the_future_is_refused`), `tests/me.rs`
+  (`after_is_required_and_a_cursor_from_the_future_is_refused`), `tests/onboard.rs`
+  (`an_entitlement_naming_a_hand_enrolled_participant_is_refused`,
+  `an_entitlement_naming_a_participant_entitled_under_another_certificate_is_refused`),
+  `tests/me.rs`
   (`no_principal_is_a_refusal`, `an_unknown_face_is_refused`) and `tests/door.rs`
   (`a_second_host_over_one_state_directory_is_refused_naming_the_first`) pin other refusals.
 
@@ -110,3 +115,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | Date | Change |
 |---|---|
 | 2026-10-31 | First version. |
+| 2026-11-08 | The refusal of an entitlement naming a participant another certificate holds. |

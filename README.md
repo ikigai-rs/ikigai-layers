@@ -85,7 +85,7 @@ One directory, the layer host's config home:
   layers/msg.context.jsonld  its egress context
   participants.ttl           who each principal is
   collabs/bobby.toml         a collaboration's manifest
-  enrollment.toml            certificate fingerprints (read by the generator only)
+  enrollment.toml            certificate fingerprints (read by the generator and onboarding)
   layers.toml                optional: the host's own options (the `match` budget, below)
 ```
 
@@ -213,7 +213,14 @@ let in on a signed decision, with no file copied by hand (ledger #2009):
   request the entitlement names, into `onboard.trust_dir` as `{fingerprint}.crt`. An applied
   entitlement also grants `read` on the grants layer, so the node reads its own. A newer one
   for the same fingerprint must `ik:supersedes` the current one (so a replay changes nothing),
-  and one with no `onb:layerGrant` revokes.
+  and one with no `onb:layerGrant` revokes. A participant is one certificate's: an entitlement
+  naming a participant another certificate already holds, through `enrollment.toml` or an
+  earlier entitlement (expired ones included, until revoked), is refused with
+  ``onb:principal <participant> is already held by certificate <fingerprint>, enrolled by hand
+  in enrollment.toml: invite this node under another name, or take that certificate out of
+  enrollment.toml first`` or ``…, entitled by <entry>: invite this node under another name, or
+  revoke that entitlement first``. Moving a certificate to a new participant supersedes its own
+  entitlement; giving a participant a new certificate is a revocation, then a new entitlement.
 - **`urn:layer:onboard:status`** (readable under `urn:cap:layer:say:{grants}`, the
   controller's) says what was seen, applied, superseded, expired and refused, and why, and
   whether the door must be restarted (`onboard.trust_reload = "start"`; cli's door reads its

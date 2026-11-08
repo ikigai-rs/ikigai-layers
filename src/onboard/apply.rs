@@ -12,6 +12,12 @@
 //! current and so changes nothing. A superseding entitlement with no `onb:layerGrant` is a
 //! revocation.
 //!
+//! **One participant, one certificate, and an entitlement cannot join another's.** Everything
+//! a participant holds applies to every certificate enrolled for it, so an entitlement naming
+//! a participant another certificate already holds, by `enrollment.toml` or by an entitlement,
+//! is refused. An expired entitlement keeps holding its participant, so a refused entitlement
+//! never comes into force by the clock alone; a revocation frees it.
+//!
 //! **What it writes**, all in the host's config directory but the certificate:
 //!
 //! - `participants.ttl`: the entitled participant, appended when the graph does not name it
@@ -46,7 +52,7 @@ use super::{
 };
 use crate::at_rest;
 use crate::config::{self, parse_layer_cap, Config, OnboardConfig, TrustReload, ENTITLEMENTS_FILE};
-use crate::grants::{generate, load_fingerprints};
+use crate::grants::{generate, load_enrolled, load_fingerprints};
 use crate::host::Host;
 use crate::name::{fold_fingerprint, Participant, PARTICIPANT_PREFIX};
 use crate::rdf::{self, object_iri};
@@ -73,7 +79,8 @@ pub enum Verdict {
     /// Verified, but past its `onb:expires`: nothing it granted is in force.
     Expired,
     /// Not applied, and why: a signature that does not verify against the controller key, a
-    /// field missing, a replay, a grant on a layer the host cannot grant.
+    /// field missing, a replay, a grant on a layer the host cannot grant, a participant another
+    /// certificate holds.
     Refused {
         /// Why.
         reason: String,
@@ -473,7 +480,13 @@ fn fold(
     // grants, what is in force.
     let mut current: BTreeMap<String, String> = BTreeMap::new();
     let mut effective: BTreeMap<String, Effective> = BTreeMap::new();
+    // Per fingerprint: the participant its current entitlement holds.
+    let mut held: BTreeMap<String, String> = BTreeMap::new();
     let collabs = host.collabs().ok();
+    let enrolled = host
+        .participants()
+        .and_then(|participants| load_enrolled(host.config_dir(), &participants))
+        .map_err(|e| format!("the host's enrollment does not read: {e}"));
     for Entry { iri, seq, .. } in entries {
         let record = |verdict| Record {
             entry: iri.clone(),
@@ -520,6 +533,7 @@ fn fold(
             }
             mark_superseded(&mut records, &v.supersedes, iri);
             effective.remove(&v.fingerprint);
+            held.remove(&v.fingerprint);
             current.insert(v.fingerprint.clone(), iri.clone());
             records.push(record(Verdict::Revoked));
             continue;
@@ -545,7 +559,9 @@ fn fold(
             )),
             _ => Ok(()),
         });
-        let certificate = grantable.and_then(|()| certificate_of(host, v));
+        let certificate = grantable
+            .and_then(|()| principal_is_free(v, &enrolled, &held, &current))
+            .and_then(|()| certificate_of(host, v));
         let certificate = match certificate {
             Ok(pem) => pem,
             Err(reason) => {
@@ -555,6 +571,7 @@ fn fold(
         };
         mark_superseded(&mut records, &v.supersedes, iri);
         current.insert(v.fingerprint.clone(), iri.clone());
+        held.insert(v.fingerprint.clone(), v.participant.iri().to_string());
         match expired(v.expires.as_deref(), now) {
             Ok(false) => {
                 effective.insert(
@@ -582,6 +599,7 @@ fn fold(
             }
             Err(reason) => {
                 effective.remove(&v.fingerprint);
+                held.remove(&v.fingerprint);
                 records.push(record(Verdict::Refused { reason }));
             }
         }
@@ -599,6 +617,51 @@ fn fold(
         restart_pending: false,
         error: None,
     }
+}
+
+/// Refuse `v` when another certificate than its own already holds the participant it names:
+/// one enrolled by hand (`enrolled`), or one whose current entitlement names it (`held`, with
+/// each entitlement in `current`). `v` would otherwise join that participant's whole grant.
+fn principal_is_free(
+    v: &Verified,
+    enrolled: &Result<BTreeMap<String, BTreeSet<String>>, String>,
+    held: &BTreeMap<String, String>,
+    current: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let principal = v.participant.iri();
+    let by_hand: Vec<&str> = enrolled
+        .as_ref()
+        .map_err(Clone::clone)?
+        .get(principal)
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .filter(|fp| *fp != v.fingerprint)
+        .collect();
+    if !by_hand.is_empty() {
+        return Err(format!(
+            "onb:principal {principal} is already held by {} {}, enrolled by hand in \
+             enrollment.toml: invite this node under another name, or take that certificate out \
+             of enrollment.toml first",
+            if by_hand.len() == 1 {
+                "certificate"
+            } else {
+                "certificates"
+            },
+            by_hand.join(", ")
+        ));
+    }
+    let holder = held
+        .iter()
+        .find(|(fp, who)| who.as_str() == principal && **fp != v.fingerprint);
+    if let Some((fp, _)) = holder {
+        return Err(format!(
+            "onb:principal {principal} is already held by certificate {fp}, entitled by {}: \
+             invite this node under another name, or revoke that entitlement first",
+            current[fp]
+        ));
+    }
+    Ok(())
 }
 
 /// `grants` with `read` on the grants layer added: an entitled node reads its own entitlement

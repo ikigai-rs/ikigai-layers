@@ -922,6 +922,197 @@ fn an_entitlement_naming_another_certificates_request_is_refused() {
     assert!(door_mint(&edge, &fp).is_none());
 }
 
+/// A granting entitlement for `pem`, its lobby request said here, under the participant `name`,
+/// said on the grants layer as the controller. Answers its fingerprint and entry.
+fn entitle_as(edge: &Edge, pem: &str, name: &str, supersedes: Option<&str>) -> (String, String) {
+    let fp = fingerprint_of_pem(pem).unwrap();
+    let req = request(edge, pem).unwrap();
+    let entry = entitle(
+        edge,
+        &signed(
+            &entitlement_body(&Grant {
+                fingerprint: &fp,
+                name,
+                request: Some(&req),
+                grants: TASKS,
+                supersedes,
+                expires: None,
+            }),
+            CONTROLLER_SEED,
+        ),
+    );
+    (fp, entry)
+}
+
+/// The refusal of the entry at `index`, panicking if it was not refused.
+fn refusal(edge: &Edge, index: usize) -> String {
+    let s = status(edge);
+    assert_eq!(s["records"][index]["verdict"], "refused", "{s}");
+    s["records"][index]["reason"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn an_entitlement_naming_a_hand_enrolled_participant_is_refused() {
+    // `bobby` holds a certificate through enrollment.toml, and a grant through the manifests.
+    let edge = edge("live");
+    let held = "ab".repeat(32);
+    edge.config
+        .write("enrollment.toml", &format!("bobby = \"{held}\"\n"));
+    let (fp, _) = entitle_as(&edge, &certificate("mini"), "bobby", None);
+
+    let reason = refusal(&edge, 0);
+    assert!(
+        reason.contains(&participant("bobby")) && reason.contains(&held),
+        "{reason}"
+    );
+    assert!(reason.contains("enrollment.toml"), "{reason}");
+    // The new certificate got nothing of bobby's.
+    assert!(door_mint(&edge, &fp).is_none());
+    assert!(edge.read(&format!("trust/{fp}.crt")).is_none());
+    assert!(edge
+        .read("entitlements.toml")
+        .is_none_or(|t| !t.contains("[[entitled]]")));
+}
+
+#[test]
+fn an_entitlement_naming_a_participant_entitled_under_another_certificate_is_refused() {
+    let edge = edge("live");
+    let (first, e1) = entitle_as(&edge, &certificate("mini"), "mini", None);
+    let (second, _) = entitle_as(&edge, &certificate("impostor"), "mini", None);
+
+    let reason = refusal(&edge, 1);
+    assert!(
+        reason.contains(&participant("mini")) && reason.contains(&first) && reason.contains(&e1),
+        "{reason}"
+    );
+    assert!(door_mint(&edge, &second).is_none());
+    assert!(edge.read(&format!("trust/{second}.crt")).is_none());
+    // The first certificate keeps what it had.
+    assert!(door_mint(&edge, &first).is_some());
+    assert_eq!(status(&edge)["effective"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_certificate_keeps_its_own_participant_through_a_supersession() {
+    let edge = edge("live");
+    let pem = certificate("mini");
+    let (fp, e1) = entitle_as(&edge, &pem, "mini", None);
+    entitle_as(&edge, &pem, "mini", Some(&e1));
+    let s = status(&edge);
+    assert_eq!(s["records"][1]["verdict"], "applied", "{s}");
+    assert!(door_mint(&edge, &fp).is_some());
+}
+
+#[test]
+fn a_supersession_cannot_move_a_certificate_onto_a_held_participant() {
+    let edge = edge("live");
+    let (first, _) = entitle_as(&edge, &certificate("one"), "one", None);
+    let two = certificate("two");
+    let (second, e2) = entitle_as(&edge, &two, "two", None);
+    entitle_as(&edge, &two, "one", Some(&e2));
+
+    let reason = refusal(&edge, 2);
+    assert!(
+        reason.contains(&participant("one")) && reason.contains(&first),
+        "{reason}"
+    );
+    // The refused entitlement changed nothing: `two` is still what it was.
+    assert_eq!(
+        door_mint(&edge, &second).unwrap().principal(),
+        Some(participant("two").as_str())
+    );
+}
+
+#[test]
+fn a_certificate_moving_to_a_new_participant_frees_the_old_one() {
+    let edge = edge("live");
+    let pem = certificate("one");
+    let (_, e1) = entitle_as(&edge, &pem, "old-name", None);
+    entitle_as(&edge, &pem, "new-name", Some(&e1));
+    let (other, _) = entitle_as(&edge, &certificate("two"), "old-name", None);
+    let s = status(&edge);
+    assert_eq!(s["records"][2]["verdict"], "applied", "{s}");
+    assert!(door_mint(&edge, &other).is_some());
+}
+
+#[test]
+fn another_certificate_cannot_take_a_participant_by_superseding_its_entitlement() {
+    // A certificate's entitlement is superseded for that certificate only: replacing a node's
+    // certificate is a revocation, then a new entitlement.
+    let edge = edge("live");
+    let (first, e1) = entitle_as(&edge, &certificate("one"), "mini", None);
+    let (second, _) = entitle_as(&edge, &certificate("two"), "mini", Some(&e1));
+    assert!(refusal(&edge, 1).contains("not the current entitlement"));
+    assert!(door_mint(&edge, &second).is_none());
+    assert!(door_mint(&edge, &first).is_some());
+}
+
+#[test]
+fn a_revocation_frees_the_participant_for_another_certificate() {
+    let edge = edge("live");
+    let (first, e1) = entitle_as(&edge, &certificate("one"), "mini", None);
+    entitle(
+        &edge,
+        &signed(
+            &entitlement_body(&Grant {
+                fingerprint: &first,
+                name: "mini",
+                request: None,
+                grants: &[],
+                supersedes: Some(&e1),
+                expires: None,
+            }),
+            CONTROLLER_SEED,
+        ),
+    );
+    let (second, _) = entitle_as(&edge, &certificate("two"), "mini", None);
+    let s = status(&edge);
+    assert_eq!(s["records"][2]["verdict"], "applied", "{s}");
+    assert!(door_mint(&edge, &second).is_some());
+}
+
+#[test]
+fn an_expired_entitlement_holds_its_participant_until_it_is_revoked() {
+    // Were expiry to free the name, a refused entitlement would come into force by itself the
+    // moment the one before it expired.
+    let edge = edge("live");
+    let pem = certificate("one");
+    let fp = fingerprint_of_pem(&pem).unwrap();
+    let req = request(&edge, &pem).unwrap();
+    let e1 = entitle(
+        &edge,
+        &signed(
+            &entitlement_body(&Grant {
+                fingerprint: &fp,
+                name: "mini",
+                request: Some(&req),
+                grants: TASKS,
+                supersedes: None,
+                expires: Some("2020-01-01T00:00:00Z"),
+            }),
+            CONTROLLER_SEED,
+        ),
+    );
+    let (second, _) = entitle_as(&edge, &certificate("two"), "mini", None);
+    let reason = refusal(&edge, 1);
+    assert!(reason.contains(&fp) && reason.contains(&e1), "{reason}");
+    assert!(door_mint(&edge, &second).is_none());
+}
+
+#[test]
+fn a_hand_enrolled_certificate_may_be_entitled_under_its_own_participant() {
+    // enrollment.toml names this very certificate, so no other certificate holds the name.
+    let edge = edge("live");
+    let pem = certificate("mini");
+    let fp = fingerprint_of_pem(&pem).unwrap();
+    edge.config
+        .write("enrollment.toml", &format!("bobby = \"{fp}\"\n"));
+    entitle_as(&edge, &pem, "bobby", None);
+    let s = status(&edge);
+    assert_eq!(s["records"][0]["verdict"], "applied", "{s}");
+    assert!(door_mint(&edge, &fp).is_some());
+}
+
 #[test]
 fn a_door_that_reads_its_trust_list_at_start_is_told_to_restart() {
     let edge = edge("start");
