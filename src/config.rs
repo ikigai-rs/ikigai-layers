@@ -7,7 +7,8 @@
 //!   layers/{file}.ttl, .jsonld   the shapes and context a definition names
 //!   participants.ttl             who each principal is (served at urn:layers:participants)
 //!   collabs/{name}.toml          a collaboration's manifest (served at urn:collab:{name})
-//!   enrollment.toml              certificate fingerprints, read only by the grants generator
+//!   enrollment.toml              certificate fingerprints, read by the grants generator
+//!                                and onboarding
 //!   entitlements.toml            WRITTEN by the host: what verified entitlements grant
 //!                                (crate::onboard), read by the grants generator beside the
 //!                                manifests
