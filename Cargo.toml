@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-layers"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 # The toolchain the shared CI's msrv job builds and tests on: the line the ecosystem's other
 # declared crates (ikigai-script, ikigai-log, ikigai-cms-web) hold. Nothing here needs more
@@ -78,8 +78,10 @@ ikigai-rdf = "0.5.0"
 # `SPACE_DIRS` names every directory a space may hold. Every `match=` runs within an
 # `EvaluationBudget` taken from its mounter (`with_evaluation_budget`, 0.1.55, ledger #1327),
 # which is how every tuplespace layer of a host shares ONE overdue count (ledger #1362).
-# 0.3.0 is that API on core 0.3 (ledger #2975). ⚠ `"0.3.0"` is `<0.4.0`.
-ikigai-intray = { version = "0.3.0", optional = true }
+# 0.3.0 is that API on core 0.3 (ledger #2975). 0.4.0 moves with ikigai-engine 0.4.0 (additive),
+# so a host linking layers and the 0.4 engine links one intray and one resolve, not two.
+# ⚠ `"0.4.0"` is `<0.5.0`.
+ikigai-intray = { version = "0.4.0", optional = true }
 # The time budget a `match=` runs within (`ikigai_store::budget::{EvaluationBudget,
 # TimeBudget}`): the host builds ONE from `layers.toml` and hands a clone to every tuplespace
 # layer, and `Host::match_budget` exposes it. Named directly because those types are in this
