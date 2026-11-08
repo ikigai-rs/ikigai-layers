@@ -651,7 +651,7 @@ impl LayerEndpoint {
     }
 
     /// `from=`, checked and as the participants graph writes it.
-    fn from_arg(&self, inv: &Invocation<'_>) -> Result<Option<String>> {
+    fn author_filter(&self, inv: &Invocation<'_>) -> Result<Option<String>> {
         match optional_str(inv, "from")? {
             None => Ok(None),
             Some(iri) => Ok(Some(
@@ -698,7 +698,7 @@ impl LayerEndpoint {
                 let asked = face(inv, &FEED_ENTRY_FACES)?;
                 let (after, limit) = self.page(inv)?;
                 let concepts = self.concepts(inv)?;
-                let from = self.from_arg(inv)?;
+                let from = self.author_filter(inv)?;
                 let class = optional_str(inv, "type")?;
                 if asked == ATOM && (from.is_some() || class.is_some()) {
                     return Err(Error::InvalidArgument {
@@ -806,7 +806,7 @@ impl LayerEndpoint {
             .flatten()
             .filter_map(|row| row["entry"]["value"].as_str().map(str::to_string))
             .collect();
-        let from = self.from_arg(inv)?;
+        let from = self.author_filter(inv)?;
         let class = optional_str(inv, "type")?.map(str::to_string);
         self.entries_where(inv, |m| {
             matching.contains(&m.iri)
@@ -1160,7 +1160,7 @@ impl LayerEndpoint {
     }
 
     async fn entries(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let from = self.from_arg(inv)?;
+        let from = self.author_filter(inv)?;
         let class = optional_str(inv, "type")?.map(str::to_string);
         self.entries_where(inv, |m| {
             from.as_ref().is_none_or(|a| &m.author == a)
