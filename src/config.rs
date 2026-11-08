@@ -138,6 +138,60 @@ pub struct LayerDef {
     /// certificate's fingerprint, and holds every lobby to the bounds in [`crate::onboard`]:
     /// at most [`crate::onboard::LOBBY_ENTRY_MAX`] bytes an entry, and a rate.
     pub lobby: bool,
+    /// A channel's only: what makes it a feed layer (`feed = true`, ledger #3284).
+    pub feed: Option<FeedDef>,
+}
+
+impl LayerDef {
+    /// Whether this layer is a feed.
+    pub fn is_feed(&self) -> bool {
+        self.feed.is_some()
+    }
+}
+
+/// A feed layer's own options.
+#[derive(Clone, Debug)]
+pub struct FeedDef {
+    /// Who may `say` on it, by IRI: nobody else, whatever a grant holds.
+    pub publishers: BTreeSet<String>,
+    /// Whether it is advertised for joining without a person approving (`public = true`, read
+    /// by the door's own join; never read here beyond the definition's JSON face).
+    pub public: bool,
+    /// The SKOS scheme its entries' `dcterms:subject` values come from.
+    pub scheme: Scheme,
+}
+
+/// A feed's SKOS scheme, read and checked from the file its definition names.
+#[derive(Clone, Debug)]
+pub struct Scheme {
+    /// The `skos:ConceptScheme`'s IRI.
+    pub iri: String,
+    /// Its `rdfs:label` or `skos:prefLabel`, else the IRI.
+    pub label: String,
+    /// The scheme as Turtle, skolemized like a layer's shapes.
+    pub turtle: String,
+    /// Its concepts, sorted by notation.
+    pub concepts: Vec<Concept>,
+}
+
+/// One concept of a [`Scheme`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Concept {
+    /// Its IRI.
+    pub iri: String,
+    /// `skos:prefLabel`.
+    pub pref_label: String,
+    /// `skos:notation`.
+    pub notation: String,
+    /// `skos:broader`, each a concept of this scheme.
+    pub broader: BTreeSet<String>,
+}
+
+impl Scheme {
+    /// Whether `iri` is a concept of this scheme.
+    pub fn has(&self, iri: &str) -> bool {
+        self.concepts.iter().any(|c| c.iri == iri)
+    }
 }
 
 #[derive(Deserialize)]
@@ -154,6 +208,10 @@ struct LayerToml {
     matching: Option<bool>,
     shared: Option<Vec<String>>,
     lobby: Option<bool>,
+    feed: Option<bool>,
+    publishers: Option<Vec<String>>,
+    scheme: Option<String>,
+    public: Option<bool>,
 }
 
 /// Read every `layers/*.toml` under `dir`. No `layers/` directory is a host with no
@@ -237,7 +295,34 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
                  has no latest"
             ))
         }
+        Model::Tuplespace if parsed.feed.is_some() => {
+            return err(format!(
+                "{at}: `feed` is a channel option: a feed's entries are said, not dropped and \
+                 taken"
+            ))
+        }
         _ => {}
+    }
+    let feed_options = parsed.feed.unwrap_or(false);
+    if !feed_options {
+        let stray = [
+            ("publishers", parsed.publishers.is_some()),
+            ("scheme", parsed.scheme.is_some()),
+            ("public", parsed.public.is_some()),
+        ]
+        .into_iter()
+        .find(|(_, set)| *set);
+        if let Some((option, _)) = stray {
+            return err(format!(
+                "{at}: `{option}` is a feed option, and this definition does not say \
+                 `feed = true`"
+            ));
+        }
+    } else if parsed.lobby == Some(true) {
+        return err(format!(
+            "{at}: a layer cannot be both a lobby and a feed: a lobby admits certificates \
+             nobody enrolled, and a feed is written only by its publishers"
+        ));
     }
     let shapes = read(&beside(layers_dir, &parsed.shapes, path)?)?;
     let target_classes = check_shapes(&shapes)
@@ -283,6 +368,18 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
             Some(names.into_iter().collect())
         }
     };
+    let feed = if feed_options {
+        Some(load_feed(
+            layers_dir,
+            path,
+            &name,
+            parsed.publishers,
+            parsed.scheme,
+            parsed.public,
+        )?)
+    } else {
+        None
+    };
     Ok(LayerDef {
         name,
         model,
@@ -296,6 +393,152 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         matching: parsed.matching.unwrap_or(false),
         shared,
         lobby,
+        feed,
+    })
+}
+
+/// A feed layer's own options: its publishers (required, at least one, by a manifest's names)
+/// and its scheme (required).
+fn load_feed(
+    layers_dir: &Path,
+    path: &Path,
+    layer: &str,
+    publishers: Option<Vec<String>>,
+    scheme: Option<String>,
+    public: Option<bool>,
+) -> Result<FeedDef, ConfigError> {
+    let at = path.display();
+    let names = publishers
+        .filter(|names| !names.is_empty())
+        .ok_or_else(|| {
+            ConfigError(format!(
+            "{at}: a feed needs `publishers = [\"name\", ...]`, naming at least one participant: \
+             nobody else can say on it"
+        ))
+        })?;
+    let mut iris = BTreeSet::new();
+    for name in &names {
+        let publisher = Participant::from_manifest_key(name)
+            .map_err(|e| ConfigError(format!("{at}: publishers `{name}`: {e}")))?;
+        iris.insert(publisher.iri().to_string());
+    }
+    let Some(file) = scheme else {
+        return err(format!(
+            "{at}: a feed needs `scheme = \"<file>.ttl\"`: a skos:ConceptScheme its entries' \
+             dcterms:subject values come from"
+        ));
+    };
+    let text = read(&beside(layers_dir, &file, path)?)?;
+    let scheme = load_scheme(layer, &text)
+        .map_err(|e| ConfigError(format!("{at}: scheme `{file}`: {e}")))?;
+    Ok(FeedDef {
+        publishers: iris,
+        public: public.unwrap_or(false),
+        scheme,
+    })
+}
+
+/// Read a scheme: exactly one `skos:ConceptScheme`, at least one `skos:Concept`, every concept
+/// with a `skos:prefLabel` and a `skos:notation`, and every `skos:broader` naming a concept of
+/// the same scheme. Blank nodes are named as a layer's shapes are ([`skolemize`]), so the Turtle
+/// served is the scheme that judges entries.
+pub fn load_scheme(layer: &str, text: &str) -> Result<Scheme, String> {
+    let turtle = skolemize_with(
+        text,
+        &format!("{}:scheme:", crate::name::layer_iri(layer)),
+        &[("skos", "http://www.w3.org/2004/02/skos/core#")],
+    )?;
+    let triples = rdf::parse_turtle(&turtle)?;
+    let mut schemes = BTreeSet::new();
+    let mut labels: BTreeMap<&str, String> = BTreeMap::new();
+    let mut found: BTreeMap<&str, Concept> = BTreeMap::new();
+    for t in &triples {
+        let Some(s) = subject_iri(&t.subject) else {
+            continue;
+        };
+        match t.predicate.as_str() {
+            rdf::RDF_TYPE if object_iri(&t.object) == Some(rdf::SKOS_CONCEPT_SCHEME) => {
+                schemes.insert(s);
+            }
+            rdf::RDF_TYPE if object_iri(&t.object) == Some(rdf::SKOS_CONCEPT) => {
+                found.entry(s).or_insert_with(|| Concept {
+                    iri: s.to_string(),
+                    pref_label: String::new(),
+                    notation: String::new(),
+                    broader: BTreeSet::new(),
+                });
+            }
+            _ => {}
+        }
+    }
+    for t in &triples {
+        let Some(s) = subject_iri(&t.subject) else {
+            continue;
+        };
+        let literal = match &t.object {
+            Term::Literal(l) => Some(l.value().to_string()),
+            _ => None,
+        };
+        match t.predicate.as_str() {
+            rdf::RDFS_LABEL | rdf::SKOS_PREF_LABEL if schemes.contains(s) => {
+                labels.extend(literal.map(|l| (s, l)));
+            }
+            rdf::SKOS_PREF_LABEL => {
+                if let (Some(concept), Some(l)) = (found.get_mut(s), literal) {
+                    concept.pref_label = l;
+                }
+            }
+            rdf::SKOS_NOTATION => {
+                if let (Some(concept), Some(l)) = (found.get_mut(s), literal) {
+                    concept.notation = l;
+                }
+            }
+            rdf::SKOS_BROADER => {
+                if let (Some(concept), Some(broader)) = (found.get_mut(s), object_iri(&t.object)) {
+                    concept.broader.insert(broader.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut schemes = schemes.into_iter();
+    let (Some(iri), None) = (schemes.next(), schemes.next()) else {
+        return Err("it must define exactly one skos:ConceptScheme".into());
+    };
+    if found.is_empty() {
+        return Err("it defines no skos:Concept, so no entry could name one".into());
+    }
+    for concept in found.values() {
+        if concept.pref_label.is_empty() {
+            return Err(format!("concept <{}> has no skos:prefLabel", concept.iri));
+        }
+        if concept.notation.is_empty() {
+            return Err(format!(
+                "concept <{}> has no skos:notation, the order concepts are listed in",
+                concept.iri
+            ));
+        }
+        if let Some(outside) = concept
+            .broader
+            .iter()
+            .find(|b| !found.contains_key(b.as_str()))
+        {
+            return Err(format!(
+                "concept <{}> has skos:broader <{outside}>, which is no skos:Concept of this \
+                 scheme",
+                concept.iri
+            ));
+        }
+    }
+    let label = labels.remove(iri).unwrap_or_else(|| iri.to_string());
+    let iri = iri.to_string();
+    let mut concepts: Vec<Concept> = found.into_values().collect();
+    concepts.sort_by(|a, b| (&a.notation, &a.iri).cmp(&(&b.notation, &b.iri)));
+    Ok(Scheme {
+        iri,
+        label,
+        turtle,
+        concepts,
     })
 }
 
@@ -403,6 +646,11 @@ pub fn check_shapes(turtle: &str) -> Result<BTreeSet<String>, String> {
 /// participant reads are exactly the shapes that judged its entry. Naming a node changes
 /// nothing SHACL means: a property shape or a list cell may be an IRI.
 pub fn skolemize(turtle: &str, prefix: &str) -> Result<String, String> {
+    skolemize_with(turtle, prefix, &[("sh", "http://www.w3.org/ns/shacl#")])
+}
+
+/// [`skolemize`], serialized with `extra` prefixes.
+fn skolemize_with(turtle: &str, prefix: &str, extra: &[(&str, &str)]) -> Result<String, String> {
     use oxrdf::{NamedNode, NamedOrBlankNode};
     let mut names: BTreeMap<String, NamedNode> = BTreeMap::new();
     let mut name = |b: &oxrdf::BlankNode| -> NamedNode {
@@ -426,10 +674,7 @@ pub fn skolemize(turtle: &str, prefix: &str) -> Result<String, String> {
             Triple::new(subject, t.predicate, object)
         })
         .collect();
-    Ok(rdf::to_turtle_with(
-        &triples,
-        &[("sh", "http://www.w3.org/ns/shacl#")],
-    ))
+    Ok(rdf::to_turtle_with(&triples, extra))
 }
 
 /// A layer's context must be an inline JSON-LD context with no `@vocab`, `@base` or
@@ -551,6 +796,32 @@ pub fn load_participants(dir: &Path) -> Result<Participants, ConfigError> {
         return err(format!("{at}: participant {iri} has no rdf:type"));
     }
     Ok(Participants { triples, members })
+}
+
+/// Every feed's publishers must be participants: a publisher nobody can be is a typo.
+fn check_publishers(
+    layers: &BTreeMap<String, LayerDef>,
+    participants: &Participants,
+) -> Result<(), ConfigError> {
+    for def in layers.values() {
+        for publisher in def.feed.iter().flat_map(|f| &f.publishers) {
+            if !participants.names(publisher) {
+                return err(format!(
+                    "layer `{}` names publisher {publisher}, whom participants.ttl does not name",
+                    def.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A feed's publishers, when `verbs` include `say` on that feed.
+fn feed_says<'a>(def: &'a LayerDef, verbs: &BTreeSet<String>) -> Option<&'a BTreeSet<String>> {
+    def.feed
+        .as_ref()
+        .filter(|_| verbs.contains("say"))
+        .map(|feed| &feed.publishers)
 }
 
 /// One layer a manifest mounts, and who holds which verbs on it.
@@ -684,6 +955,16 @@ fn load_mount(
                 ));
             }
             verbs.insert(verb.to_string());
+        }
+        if let Some(publishers) = feed_says(def, &verbs) {
+            if !publishers.contains(participant.iri()) {
+                return err(format!(
+                    "{at}: `{key}` holds `say` on feed `{layer}`, and {} is no publisher of \
+                     it; a feed is written only by its publishers ({})",
+                    participant.iri(),
+                    publishers.iter().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
         }
         if grants.insert(participant.clone(), verbs).is_some() {
             return err(format!(
@@ -1055,8 +1336,10 @@ pub fn parse_layer_cap(cap: &str) -> Option<(&str, &str)> {
 
 /// Check one entitled grant set against the layers and manifests: each layer defined, each
 /// verb one its model has, and each layer mounted by some collaboration (a grant on a layer no
-/// manifest mounts would belong to no collaboration; creating layers is ledger #2010).
+/// manifest mounts would belong to no collaboration; creating layers is ledger #2010), and `say`
+/// on a feed only for one of its publishers.
 pub fn check_entitled_grants(
+    participant: &str,
     grants: &BTreeMap<String, BTreeSet<String>>,
     layers: &BTreeMap<String, LayerDef>,
     collabs: &BTreeMap<String, Manifest>,
@@ -1073,6 +1356,11 @@ pub fn check_entitled_grants(
                 "`{verb}` on `{layer}`, a {} layer, whose verbs are {}",
                 def.model.as_str(),
                 def.model.verbs().join(", ")
+            ));
+        }
+        if feed_says(def, verbs).is_some_and(|p| !p.contains(participant)) {
+            return Err(format!(
+                "`say` on feed `{layer}`, and {participant} is no publisher of it"
             ));
         }
         if !collabs
@@ -1133,7 +1421,7 @@ pub fn load_entitled(
                 .or_default()
                 .insert(verb.to_string());
         }
-        check_entitled_grants(&grants, layers, collabs)
+        check_entitled_grants(participant.iri(), &grants, layers, collabs)
             .map_err(|e| ConfigError(format!("{at}: {} is granted {e}", participant.iri())))?;
         entitled.push(Entitled {
             participant,
@@ -1166,6 +1454,7 @@ impl Config {
         let dir = dir.as_ref().to_path_buf();
         let layers = load_layers(&dir)?;
         let participants = load_participants(&dir)?;
+        check_publishers(&layers, &participants)?;
         let collabs = load_collabs(&dir, &layers, &participants)?;
         let entitled = load_entitled(&dir, &layers, &participants, &collabs)?;
         Ok(Config {

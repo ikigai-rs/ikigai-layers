@@ -23,6 +23,9 @@ repository's.
   one line per item as `text/plain`, space-separated (`<seq> <time> <kind> <iri> <participant>`
   for a feed event); entries, definitions and shapes are Turtle; and every answer a participant
   reads also comes as JSON or JSON-LD (README, "JSON faces").
+- **Feed answers** (`src/feeds/`): a feed layer's entries also come as Atom 1.0 XML
+  (`as=application/atom+xml`), written from the SELECT's rows by a stylesheet (a missing title
+  is written `(untitled)`), and its graph and scheme as JSON-LD and JSON.
 - **Refusals** (`src/endpoints.rs`, `src/channel.rs`, `src/tuplespace.rs`, `src/onboard/`):
   sentences that name the layer and the argument, such as ``cursor 9 is past layer `talk`'s last
   event, 4: … resynchronize from 0`` or ``tuple= names one tuple and match= selects by a
@@ -30,9 +33,15 @@ repository's.
   ``onb:principal <participant> is already held by certificate <fingerprint>, …`` and says how
   to free it, on the onboarding status and the stderr line below. A write that fails admission answers ``does not conform to layer
   `talk`'s shapes (N violation(s)): …``, listing up to 20 violations and a count of the rest.
-- **Host diagnostics on stderr** (`src/onboard/apply.rs`): lines starting
+  A `say` on a feed by a non-publisher answers ``layer `releases` is a feed, written only by
+  its publishers, and <participant> is not one of them: ask in a Talk channel instead``; an
+  entry whose `dcterms:subject` is outside the feed's scheme, and a `concept=` the scheme does
+  not hold, each name the concept.
+- **Host diagnostics on stderr** (`src/onboard/apply.rs`, `src/feeds/mod.rs`): lines starting
   `ikigai-layers: onboard:`, one per onboarding verdict, and one when applying entitlements
-  fails or needs the door restarted.
+  fails or needs the door restarted; and one starting ``ikigai-layers: feed `<layer>`:`` when
+  warming a feed's shared copy after a publish fails (the entry stands, and the first reader
+  computes the answer).
 - **The `ikigai-layers` binary** (`src/bin/ikigai-layers.rs`): usage text; `grants` prints one
   line per grant, client, unenrolled participant and idle certificate, then what it wrote;
   `onboard setup` prints what it did and a `stuck: …` line for each way a node would be left in
@@ -70,7 +79,10 @@ Verified by reading the source:
   (`an_entitlement_naming_a_hand_enrolled_participant_is_refused`,
   `an_entitlement_naming_a_participant_entitled_under_another_certificate_is_refused`),
   `tests/me.rs`
-  (`no_principal_is_a_refusal`, `an_unknown_face_is_refused`) and `tests/door.rs`
+  (`no_principal_is_a_refusal`, `an_unknown_face_is_refused`), `tests/feed_layers.rs`
+  (`a_non_publisher_with_a_say_grant_is_refused_naming_the_feed`,
+  `an_entry_subject_outside_the_scheme_is_refused_naming_it`,
+  `an_unknown_concept_is_refused_naming_it`) and `tests/door.rs`
   (`a_second_host_over_one_state_directory_is_refused_naming_the_first`) pin other refusals.
 
 These test wording and exit codes for correctness; none was written as an accessibility test.
@@ -116,3 +128,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 |---|---|
 | 2026-10-31 | First version. |
 | 2026-11-08 | The refusal of an entitlement naming a participant another certificate holds. |
+| 2026-11-08 | Feed layers: their refusals, the Atom face and the warm-failure stderr line. |
