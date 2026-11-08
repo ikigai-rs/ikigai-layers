@@ -243,7 +243,15 @@ let in on a signed decision, with no file copied by hand (ledger #2009):
   ``onb:principal <participant> is already held by certificate <fingerprint>, enrolled by hand
   in enrollment.toml: invite this node under another name, or take that certificate out of
   enrollment.toml first`` or ``…, entitled by <entry>: invite this node under another name, or
-  revoke that entitlement first``. Moving a certificate to a new participant supersedes its own
+  revoke that entitlement first``. An entitled node's grant comes from its entitlement alone,
+  so an entitlement naming a participant any manifest grants, whether or not a certificate
+  holds it yet, is refused with ``onb:principal <participant> is granted by manifest `<name>`,
+  and an entitled node's grant comes from its entitlement alone: invite this node under another
+  name, or take that participant out of that manifest first``. That is checked each time the
+  host applies, so a manifest line added for an entitled participant takes its entitlement out
+  of force. One naming `onboard.controller` is always refused: ``onb:principal <participant> is
+  onboard.controller, which an entitlement never names: invite this node under another name``.
+  Moving a certificate to a new participant supersedes its own
   entitlement; giving a participant a new certificate is a revocation, then a new entitlement.
 - **`urn:layer:onboard:status`** (readable under `urn:cap:layer:say:{grants}`, the
   controller's) says what was seen, applied, superseded, expired and refused, and why, and
