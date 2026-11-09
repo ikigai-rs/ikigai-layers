@@ -662,6 +662,11 @@ use serde_json::Value;
 #     [[mount]]\nlayer = \"tasks\"\nbrian = [\"read\", \"out\", \"take\"]\n");
 # write("state.key", age::secrecy::ExposeSecret::expose_secret(
 #     &age::x25519::Identity::generate().to_string()));
+# #[cfg(unix)] {
+#     use std::os::unix::fs::PermissionsExt;
+#     std::fs::set_permissions(config.join("state.key"), std::fs::Permissions::from_mode(0o600)).unwrap();
+#     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+# }
 // The host's key: an age identity file (`age-keygen -o state.key`), whose path a deployment
 // hands over. Every state file is sealed to it.
 let key = ikigai_layers::StateKey::load(config.join("state.key")).expect("an age identity");
@@ -926,6 +931,14 @@ envelope encryption. File names keep their suffixes; what is in a file says what
   variable, so a deployment can hand the file over from an in-memory credential store
   (systemd's `LoadCredentialEncrypted`, say). A missing or unreadable file, or one holding no
   identity, is refused at open naming the file, never echoing a line of it.
+- **Only its owner can reach the key (unix).** `StateKey::load` refuses, before reading it and
+  naming the command that fixes it: a file owned by neither the host's account nor root; a file
+  with any group or other permission (`chmod 600`, which `age-keygen -o` already sets; the one
+  exception is a root-owned file in group root, readable by that group, as systemd's credential
+  store writes it); and a directory holding the file that is owned by neither, or that group or
+  others can write without the sticky bit (`chmod go-w`). A symbolic link is checked along with
+  the file it reaches, and the directory of each. Directories above the one holding the file are
+  not checked. Other platforms have no such check.
 - **A wrong key opens nothing.** `<state>/key-check.age` is a fixed text sealed to the key,
   written after the first open with it succeeds. An identity that cannot open it is refused
   before anything else is read, so a wrong key never opens an empty layer.
@@ -958,6 +971,11 @@ use ikigai_layers::{Host, Migration, StateKey};
 # std::fs::create_dir_all(&config).unwrap();
 # std::fs::write(dir.join("state.key"), age::secrecy::ExposeSecret::expose_secret(
 #     &age::x25519::Identity::generate().to_string())).unwrap();
+# #[cfg(unix)] {
+#     use std::os::unix::fs::PermissionsExt;
+#     std::fs::set_permissions(dir.join("state.key"), std::fs::Permissions::from_mode(0o600)).unwrap();
+#     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+# }
 let key = StateKey::load(dir.join("state.key")).expect("an age identity file");
 // Once, over a directory a host before 0.3.0 wrote (or to rotate the key):
 let host = Host::open_with(&config, &state, &key, Migration::Reseal).expect("sealed in place");

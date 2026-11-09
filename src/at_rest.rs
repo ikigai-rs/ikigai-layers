@@ -21,6 +21,9 @@
 //! keep the old one after it, open the host once with [`Migration::Reseal`] (every file sealed
 //! only to an older identity is sealed again, to the new one), then drop the old line.
 //!
+//! On unix the file and the directory holding it must be closed to every other account
+//! ([`StateKey::load`]): `age-keygen -o` writes a file that is.
+//!
 //! What this does NOT protect against: the running host itself, which must read entries to
 //! validate them and evaluate matches, and anyone who holds the identity file. End-to-end
 //! sealing is separate work (ledger #2013).
@@ -35,6 +38,11 @@
 //! // An operator runs `age-keygen -o state.key`; this writes the same file.
 //! std::fs::write(&path, format!("# created by age-keygen\n{}\n",
 //!     ExposeSecret::expose_secret(&Identity::generate().to_string()))).unwrap();
+//! # #[cfg(unix)] {
+//! #     use std::os::unix::fs::PermissionsExt;
+//! #     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+//! #     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+//! # }
 //! let key = StateKey::load(&path).expect("an age identity file");
 //! assert!(key.recipient().starts_with("age1"));
 //! // A missing identity is refused, naming the path, never an empty layer.
@@ -113,6 +121,13 @@ impl StateKey {
     /// and `#` comments skipped, the first the current identity. Refused, naming the path and
     /// never echoing a line of it: a file that does not exist, cannot be read or holds no
     /// identity, and a line that is not an X25519 age identity (by its number).
+    ///
+    /// On unix, also refused before a byte of it is read, with the command that fixes it: a
+    /// file owned by neither this account nor root, a file group or others can reach (a
+    /// root-owned one may be readable by group root, as systemd's credential store writes
+    /// it), and a directory holding it that is owned by neither, or that group or others can
+    /// write without the sticky bit. A symbolic link is checked as well as the file it
+    /// reaches, with the directory of each.
     pub fn load(path: impl AsRef<Path>) -> Result<StateKey, ConfigError> {
         let path = path.as_ref();
         let refuse = |why: String| {
@@ -122,16 +137,17 @@ impl StateKey {
                 path.display()
             ))
         };
+        let mut file = File::open(path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => refuse(
+                "does not exist (an age identity file, as `age-keygen -o` writes one)".to_string(),
+            ),
+            _ => refuse(format!("cannot be read ({e})")),
+        })?;
+        #[cfg(unix)]
+        check_key_access(path, &file).map_err(refuse)?;
         let mut text = String::new();
-        File::open(path)
-            .and_then(|mut file| file.read_to_string(&mut text))
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => refuse(
-                    "does not exist (an age identity file, as `age-keygen -o` writes one)"
-                        .to_string(),
-                ),
-                _ => refuse(format!("cannot be read ({e})")),
-            })?;
+        file.read_to_string(&mut text)
+            .map_err(|e| refuse(format!("cannot be read ({e})")))?;
         let identities = ikigai_encrypt::age::parse_identities(&text).map_err(|e| match e {
             ikigai_encrypt::age::Error::BadKey { line, detail } => refuse(format!(
                 "line {line} is not an X25519 age identity ({detail})"
@@ -159,6 +175,145 @@ impl StateKey {
     /// The current recipient (`age1…`): what every file is sealed to now.
     pub fn recipient(&self) -> String {
         self.0.recipient.to_string()
+    }
+}
+
+/// Who a file or directory belongs to and its permission bits.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct Access {
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+#[cfg(unix)]
+impl Access {
+    fn of(meta: &std::fs::Metadata) -> Access {
+        use std::os::unix::fs::MetadataExt;
+        Access {
+            uid: meta.uid(),
+            gid: meta.gid(),
+            mode: meta.mode() & 0o7777,
+        }
+    }
+
+    /// Owned by this account or by root, the only accounts a key may depend on.
+    fn trusted_owner(self, me: u32) -> bool {
+        self.uid == me || self.uid == 0
+    }
+}
+
+/// The refusal for an identity file open to another account, if it is. `file` is the opened
+/// file's own attributes, so what is checked is what is read.
+#[cfg(unix)]
+fn key_file_refusal(path: &Path, file: Access, me: u32) -> Option<String> {
+    let word = shell_word(path);
+    let fix = if file.uid == me {
+        format!("`chmod 600 {word}`")
+    } else {
+        format!("`chown {me} {word}` and `chmod 600 {word}`")
+    };
+    if !file.trusted_owner(me) {
+        return Some(format!(
+            "is owned by uid {}, not by this account (uid {me}) or root: run {fix}",
+            file.uid
+        ));
+    }
+    // systemd's credential store leaves a root-owned file whose group bits are the mask of
+    // the ACL naming the service.
+    let group_read_ok = file.uid == 0 && file.gid == 0 && file.mode & 0o020 == 0;
+    let closed = if group_read_ok { 0o007 } else { 0o077 };
+    (file.mode & closed != 0).then(|| {
+        format!(
+            "has mode {:04o}, which another account could read or write: run {fix}",
+            file.mode
+        )
+    })
+}
+
+/// The refusal for a directory holding an identity file, if another account could change
+/// what it holds.
+#[cfg(unix)]
+fn key_dir_refusal(dir: &Path, access: Access, me: u32) -> Option<String> {
+    let word = shell_word(dir);
+    if !access.trusted_owner(me) {
+        return Some(format!(
+            "is in directory {}, owned by uid {}, not by this account (uid {me}) or root: run \
+             `chown {me} {word}`",
+            dir.display(),
+            access.uid
+        ));
+    }
+    let sticky = access.mode & 0o1000 != 0;
+    (access.mode & 0o022 != 0 && !sticky).then(|| {
+        format!(
+            "is in directory {}, mode {:04o}, which another account could write: run \
+             `chmod go-w {word}`",
+            dir.display(),
+            access.mode
+        )
+    })
+}
+
+/// Refuse the opened identity file at `path` if another account could read or replace it.
+#[cfg(unix)]
+fn check_key_access(path: &Path, file: &File) -> Result<(), String> {
+    let unchecked = |e: std::io::Error| format!("cannot be checked ({e})");
+    let me = rustix::process::geteuid().as_raw();
+    let opened = file.metadata().map_err(unchecked)?;
+    // Reading a directory fails, and says so.
+    if opened.is_dir() {
+        return Ok(());
+    }
+    if let Some(why) = key_file_refusal(path, Access::of(&opened), me) {
+        return Err(why);
+    }
+    let mut dirs = vec![holding_dir(path)];
+    let entry = std::fs::symlink_metadata(path).map_err(unchecked)?;
+    if entry.is_symlink() {
+        let link = Access::of(&entry);
+        if !link.trusted_owner(me) {
+            return Err(format!(
+                "is a symbolic link owned by uid {}, not by this account (uid {me}) or root: \
+                 replace it with a link this account owns",
+                link.uid
+            ));
+        }
+        // A pipe handed over as `/dev/fd/N` resolves to no path.
+        if opened.is_file() {
+            dirs.push(holding_dir(&path.canonicalize().map_err(unchecked)?));
+        }
+    }
+    for dir in dirs {
+        let access = Access::of(&std::fs::metadata(&dir).map_err(unchecked)?);
+        if let Some(why) = key_dir_refusal(&dir, access, me) {
+            return Err(why);
+        }
+    }
+    Ok(())
+}
+
+/// The directory `path` names its entry in; a bare file name is in the current one.
+#[cfg(unix)]
+fn holding_dir(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// `path` as one shell word: as it is when that is safe to paste, else single-quoted.
+#[cfg(unix)]
+fn shell_word(path: &Path) -> String {
+    let text = path.display().to_string();
+    if text
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"/._-+=:@,".contains(&b))
+    {
+        text
+    } else {
+        format!("'{}'", text.replace('\'', r"'\''"))
     }
 }
 
@@ -498,5 +653,63 @@ mod tests {
         assert!(feed_is_plaintext(
             "1\t2026-10-10T00:00:00Z\tsay\turn:x\turn:y\n"
         ));
+    }
+
+    #[cfg(unix)]
+    const ME: u32 = 1000;
+
+    #[cfg(unix)]
+    fn file_refused(uid: u32, gid: u32, mode: u32) -> Option<String> {
+        key_file_refusal(Path::new("/k/state.key"), Access { uid, gid, mode }, ME)
+    }
+
+    #[cfg(unix)]
+    fn dir_refused(uid: u32, mode: u32) -> Option<String> {
+        let access = Access {
+            uid,
+            gid: uid,
+            mode,
+        };
+        key_dir_refusal(Path::new("/k"), access, ME)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_key_is_refused_unless_its_owner_is_this_account_or_root() {
+        assert!(file_refused(ME, ME, 0o600).is_none());
+        assert!(file_refused(0, 0, 0o400).is_none());
+        let other = file_refused(1001, ME, 0o600).unwrap();
+        assert!(other.contains("uid 1001"), "{other}");
+        assert!(
+            other.contains("`chown 1000 /k/state.key` and `chmod 600 /k/state.key`"),
+            "{other}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_root_owned_key_may_be_readable_by_group_root() {
+        // What systemd's credential store leaves.
+        assert!(file_refused(0, 0, 0o440).is_none());
+        for (uid, gid, mode) in [
+            (0, 1001, 0o440),
+            (ME, 0, 0o640),
+            (0, 0, 0o460),
+            (0, 0, 0o444),
+        ] {
+            let refused = file_refused(uid, gid, mode).unwrap();
+            assert!(refused.contains("chmod 600"), "{refused}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_key_directory_is_refused_unless_only_its_owner_can_change_it() {
+        assert!(dir_refused(0, 0o755).is_none());
+        assert!(dir_refused(ME, 0o700).is_none());
+        assert!(dir_refused(0, 0o1777).is_none());
+        assert!(dir_refused(0, 0o775).unwrap().contains("`chmod go-w /k`"));
+        let other = dir_refused(1001, 0o1777).unwrap();
+        assert!(other.contains("`chown 1000 /k`"), "{other}");
     }
 }

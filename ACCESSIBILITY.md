@@ -51,6 +51,10 @@ repository's.
   joined, and an identity that has lapsed (which says it may join again). No answer, refusal or
   diagnostic names a source address, and a door whose system cannot supply randomness gets the
   error ``the hourly key for source addresses cannot be drawn: …`` from `door_capability`.
+- **The state key's refusals** (`src/at_rest.rs`): ``the state identity <path>: …`` says what
+  is wrong (does not exist, cannot be read, a bad line by its number, or, on unix, an owner or
+  mode another account could use) and, for an owner or a mode, the `chmod` or `chown` to run,
+  with the path quoted when it needs to be. No refusal echoes a line of the file.
 - **The operator's join count** (`src/onboard/join.rs`, `urn:layers:join:count`): three labeled
   lines as `text/plain` (``joined <count>``, ``read-in-7-days <count>``, ``read-in-30-days
   <count>``), and the same as JSON, where a count under 5 reads `fewer than 5`.
@@ -116,6 +120,10 @@ Verified by reading the source:
   (`the_count_answers_three_numbers_and_nothing_else`,
   `a_count_under_five_is_reported_as_fewer_than_five`,
   `an_unknown_face_of_the_count_is_refused`).
+- `tests/at_rest.rs` pins the state key's refusals
+  (`a_key_another_account_can_read_or_write_is_refused_naming_the_chmod`,
+  `a_key_in_a_directory_another_account_can_write_is_refused_naming_the_chmod`,
+  `a_path_with_a_space_is_quoted_in_the_chmod`).
 
 These test wording and exit codes for correctness; none was written as an accessibility test.
 **No automated accessibility checker, browser or assistive technology has been used on this
@@ -165,3 +173,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-08 | The error when the join's hourly address key cannot be drawn; no output names an address. |
 | 2026-11-08 | The operator's join count: labeled lines and a JSON face. |
 | 2026-11-08 | The per-address join refusal says an IPv6 network counts as one address. |
+| 2026-11-09 | The state key's refusals, with the owner and mode ones naming the command to run. |

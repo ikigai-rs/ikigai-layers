@@ -432,12 +432,16 @@ fn a_missing_or_malformed_identity_is_refused_naming_it() {
         "{missing}"
     );
     dir.write("empty.key", "# nothing here\n\n");
+    #[cfg(unix)]
+    set_mode(&dir.path().join("empty.key"), 0o600);
     let empty = StateKey::load(dir.path().join("empty.key")).unwrap_err().0;
     assert!(empty.contains("holds no age identity"), "{empty}");
     dir.write(
         "bad.key",
         "# a comment\nAGE-SECRET-KEY-1NOTAREALKEYATALLBUTSECRETLOOKING\n",
     );
+    #[cfg(unix)]
+    set_mode(&dir.path().join("bad.key"), 0o600);
     let bad = StateKey::load(dir.path().join("bad.key")).unwrap_err().0;
     assert!(bad.contains("line 2"), "{bad}");
     assert!(
@@ -476,6 +480,104 @@ fn a_new_key_is_rotated_in_and_the_old_one_dropped() {
     let refused = refusal(open_with(&f, &key(f.config.path()), Migration::None));
     assert!(refused.contains("does not open"), "{refused}");
     drop(parked);
+}
+
+/// A scratch directory holding a valid identity file at `state.key`, `0600` in a `0700`
+/// directory, and the file's path and secret line.
+#[cfg(unix)]
+fn private_key(label: &str) -> (Scratch, PathBuf, String) {
+    use age::secrecy::ExposeSecret;
+    let dir = Scratch::new(label);
+    let identity = age::x25519::Identity::generate();
+    let path = dir.path().join("state.key");
+    write_identity(&path, &identity);
+    let secret = identity.to_string().expose_secret().to_string();
+    (dir, path, secret)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_key_another_account_can_read_or_write_is_refused_naming_the_chmod() {
+    let (_dir, path, secret) = private_key("key-mode");
+    for mode in [0o644, 0o640, 0o604, 0o660, 0o620, 0o602, 0o666] {
+        set_mode(&path, mode);
+        let refused = StateKey::load(&path).unwrap_err().0;
+        assert!(
+            refused.contains(&format!("mode {mode:04o}"))
+                && refused.contains(&format!("`chmod 600 {}`", path.display())),
+            "{refused}"
+        );
+        assert!(!refused.contains(&secret), "never echoed: {refused}");
+    }
+    for mode in [0o600, 0o400] {
+        set_mode(&path, mode);
+        StateKey::load(&path).expect("a key only its owner can reach");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_key_in_a_directory_another_account_can_write_is_refused_naming_the_chmod() {
+    let (dir, path, _) = private_key("key-dir");
+    for mode in [0o770, 0o775, 0o707, 0o777] {
+        set_mode(dir.path(), mode);
+        let refused = StateKey::load(&path).unwrap_err().0;
+        assert!(
+            refused.contains(&format!("mode {mode:04o}"))
+                && refused.contains(&format!("`chmod go-w {}`", dir.path().display())),
+            "{refused}"
+        );
+    }
+    // Reading a directory lists names only, and the sticky bit keeps others from replacing
+    // what they do not own (`/dev/shm`, say).
+    for mode in [0o700, 0o750, 0o755, 0o1777] {
+        set_mode(dir.path(), mode);
+        StateKey::load(&path).expect("a directory only its owner can change");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_key_is_checked_where_it_lands() {
+    let (target, path, _) = private_key("key-target");
+    let links = Scratch::new("key-link");
+    let link = links.path().join("state.key");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    StateKey::load(&link).expect("a link to a private key");
+
+    set_mode(&path, 0o644);
+    let refused = StateKey::load(&link).unwrap_err().0;
+    assert!(refused.contains("mode 0644"), "{refused}");
+    set_mode(&path, 0o600);
+
+    set_mode(target.path(), 0o777);
+    let refused = StateKey::load(&link).unwrap_err().0;
+    assert!(
+        refused.contains(&format!("`chmod go-w {}`", target.path().display())),
+        "{refused}"
+    );
+    set_mode(target.path(), 0o700);
+
+    set_mode(links.path(), 0o777);
+    let refused = StateKey::load(&link).unwrap_err().0;
+    assert!(
+        refused.contains(&format!("`chmod go-w {}`", links.path().display())),
+        "{refused}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_path_with_a_space_is_quoted_in_the_chmod() {
+    let dir = Scratch::new("key-quoted");
+    let path = dir.path().join("my state.key");
+    write_identity(&path, &age::x25519::Identity::generate());
+    set_mode(&path, 0o644);
+    let refused = StateKey::load(&path).unwrap_err().0;
+    assert!(
+        refused.contains(&format!("`chmod 600 '{}'`", path.display())),
+        "{refused}"
+    );
 }
 
 #[cfg(unix)]
