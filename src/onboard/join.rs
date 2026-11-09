@@ -27,6 +27,9 @@
 //! **No address is kept** (ledger #3307). A source address is counted by its HMAC-SHA256 under
 //! a random key held only in memory and replaced every hour, so a hash is comparable only with
 //! others of its own hour, and once the key is gone nothing links it to an address.
+//!
+//! **A read is kept to the day** (ledger #3308). An identity's record says which UTC day it last
+//! read, written at most once a day, which is all its expiry needs.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -71,9 +74,6 @@ const HOST_KEY: &str = "urn:layer:onboard:join-host-key";
 const SIGN: &str = "urn:sign:sign";
 const WINDOW_MILLIS: u64 = 60 * 60 * 1000;
 const DAY_MILLIS: u64 = 24 * WINDOW_MILLIS;
-/// How often a read is written to an identity's record: expiry counts days, so an hour's loss
-/// to a crash changes nothing, and a reader's every read does not write a file.
-const READ_PERSIST_MILLIS: u64 = WINDOW_MILLIS;
 /// The most connections the host remembers a source hash for: a stranger who connects and
 /// never joins cannot grow this without bound, and losing an entry loses only the per-address
 /// count for that connection.
@@ -88,7 +88,9 @@ struct Identity {
     /// The layers it may read, sorted.
     layers: Vec<String>,
     joined_at: u64,
-    /// The last read recorded, within [`READ_PERSIST_MILLIS`] of the last read.
+    /// The UTC midnight that began the day of the last read (see [`day_of`]), or of the join
+    /// before any read. A file written before ledger #3308 holds a later instant of that day,
+    /// and is rounded and rewritten at open.
     last_read: u64,
     certificate: String,
 }
@@ -104,10 +106,19 @@ impl Identity {
         caps
     }
 
+    /// Counted from the day of the last read, or from the join itself when no later day has
+    /// been read, so that an identity never read lapses exactly when its `onb:expires` says.
     fn lapsed(&self, now: u64, idle_days: u64) -> bool {
         now.saturating_sub(self.last_read.max(self.joined_at))
             >= idle_days.saturating_mul(DAY_MILLIS)
     }
+}
+
+/// The UTC midnight that began the day of `millis`. A day is all the idle expiry needs, so it
+/// is all a record keeps of a read (ledger #3308), and a reader's every read does not write a
+/// file.
+fn day_of(millis: u64) -> u64 {
+    millis - millis % DAY_MILLIS
 }
 
 /// One counted attempt at the join lobby.
@@ -396,7 +407,7 @@ impl Join {
             }
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("read {}: {e}", path.display()))?;
-            let identity: Identity =
+            let mut identity: Identity =
                 serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
             if stem.as_deref() != Some(identity.fingerprint.as_str())
@@ -411,6 +422,14 @@ impl Join {
                     path.display(),
                     identity.fingerprint
                 ));
+            }
+            // Rewritten here, so a file from before ledger #3308 gives up its hour at the
+            // first open and not at the next read, which may never come.
+            let day = day_of(identity.last_read);
+            if day != identity.last_read {
+                identity.last_read = day;
+                let record = serde_json::to_string(&identity).expect("a plain record");
+                at_rest::replace(&path, record.as_bytes())?;
             }
             identities.insert(identity.fingerprint.clone(), identity);
         }
@@ -579,8 +598,9 @@ impl Join {
                  and holds nothing now: it may join again"
             )));
         }
-        if now.as_millis().saturating_sub(identity.last_read) >= READ_PERSIST_MILLIS {
-            identity.last_read = now.as_millis();
+        let today = day_of(now.as_millis());
+        if today > identity.last_read {
+            identity.last_read = today;
             let record = serde_json::to_string(identity).expect("a plain record");
             let path = self.record_path(fingerprint, "json");
             if let Err(e) = at_rest::replace(&path, record.as_bytes()) {
@@ -756,7 +776,7 @@ impl Join {
             entitlement: iri.clone(),
             layers: layers.to_vec(),
             joined_at: now.as_millis(),
-            last_read: now.as_millis(),
+            last_read: day_of(now.as_millis()),
             certificate: certificate.to_string(),
         };
         let mut state = self.state.lock().expect("join lock");
