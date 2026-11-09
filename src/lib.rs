@@ -170,3 +170,7 @@ pub use host::Host;
 #[cfg(all(doctest, feature = "host"))]
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;
+
+// Let shared test fixtures name this crate from unit tests as well as integration tests.
+#[cfg(all(test, feature = "host"))]
+extern crate self as ikigai_layers;
