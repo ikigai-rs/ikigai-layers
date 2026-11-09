@@ -13,6 +13,7 @@ use crate::feed::{self, Event, FeedLog, Notify};
 use crate::feeds::FeedShare;
 use crate::json::{egress_context, Egress};
 use crate::onboard::apply::{LobbyRate, Onboard};
+use crate::onboard::join::{self, Join};
 use crate::tuplespace::Tuplespace;
 use ikigai_store::budget::EvaluationBudget;
 
@@ -116,6 +117,8 @@ pub struct Host {
     feeds: FeedShare,
     /// Onboarding (ledger #2009): the `[onboard]` table, when `layers.toml` has one.
     onboard: Option<Onboard>,
+    /// The public join (ledger #3290), when a layer says `join = "public"`.
+    join: Option<Join>,
     /// Every lobby's rate of says.
     lobby_rate: LobbyRate,
     /// Held, never read: the state directory's lock lives exactly as long as the host.
@@ -164,6 +167,7 @@ impl Host {
             config::check_controller_says(onboard, &config.collabs)?;
         }
         let onboard = onboard.map(Onboard::new);
+        let join_config = config::load_join(&config.dir, &config.layers)?;
         let json = Egress::new();
         let mut egress = BTreeMap::new();
         for (name, def) in &config.layers {
@@ -181,6 +185,25 @@ impl Host {
             refuse_plaintext(state_dir, config.layers.keys()).map_err(ConfigError)?;
         }
         let sealer = Sealer::new(key);
+        let opened_at = ikigai_core::Time::from_millis(system_millis());
+        let join = join_config
+            .map(|join| {
+                Join::load(
+                    join,
+                    &config.dir,
+                    state_dir,
+                    &sealer,
+                    migration == Migration::Reseal,
+                    opened_at,
+                )
+                .map_err(|e| ConfigError(format!("the public join: {e}")))
+            })
+            .transpose()?;
+        if let Some(join) = &join {
+            futures::executor::block_on(join.probe()).map_err(|e| {
+                ConfigError(format!("`join.host_key` cannot sign an entitlement: {e}"))
+            })?;
+        }
         let mut layers = BTreeMap::new();
         for (name, def) in config.layers {
             let dir = state_dir.join(&name);
@@ -214,16 +237,14 @@ impl Host {
                 json,
                 feeds,
                 onboard,
+                join,
                 lobby_rate: LobbyRate::default(),
                 _lock: lock,
             }
         });
         // Catch up on the grants layer: an entitlement said while no host ran is applied now,
         // and one already applied changes nothing (ledger #2009).
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-        futures::executor::block_on(host.apply_entitlements(ikigai_core::Time::from_millis(now)));
+        futures::executor::block_on(host.apply_entitlements(opened_at));
         Ok(host)
     }
 
@@ -254,11 +275,55 @@ impl Host {
     /// Set `[onboard]`'s `trust_dir` to the door's `<quic cert dir>/clients`, so an applied
     /// entitlement installs the certificate where the door reads it. Start the door with a
     /// short instance name, e.g. `--name lobby`, for the lobby principal (ledger #2009).
+    ///
+    /// A joined identity, a denied certificate and the rest of [`door_capability`] apply here
+    /// too, with no source address and the system clock.
+    ///
+    /// [`door_capability`]: Self::door_capability
     pub fn lobby_capability(
         &self,
         host: &str,
         fingerprint: &str,
     ) -> Result<Option<ikigai_core::Capability>, String> {
+        self.door_capability(
+            host,
+            fingerprint,
+            None,
+            ikigai_core::Time::from_millis(system_millis()),
+        )
+    }
+
+    /// The capability a door mints at a connection for a certificate its own enrollment does
+    /// not name (ledger #3290): nothing (`Ok(None)`) for a fingerprint on the deny list or on
+    /// a host with no lobby; `read` and `feed` on its public layers for a live joined
+    /// identity, and it can do nothing else; `say` on every lobby otherwise. An identity past
+    /// its idle limit lapses here, its certificate leaves the trust set, and it is a stranger
+    /// again.
+    ///
+    /// `source` is the connection's address, where the door knows it, and is what the
+    /// per-address join limit counts; `now` decides expiry.
+    pub fn door_capability(
+        &self,
+        host: &str,
+        fingerprint: &str,
+        source: Option<&str>,
+        now: ikigai_core::Time,
+    ) -> Result<Option<ikigai_core::Capability>, String> {
+        let fp = crate::name::fold_fingerprint(fingerprint).ok_or_else(|| {
+            format!("`{fingerprint}` is not a SHA-256 fingerprint (64 hex digits)")
+        })?;
+        let (denied, problem) = join::read_deny(&self.config_dir);
+        if denied.contains(&fp) {
+            return Ok(None);
+        }
+        if let Some(problem) = problem {
+            return Err(problem);
+        }
+        if let Some(join) = &self.join {
+            if let Some(capability) = join.connect(&fp, source, now)? {
+                return Ok(Some(capability));
+            }
+        }
         let lobbies = self.lobbies();
         if lobbies.is_empty() {
             return Ok(None);
@@ -289,6 +354,34 @@ impl Host {
         if let Some(onboard) = &self.onboard {
             onboard.apply(self, now).await;
         }
+    }
+
+    /// The public join, when the host has one.
+    pub(crate) fn join(&self) -> Option<&Join> {
+        self.join.as_ref()
+    }
+
+    /// The check on every request a certificate's own name makes: a denied fingerprint is
+    /// refused, and a joined identity's read is recorded or its lapse refused. Other
+    /// principals pass, so a participant named some other way is not read from disk here.
+    pub(crate) fn gate(
+        &self,
+        principal: &str,
+        now: Option<ikigai_core::Time>,
+    ) -> ikigai_core::Result<()> {
+        let Some(fp) = crate::name::Participant::parse(principal)
+            .ok()
+            .and_then(|p| p.fingerprint().map(str::to_string))
+        else {
+            return Ok(());
+        };
+        if join::read_deny(&self.config_dir).0.contains(&fp) {
+            return Err(join::denied(&fp));
+        }
+        if let (Some(join), Some(now)) = (&self.join, now) {
+            join.gate(&fp, principal, now)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn lobby_rate(&self) -> &LobbyRate {
@@ -360,6 +453,14 @@ impl Host {
             .collect();
         config::load_collabs(&self.config_dir, &defs, participants)
     }
+}
+
+/// Milliseconds since the epoch, by the system clock: for the moments no kernel clock reaches
+/// (a host opening, a door's connection).
+fn system_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Compile a layer's shapes the way admission will use them, by validating an empty graph

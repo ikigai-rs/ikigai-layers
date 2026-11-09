@@ -887,7 +887,7 @@ pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
 }
 
 /// The controller's public key, served to ikigai-sign's verifier in the host's own kernel.
-struct KeyEndpoint(Vec<u8>);
+pub(crate) struct KeyEndpoint(pub(crate) Vec<u8>);
 
 #[async_trait]
 impl Endpoint for KeyEndpoint {

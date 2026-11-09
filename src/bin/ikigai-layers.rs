@@ -9,11 +9,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use ikigai_layers::grants::derive;
+use ikigai_layers::onboard::join::descriptor;
 use ikigai_layers::onboard::setup::{self, Options};
 
 const USAGE: &str = "usage: ikigai-layers grants <config dir> [--out <dir>] [--check]
        ikigai-layers onboard setup <config dir> --door-dir <dir> --door-name <name>
                      [--controller <participant>] [--controller-key <file>|-] [--check]
+       ikigai-layers descriptor <config dir> --door <quic://host:port> --door-dir <dir> --out <dir>
 
 grants derives the layer door's enrollment from <config dir>'s manifests (collabs/*.toml),
 participants (participants.ttl) and certificate fingerprints (enrollment.toml), and writes
@@ -32,7 +34,11 @@ rewritten), the controller key beside it, and grants.json and clients.json.
   --controller-key  the controller's public key: a PEM file, or - for stdin; the whole output
                     of `ikigai-gonk onboard init` may be piped in
   --check           read-only: report every way a node would be left in the lobby, and exit
-                    non-zero on any";
+                    non-zero on any
+
+descriptor writes layers.json and server.crt into --out, for a host to publish at
+https://<host>/.well-known/ikigai/layers.json: the door's address, the certificate in --door-dir
+and its sha256, the join lobby, and the public layers.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -57,6 +63,7 @@ fn run(args: &[String]) -> Outcome {
         Some("onboard") if args.get(1).map(String::as_str) == Some("setup") => {
             onboard_setup(&args[2..])
         }
+        Some("descriptor") => write_descriptor(&args[1..]),
         Some("-h" | "--help") => {
             println!("{USAGE}");
             Ok(())
@@ -108,6 +115,42 @@ fn grants(args: &[String]) -> Outcome {
         out.join("grants.json").display(),
         out.join("clients.json").display()
     );
+    Ok(())
+}
+
+fn write_descriptor(args: &[String]) -> Outcome {
+    let mut args = args.iter();
+    let (mut dir, mut door, mut door_dir, mut out) = (None, None, None, None);
+    let value = |args: &mut std::slice::Iter<'_, String>, flag: &str| {
+        args.next()
+            .cloned()
+            .ok_or_else(|| (2, format!("{flag} takes a value\n\n{USAGE}")))
+    };
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--door" => door = Some(value(&mut args, arg)?),
+            "--door-dir" => door_dir = Some(PathBuf::from(value(&mut args, arg)?)),
+            "--out" => out = Some(PathBuf::from(value(&mut args, arg)?)),
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
+            flag if flag.starts_with('-') => {
+                return Err((2, format!("unknown flag {flag}\n\n{USAGE}")))
+            }
+            path if dir.is_none() => dir = Some(PathBuf::from(path)),
+            _ => return Err(usage()),
+        }
+    }
+    let dir = dir.ok_or_else(usage)?;
+    let missing = |flag: &str| (2, format!("pass {flag}\n\n{USAGE}"));
+    let door = door.ok_or_else(|| missing("--door <quic://host:port>"))?;
+    let door_dir =
+        door_dir.ok_or_else(|| missing("--door-dir <the door's certificate directory>"))?;
+    let out = out.ok_or_else(|| missing("--out <the directory to write into>"))?;
+    let written = descriptor(&dir, &door, &door_dir).map_err(|e| (1, e))?;
+    let (json, crt) = written.write(&out).map_err(|e| (1, e))?;
+    println!("wrote {} and {}", json.display(), crt.display());
     Ok(())
 }
 
