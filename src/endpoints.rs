@@ -19,6 +19,7 @@
 //! urn:layer:{layer}:receipt:{id}   Source  layer-{layer}-receipt     urn:cap:layer:read:{layer}
 //! urn:layers:feed                  Source  layers-feed               urn:cap:layer:feed:*  (+ exact per layer)
 //! urn:layers:participants          Source  layers-participants       urn:cap:layers:read:participants
+//! urn:layers:join:count            Source  layers-join-count         urn:cap:layers:read:join-count  (a host with a join)
 //! urn:layers:me                    Source  layers-me                 urn:cap:collab:read:*  (any participant grant)
 //! urn:collab:{name}                Source  collab                    urn:cap:collab:read:* (+ exact per manifest)
 //! urn:collab:{name}:participants   Source  collab-participants       urn:cap:collab:read:* (+ exact per manifest)
@@ -86,6 +87,14 @@ pub const VALIDATE: &str = "urn:shacl:validate";
 /// `urn:cap:collab:read:{name}` every generated grant already carries (ledger #1282).
 pub const CAP_PARTICIPANTS: &str = "urn:cap:layers:read:participants";
 
+/// `urn:layers:join:count`: the operator's aggregate count of joined readers (ledger #3309).
+pub const JOIN_COUNT: &str = "urn:layers:join:count";
+
+/// The capability that reads [`JOIN_COUNT`]. Not generated for anyone, and a joined identity
+/// holds read and feed on public layers only, so this is the operator's (root's): the feeds
+/// carry no reader counts.
+pub const CAP_JOIN_COUNT: &str = "urn:cap:layers:read:join-count";
+
 /// `urn:layers:me`: who the door says the caller is.
 pub const ME: &str = "urn:layers:me";
 
@@ -129,6 +138,14 @@ pub fn space(host: &Arc<Host>) -> EndpointSpace {
             StatusEndpoint {
                 host: Arc::clone(host),
                 cap: layer_cap("say", &config.grants),
+            },
+        );
+    }
+    if host.join().is_some() {
+        space = space.bind(
+            Exact::new(JOIN_COUNT),
+            JoinCount {
+                host: Arc::clone(host),
             },
         );
     }
@@ -2541,6 +2558,54 @@ impl Endpoint for ParticipantsEndpoint {
             .verb(Verb::Meta)
             .requires(CAP_PARTICIPANTS)
             .output(TURTLE)
+    }
+}
+
+/// `urn:layers:join:count`: three aggregate numbers about the joined readers, bound only on a
+/// host with a join. Read from the host's records on every request, so never cached.
+struct JoinCount {
+    host: Arc<Host>,
+}
+
+#[async_trait]
+impl Endpoint for JoinCount {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let as_json = face(inv, &[TEXT, JSON])? == JSON;
+        let now = inv.now().ok_or_else(|| {
+            Error::Endpoint(
+                "this host gives the kernel no clock, and the join count is taken as of today"
+                    .into(),
+            )
+        })?;
+        let counts = self.host.join().expect("bound with a join").counts(now);
+        Ok(if as_json {
+            json_repr(counts.json())
+        } else {
+            Representation::new(ReprType::new(TEXT), counts.text().into_bytes())
+        })
+    }
+
+    fn name(&self) -> &str {
+        "layers-join-count"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("layers-join-count")
+            .title("Joined reader count")
+            .summary(
+                "Three aggregate numbers, the operator's alone: the live joined identities, \
+                 and those with a read in the last 7 and in the last 30 UTC days (a join \
+                 counts as a read on its day). A count under 5, zero included, reads `fewer \
+                 than 5`. The numbers are upper bounds on people, since one person may hold \
+                 several certificates, and collaborators' enrolled identities are not \
+                 counted, since their reads are not recorded",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(CAP_JOIN_COUNT)
+            .input(as_spec(&[TEXT, JSON]))
+            .output(TEXT)
+            .output(JSON)
     }
 }
 

@@ -20,8 +20,9 @@ use ikigai_core::{
     ArgRef, Capability, Clock, Description, Endpoint, EndpointSpace, Error, Exact, Fallback,
     Invocation, Iri, Kernel, ReprType, Representation, Request, Space, Time, Verb,
 };
+use ikigai_layers::grants::{generate, load_fingerprints};
 use ikigai_layers::onboard::{fingerprint_of_pem, signing_bytes_of};
-use ikigai_layers::Host;
+use ikigai_layers::{Config, Host};
 use sha2::Digest as _;
 
 const DOOR: &str = "edge";
@@ -1390,4 +1391,238 @@ fn the_descriptor_refuses_a_bad_address_and_a_host_with_nothing_to_offer() {
     let none = run_descriptor(&config, &door_dir, &out);
     assert_eq!(none.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&none.stderr).contains("no layer says `join"));
+}
+
+// The operator's count (ledger #3309).
+
+const COUNT: &str = "urn:layers:join:count";
+const COUNT_CAP: &str = "urn:cap:layers:read:join-count";
+const FEWER: &str = "fewer than 5";
+
+/// The count's JSON face at `millis`, read as the operator.
+fn count_at(d: &Door, millis: u64) -> serde_json::Value {
+    let answer = source(
+        &d.at(millis),
+        COUNT,
+        &[("as", "application/json")],
+        &Capability::root(),
+    );
+    serde_json::from_str(&answer).expect("a JSON answer")
+}
+
+/// `how_many` certificates named `{group}{n}` joined at `T0`, each a capability to read with.
+fn joined(d: &Door, group: &str, how_many: usize) -> Vec<Capability> {
+    (0..how_many)
+        .map(|n| {
+            let name = format!("{group}{n}");
+            let (_, fp) = certificate(&name);
+            join(d, &name, &["releases"]).expect("joined");
+            d.minted(&fp)
+        })
+        .collect()
+}
+
+fn count_of(
+    joined: impl Into<serde_json::Value>,
+    week: impl Into<serde_json::Value>,
+    month: impl Into<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "joined": joined.into(),
+        "readIn7Days": week.into(),
+        "readIn30Days": month.into(),
+    })
+}
+
+#[test]
+fn the_count_answers_three_numbers_and_nothing_else() {
+    let d = door();
+    let readers = joined(&d, "reader", 6);
+    assert_eq!(count_at(&d, T0), count_of(6, 6, 6));
+
+    let plain = source(&d.at(T0), COUNT, &[], &Capability::root());
+    assert_eq!(
+        plain, "joined 6\nread-in-7-days 6\nread-in-30-days 6\n",
+        "one labeled line per number"
+    );
+    for held in &readers {
+        let fp = held.principal().unwrap().rsplit(':').next().unwrap();
+        assert!(!plain.contains(fp), "{plain}");
+    }
+}
+
+#[test]
+fn a_count_under_five_is_reported_as_fewer_than_five() {
+    let d = door();
+    // Nobody at all reads the same as one reader: zero is under the threshold too.
+    assert_eq!(count_at(&d, T0), count_of(FEWER, FEWER, FEWER));
+    joined(&d, "one", 1);
+    assert_eq!(count_at(&d, T0), count_of(FEWER, FEWER, FEWER));
+    assert_eq!(
+        source(&d.at(T0), COUNT, &[], &Capability::root()),
+        "joined fewer than 5\nread-in-7-days fewer than 5\nread-in-30-days fewer than 5\n"
+    );
+    joined(&d, "more", 3);
+    assert_eq!(count_at(&d, T0), count_of(FEWER, FEWER, FEWER));
+    joined(&d, "last", 1);
+    assert_eq!(
+        count_at(&d, T0),
+        count_of(5, 5, 5),
+        "five is the first exact number"
+    );
+}
+
+#[test]
+fn each_window_counts_the_utc_days_ending_today() {
+    let d = door();
+    let this_week = joined(&d, "week", 5);
+    let last_seen_seven_days_ago = joined(&d, "seven", 6);
+    let this_month = joined(&d, "month", 5);
+    // Never read after the join day, which is thirty days old by `today`.
+    joined(&d, "thirty", 5);
+    let today = T0 + 30 * DAY;
+    for held in &this_week {
+        read_at(&d, held, today - 6 * DAY + 23 * HOUR);
+    }
+    for held in &last_seen_seven_days_ago {
+        read_at(&d, held, today - 7 * DAY + 23 * HOUR);
+    }
+    for held in &this_month {
+        read_at(&d, held, today - 29 * DAY);
+    }
+
+    // The first and the last instant of the day read the same: a record holds only the day.
+    for now in [today, today + DAY - 1] {
+        assert_eq!(count_at(&d, now), count_of(21, 5, 16), "at {now}");
+    }
+    // The next midnight, those read six days ago are seven days old.
+    assert_eq!(count_at(&d, today + DAY), count_of(21, FEWER, 11));
+}
+
+#[test]
+fn a_join_counts_as_a_read_on_its_day() {
+    let d = door();
+    // A record cannot tell a join day with no read from a join day with one.
+    joined(&d, "reader", 5);
+    assert_eq!(count_at(&d, T0 + 6 * DAY), count_of(5, 5, 5));
+    assert_eq!(count_at(&d, T0 + 7 * DAY), count_of(5, FEWER, 5));
+    assert_eq!(count_at(&d, T0 + 30 * DAY), count_of(5, FEWER, FEWER));
+}
+
+#[test]
+fn a_lapsed_identity_is_not_counted() {
+    let d = door_with("join_idle_days = 10\n");
+    let readers = joined(&d, "reader", 6);
+    let stays = &readers[..5];
+    for held in stays {
+        read_at(&d, held, T0 + 9 * DAY);
+    }
+    assert_eq!(count_at(&d, T0 + 9 * DAY), count_of(6, 5, 6));
+    // The sixth lapsed ten days after its join, and no request has told the host so yet.
+    assert_eq!(count_at(&d, T0 + 10 * DAY + HOUR), count_of(5, 5, 5));
+}
+
+#[test]
+fn reading_the_count_writes_nothing_and_a_restart_keeps_it() {
+    let mut d = door();
+    joined(&d, "reader", 5);
+    let (_, fp) = certificate("reader0");
+    let before = record(&d, &fp);
+    count_at(&d, T0 + 40 * DAY);
+    assert_eq!(
+        record(&d, &fp),
+        before,
+        "the count reads the records and never moves one"
+    );
+    d.restart();
+    assert_eq!(count_at(&d, T0), count_of(5, 5, 5));
+}
+
+#[test]
+fn a_joined_identity_and_a_collaborators_grant_are_denied_the_count() {
+    let d = door();
+    joined(&d, "reader", 5);
+    let (_, fp) = certificate("reader0");
+    let asks = [vec![], vec![("as", "application/json")]];
+    for args in &asks {
+        let refused = issue(&d.kernel, Verb::Source, COUNT, args, &d.minted(&fp));
+        assert!(matches!(refused, Err(Error::Denied(_))), "{refused:?}");
+    }
+
+    let loaded = Config::load(d.config.path()).unwrap();
+    let fingerprints = load_fingerprints(d.config.path(), &loaded).unwrap();
+    let enrollment = generate(&loaded, &fingerprints).unwrap();
+    assert!(!enrollment.grants.is_empty());
+    for (slug, scopes) in &enrollment.grants {
+        assert!(!scopes.iter().any(|s| s == COUNT_CAP), "{slug}: {scopes:?}");
+        let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
+        let refused = issue(
+            &d.kernel,
+            Verb::Source,
+            COUNT,
+            &[],
+            &cap(&participant(slug), &scopes),
+        );
+        assert!(
+            matches!(refused, Err(Error::Denied(_))),
+            "{slug}: {refused:?}"
+        );
+    }
+}
+
+#[test]
+fn its_own_capability_reads_the_count() {
+    let d = door();
+    joined(&d, "reader", 5);
+    assert_eq!(
+        source(&d.kernel, COUNT, &[], &Capability::scoped([COUNT_CAP])),
+        "joined 5\nread-in-7-days 5\nread-in-30-days 5\n"
+    );
+}
+
+#[test]
+fn a_host_with_no_join_has_no_count() {
+    let f = fixture();
+    let missing = issue(&f.kernel, Verb::Source, COUNT, &[], &Capability::root());
+    assert!(matches!(missing, Err(Error::Unresolved(_))), "{missing:?}");
+}
+
+#[test]
+fn an_unknown_face_of_the_count_is_refused() {
+    let d = door();
+    let refused = issue(
+        &d.kernel,
+        Verb::Source,
+        COUNT,
+        &[("as", "text/turtle")],
+        &Capability::root(),
+    );
+    match refused {
+        Err(Error::InvalidArgument { name, .. }) => assert_eq!(name, "as"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_counts_description_says_what_the_numbers_are_not() {
+    let d = door();
+    let meta = issue(
+        &d.kernel,
+        Verb::Meta,
+        COUNT,
+        &[("as", "application/json")],
+        &Capability::root(),
+    )
+    .expect("a description");
+    let json: serde_json::Value = serde_json::from_slice(&meta.bytes).unwrap();
+    let described = json.to_string();
+    for phrase in [
+        "upper bounds on people",
+        "several certificates",
+        "enrolled identities are not counted",
+        "reads are not recorded",
+    ] {
+        assert!(described.contains(phrase), "{phrase}: {described}");
+    }
+    assert!(!described.contains("  "), "{described}");
 }

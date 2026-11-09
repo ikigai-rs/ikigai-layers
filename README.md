@@ -57,6 +57,7 @@ Layers are inspired by Daniel Suarez's novel *Daemon*
 | `urn:layer:{layer}:feed` | Source | events `after=` a sequence, `wait=` up to 60 s | `urn:cap:layer:feed:{layer}` |
 | `urn:layers:feed` | Source | one wait over several feeds, `after=talk:12,notes:3` | `urn:cap:layer:feed:{each}` |
 | `urn:layers:participants` | Source | who each principal is, across the host (the operator's) | `urn:cap:layers:read:participants` |
+| `urn:layers:join:count` | Source | a host with a join only: three aggregate numbers about its joined readers ([Counting joined readers](#counting-joined-readers)) | `urn:cap:layers:read:join-count`, which no generated grant holds |
 | `urn:layers:me` | Source | who the door says the caller is: its principal and, when it is a participant, its kind and the collaborations granting it anything (`as=application/json` for a client) | `urn:cap:collab:read:*`, which every generated grant holds |
 | `urn:collab:{name}` | Source | a collaboration's manifest | `urn:cap:collab:read:{name}` |
 | `urn:collab:{name}:participants` | Source | who takes part in that collaboration: each participant its manifest grants anything, as the participants graph describes it | `urn:cap:collab:read:{name}` |
@@ -401,6 +402,31 @@ A joined identity holds read and feed on public layers and nothing else, so a `s
 is refused and `urn:layers:me` (which needs a collaboration token it does not hold) is refused
 too: it lists no collaboration for it.
 
+### Counting joined readers
+
+`urn:layers:join:count` answers the operator three numbers, and nothing else, as labeled lines
+of `text/plain` or, with `as=application/json`, as JSON (ledger #3309):
+
+```text
+joined 12
+read-in-7-days fewer than 5
+read-in-30-days 8
+```
+
+`joined` is the live identities, the same set `max_joined` caps: a certificate on the deny list
+is counted until its record lapses. `read-in-7-days` and `read-in-30-days` are those whose
+record says a read in the last 7 or 30 UTC days, today among them. A record keeps one day for a
+read and a join, so a join counts as a read on its day. **A count under 5, zero included, is
+reported as `fewer than 5`**, so a count of one never singles anyone out. The answer carries no
+fingerprint, no per-identity row and no address, and reading it writes nothing.
+
+The numbers are **upper bounds on people**, since one person may hold several certificates.
+**Collaborators' enrolled identities are not counted**, since their reads are not recorded.
+
+It declares `urn:cap:layers:read:join-count`, which no generated grant holds and a joined
+identity never does, so a reader and a collaborator are both refused it: the feeds carry no
+reader counts. A host with no `[join]` table does not bind it.
+
 ### The door descriptor
 
 ```text
@@ -545,6 +571,7 @@ front, MCP and the action manifold all offer the same ones.
 | `urn:layer:{layer}:scheme` (a feed) | `application/json` | `{"scheme": "<IRI>", "label", "concepts": [{"@id", "prefLabel", "notation", "broader": ["<IRI>"]}]}`, concepts by notation |
 | `urn:layer:{layer}:graph` (a feed) | `application/ld+json` | the graph under the host's feed context (`src/feeds/graph.context.jsonld`), not the layer's egress context |
 | `feed`, `urn:layers:feed`, `urn:layers:me`, `urn:collab:{name}` | `application/json` | as before |
+| `urn:layers:join:count` | `application/json` | `{"joined", "readIn7Days", "readIn30Days"}`, each a number or, under 5, `"fewer than 5"` |
 
 A face a resource does not offer is refused (`invalid-argument` on `as`), never answered in
 another. One tuple (`tuple=`) is a graph, so it is refused as `application/json`, a list's
