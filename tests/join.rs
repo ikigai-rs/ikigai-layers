@@ -1018,6 +1018,109 @@ fn the_per_address_limit_refuses_the_eleventh_attempt_within_the_hour() {
 }
 
 #[test]
+fn two_addresses_in_one_ipv6_64_share_the_per_address_limit() {
+    let d = door_with("per_address = 1\n");
+    join_at(&d, "first-in-the-64", Some("[2001:db8:1:2::1]:4433"), T0).expect("within the limit");
+    unavailable(
+        join_at(
+            &d,
+            "second-in-the-64",
+            Some("[2001:db8:1:2:ffff::9]:4433"),
+            T0,
+        ),
+        "from one source address",
+    );
+    join_at(&d, "next-64", Some("[2001:db8:1:3::1]:4433"), T0)
+        .expect("another /64 is another count");
+}
+
+#[test]
+fn the_refusal_says_how_the_address_is_counted_and_names_no_address() {
+    let d = door_with("per_address = 1\nipv6_prefix = 56\n");
+    join_at(&d, "first", Some("[2001:db8:1:2::1]:4433"), T0).expect("within the limit");
+    let err = join_at(&d, "second", Some("[2001:db8:1:2::2]:4433"), T0)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("counting an IPv6 /56 network as one address"),
+        "{err}"
+    );
+    assert!(!err.contains("2001:db8"), "{err}");
+}
+
+#[test]
+fn ipv6_prefix_moves_the_boundary_of_one_address() {
+    let d = door_with("per_address = 1\nipv6_prefix = 48\n");
+    join_at(&d, "first", Some("[2001:db8:1:2::1]:4433"), T0).expect("within the limit");
+    unavailable(
+        join_at(&d, "same-48", Some("[2001:db8:1:ffff::1]:4433"), T0),
+        "from one source address",
+    );
+    join_at(&d, "next-48", Some("[2001:db8:2::1]:4433"), T0).expect("another /48");
+
+    let d = door_with("per_address = 1\nipv6_prefix = 128\n");
+    join_at(&d, "first", Some("[2001:db8:1:2::1]:4433"), T0).expect("within the limit");
+    join_at(&d, "next-address", Some("[2001:db8:1:2::2]:4433"), T0)
+        .expect("at 128 each full address is its own count");
+}
+
+#[test]
+fn a_port_is_not_part_of_the_address() {
+    for (first, second) in [
+        ("198.51.100.7:4433", "198.51.100.7:50000"),
+        ("198.51.100.7:4433", "198.51.100.7"),
+        ("[2001:db8:1:2::1]:4433", "2001:db8:1:2::1"),
+    ] {
+        let d = door_with("per_address = 1\n");
+        join_at(&d, "first", Some(first), T0).expect("within the limit");
+        unavailable(
+            join_at(&d, "second", Some(second), T0),
+            "from one source address",
+        );
+    }
+}
+
+#[test]
+fn an_ipv4_mapped_address_counts_as_its_ipv4_address() {
+    let d = door_with("per_address = 1\n");
+    join_at(&d, "first", Some("[::ffff:198.51.100.7]:4433"), T0).expect("within the limit");
+    unavailable(
+        join_at(&d, "same-ipv4", Some("198.51.100.7:4433"), T0),
+        "from one source address",
+    );
+    // All of IPv4 is inside one /64 of the mapped range, and is not one address.
+    join_at(&d, "other-ipv4", Some("[::ffff:198.51.100.8]:4433"), T0)
+        .expect("another IPv4 address is another count");
+}
+
+#[test]
+fn a_source_that_is_not_an_ip_address_is_counted_as_given() {
+    let d = door_with("per_address = 1\n");
+    join_at(&d, "first", Some("relay-a"), T0).expect("within the limit");
+    unavailable(
+        join_at(&d, "second", Some("relay-a"), T0),
+        "from one source address",
+    );
+    join_at(&d, "third", Some("relay-b"), T0).expect("another source is another count");
+}
+
+#[test]
+fn an_ipv6_prefix_out_of_range_is_refused() {
+    for bits in [0, 129] {
+        let config = join_config(&format!("ipv6_prefix = {bits}\n"));
+        let state = Scratch::new("refused");
+        let err = Host::open(config.path(), state.path(), &key(config.path()))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap();
+        assert!(
+            err.contains(&format!("`join.ipv6_prefix` is {bits}")),
+            "{err}"
+        );
+    }
+}
+
+#[test]
 fn a_rotated_key_no_longer_matches_last_hours_hash() {
     let d = door_with("per_address = 2\n");
     let at = T0 + 59 * MINUTE;

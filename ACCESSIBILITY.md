@@ -45,7 +45,9 @@ repository's.
   about: a layer outside the public set (``layer `<name>` is not a public layer of this host: a
   join grants read and feed on public layers only, so nothing in this request was granted``),
   a limit (``join lobby `<name>` takes at most 5 requests an hour from one certificate, and
-  <fingerprint> has made them; try again later``), the deny list, a certificate that has already
+  <fingerprint> has made them; try again later``; the per-address one says ``from one source
+  address, counting an IPv6 /64 network as one address``, with the host's `join.ipv6_prefix`),
+  the deny list, a certificate that has already
   joined, and an identity that has lapsed (which says it may join again). No answer, refusal or
   diagnostic names a source address, and a door whose system cannot supply randomness gets the
   error ``the hourly key for source addresses cannot be drawn: …`` from `door_capability`.
@@ -108,6 +110,7 @@ Verified by reading the source:
   (`a_request_naming_a_non_public_layer_gets_nothing`, `the_plain_answer_labels_each_line`,
   `a_denied_fingerprint_is_refused_at_join`, `the_per_certificate_limit_survives_a_restart`,
   `the_per_address_limit_refuses_the_eleventh_attempt_within_the_hour`,
+  `two_addresses_in_one_ipv6_64_share_the_per_address_limit`,
   `an_expired_identity_is_refused_and_can_join_again`,
   `the_descriptor_refuses_a_bad_address_and_a_host_with_nothing_to_offer`), and the join count's
   (`the_count_answers_three_numbers_and_nothing_else`,
@@ -161,3 +164,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-08 | The public join: its answer, its refusals, its stderr line, and `descriptor`. |
 | 2026-11-08 | The error when the join's hourly address key cannot be drawn; no output names an address. |
 | 2026-11-08 | The operator's join count: labeled lines and a JSON face. |
+| 2026-11-08 | The per-address join refusal says an IPv6 network counts as one address. |
