@@ -46,7 +46,9 @@ repository's.
   join grants read and feed on public layers only, so nothing in this request was granted``),
   a limit (``join lobby `<name>` takes at most 5 requests an hour from one certificate, and
   <fingerprint> has made them; try again later``), the deny list, a certificate that has already
-  joined, and an identity that has lapsed (which says it may join again).
+  joined, and an identity that has lapsed (which says it may join again). No answer, refusal or
+  diagnostic names a source address, and a door whose system cannot supply randomness gets the
+  error ``the hourly key for source addresses cannot be drawn: …`` from `door_capability`.
 - **Host diagnostics on stderr** (`src/onboard/apply.rs`, `src/feeds/mod.rs`): lines starting
   `ikigai-layers: onboard:`, one per onboarding verdict, and one when applying entitlements
   fails or needs the door restarted; one starting `ikigai-layers: join:` when recording a
@@ -101,6 +103,7 @@ Verified by reading the source:
 - `tests/join.rs` pins the public join's refusals and answers
   (`a_request_naming_a_non_public_layer_gets_nothing`, `the_plain_answer_labels_each_line`,
   `a_denied_fingerprint_is_refused_at_join`, `the_per_certificate_limit_survives_a_restart`,
+  `the_per_address_limit_refuses_the_eleventh_attempt_within_the_hour`,
   `an_expired_identity_is_refused_and_can_join_again`,
   `the_descriptor_refuses_a_bad_address_and_a_host_with_nothing_to_offer`).
 
@@ -149,3 +152,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-08 | The refusal of an entitlement naming a participant another certificate holds. |
 | 2026-11-08 | Feed layers: their refusals, the Atom face and the warm-failure stderr line. |
 | 2026-11-08 | The public join: its answer, its refusals, its stderr line, and `descriptor`. |
+| 2026-11-08 | The error when the join's hourly address key cannot be drawn; no output names an address. |
