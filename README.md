@@ -364,8 +364,8 @@ sha256 per line, `#` starts a comment) is refused at join, gets no capability at
 and is refused on a connection it already holds; a list that does not read stops joins and
 says which line. An identity lapses after `join_idle_days` without a read: its certificate
 leaves the trust set, a read on a connection already open is refused, and it may join again.
-`onb:expires` says when it lapses if it is never read; each read moves that later on the
-host's record.
+`onb:expires` says when it lapses if it is never read; a read on a later day moves that later
+on the host's record.
 
 **What is kept.** No source address, in any file, log line or error. The host counts an
 address by `HMAC-SHA256(key, address)`, where `key` is 32 random bytes held only in memory,
@@ -380,6 +380,16 @@ from the file at the next counted request or open. A connection made under the o
 counted by address until it reconnects, and one address can spend `per_address` once on each
 side of a replacement. A restart starts a fresh key, which costs at most one hour of
 per-address counting.
+
+For each joined identity, its record holds when it joined and only the day of its last read:
+`last_read` is the UTC midnight that began that day, written at most once a day, at that day's
+first read. A record from an earlier version is rounded down and rewritten at open. The file's
+own modification time, which the file system sets, still shows when that write happened.
+
+Expiry counts from that midnight, so an identity read on a later day than its join lapses
+`join_idle_days` after the start of that day, up to one day sooner than counting from the read
+itself: with `join_idle_days = 1`, a last read at 23:59 UTC lapses at the midnight one minute
+later. An identity not read after its join day lapses exactly when `onb:expires` says.
 
 **Where it lives.** `<config>/joined/`, which only the host writes: `identities/{fp}.json`
 (the record), `identities/{fp}.ttl` (the signed entitlement), `clients/{fp}.crt` (the trust set)

@@ -30,7 +30,8 @@ const RELEASES_ENTRIES: &str = "urn:layer:releases:entries";
 /// The instant [`TickingClock`] starts from.
 const T0: u64 = 1_791_590_400_000;
 const MINUTE: u64 = 60 * 1000;
-const DAY: u64 = 24 * 60 * MINUTE;
+const HOUR: u64 = 60 * MINUTE;
+const DAY: u64 = 24 * HOUR;
 const ADDRESS: &str = "198.51.100.7:4433";
 const HOST_SEED: [u8; 32] = [0x33; 32];
 
@@ -1144,6 +1145,137 @@ fn a_read_keeps_an_identity_live() {
         scopes(&d.minted_at(&fp, None, reading + 90 * DAY).expect("a lobby")),
         ["urn:cap:layer:say:join"]
     );
+}
+
+/// A joined identity's record, as the host keeps it.
+fn record(d: &Door, fp: &str) -> serde_json::Value {
+    serde_json::from_str(&d.read(&format!("joined/identities/{fp}.json")).unwrap()).unwrap()
+}
+
+/// One read by `held` at `millis`.
+fn read_at(d: &Door, held: &Capability, millis: u64) {
+    issue(&d.at(millis), Verb::Source, RELEASES_ENTRIES, &[], held).expect("a read");
+}
+
+#[test]
+fn a_join_records_its_read_as_the_day() {
+    let d = door();
+    let (_, fp) = certificate("alice");
+    join_at(&d, "alice", None, T0 + 5 * HOUR).unwrap();
+    assert_eq!(record(&d, &fp)["last_read"], T0);
+    assert_eq!(record(&d, &fp)["joined_at"], T0 + 5 * HOUR);
+}
+
+#[test]
+fn two_reads_in_one_day_write_one_value() {
+    let d = door();
+    publish(&d);
+    let (pem, fp) = certificate("alice");
+    join_as(&d, &pem, &fp, &["releases"]).unwrap();
+    let held = d.minted(&fp);
+    let day = T0 + 10 * DAY;
+    read_at(&d, &held, day + 3 * HOUR);
+    assert_eq!(record(&d, &fp)["last_read"], day);
+
+    // A mark only a write would take away.
+    let path = d.config.path().join(format!("joined/identities/{fp}.json"));
+    let marked = format!("{}\n", std::fs::read_to_string(&path).unwrap());
+    std::fs::write(&path, &marked).unwrap();
+    read_at(&d, &held, day + 9 * HOUR);
+    read_at(&d, &held, day + DAY - 1);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), marked);
+}
+
+#[test]
+fn a_read_the_next_day_moves_it() {
+    let d = door();
+    publish(&d);
+    let (pem, fp) = certificate("alice");
+    join_as(&d, &pem, &fp, &["releases"]).unwrap();
+    let held = d.minted(&fp);
+    let day = T0 + 10 * DAY;
+    read_at(&d, &held, day + DAY - 1);
+    assert_eq!(record(&d, &fp)["last_read"], day);
+    read_at(&d, &held, day + DAY);
+    assert_eq!(record(&d, &fp)["last_read"], day + DAY);
+}
+
+#[test]
+fn an_identity_read_on_a_day_lapses_idle_days_after_that_day() {
+    let d = door();
+    publish(&d);
+    let (pem, fp) = certificate("alice");
+    join_as(&d, &pem, &fp, &["releases"]).unwrap();
+    let held = d.minted(&fp);
+    let day = T0 + 10 * DAY;
+    read_at(&d, &held, day + 7 * HOUR);
+    assert_eq!(
+        scopes(&d.minted_at(&fp, None, day + 90 * DAY - 1).unwrap()).len(),
+        2
+    );
+    assert_eq!(
+        scopes(&d.minted_at(&fp, None, day + 90 * DAY).unwrap()),
+        ["urn:cap:layer:say:join"]
+    );
+}
+
+#[test]
+fn an_identity_never_read_lapses_when_its_entitlement_says() {
+    let d = door();
+    let (_, fp) = certificate("alice");
+    let joined_at = T0 + 15 * HOUR;
+    let answer = join_at(&d, "alice", None, joined_at).unwrap();
+    assert_eq!(answer["expires"], "2027-01-08T15:00:00.000Z");
+    assert_eq!(
+        scopes(&d.minted_at(&fp, None, joined_at + 90 * DAY - 1).unwrap()).len(),
+        2
+    );
+    assert_eq!(
+        scopes(&d.minted_at(&fp, None, joined_at + 90 * DAY).unwrap()),
+        ["urn:cap:layer:say:join"]
+    );
+}
+
+#[test]
+fn a_read_on_the_day_of_the_join_does_not_shorten_it() {
+    let d = door();
+    publish(&d);
+    let (_, fp) = certificate("alice");
+    let joined_at = T0 + 15 * HOUR;
+    join_at(&d, "alice", None, joined_at).unwrap();
+    let held = d.minted_at(&fp, None, joined_at).expect("live");
+    read_at(&d, &held, joined_at + HOUR);
+    assert_eq!(
+        scopes(&d.minted_at(&fp, None, joined_at + 90 * DAY - 1).unwrap()).len(),
+        2
+    );
+}
+
+#[test]
+fn a_record_with_an_hour_in_it_loads_rounded_to_the_day() {
+    let mut d = door();
+    let (pem, fp) = certificate("alice");
+    join_as(&d, &pem, &fp, &["releases"]).unwrap();
+    // Opening reads the wall clock, so this record is dated from it.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let day = now / DAY * DAY - DAY;
+    let mut old = record(&d, &fp);
+    old["joined_at"] = (day - 3 * DAY + HOUR).into();
+    old["last_read"] = (day + 5 * HOUR).into();
+    let path = d.config.path().join(format!("joined/identities/{fp}.json"));
+    std::fs::write(&path, old.to_string()).unwrap();
+
+    d.restart();
+    assert_eq!(
+        record(&d, &fp)["last_read"],
+        day,
+        "rewritten at open, not at the next read, which may never come"
+    );
+    assert_eq!(record(&d, &fp)["joined_at"], day - 3 * DAY + HOUR);
+    assert_eq!(scopes(&d.minted_at(&fp, None, now).unwrap()).len(), 2);
 }
 
 #[test]
