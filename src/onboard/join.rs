@@ -26,7 +26,8 @@
 //!
 //! **No address is kept** (ledger #3307). A source address is counted by its HMAC-SHA256 under
 //! a random key held only in memory and replaced every hour, so a hash is comparable only with
-//! others of its own hour, and once the key is gone nothing links it to an address.
+//! others of its own hour, and once the key is gone nothing links it to an address. What is
+//! hashed is the IPv4 address or the IPv6 network (ledger #3296).
 //!
 //! **A read is kept to the day** (ledger #3308). An identity's record says which UTC day it last
 //! read, written at most once a day, which is all its expiry needs.
@@ -36,6 +37,7 @@
 //! grant can read them: the feeds carry no reader counts.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -191,6 +193,26 @@ impl State {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect())
+    }
+}
+
+/// What the per-address limit counts for the `source` a door gave (ledger #3296): an IPv4
+/// address, or an IPv6 address's first `ipv6_prefix` bits, since one host commonly holds a whole
+/// /64. A port is dropped, and an IPv4-mapped IPv6 address is its IPv4 address, or every IPv4
+/// client of a dual-stack door would share one network. A source that is not an IP address is
+/// counted as given. `ipv6_prefix` is 1 to 128, as [`crate::config::load_join`] checks.
+fn counted_source(source: &str, ipv6_prefix: u8) -> String {
+    let ip = source
+        .parse::<SocketAddr>()
+        .map(|socket| socket.ip())
+        .or_else(|_| source.parse::<IpAddr>());
+    match ip.map(|ip| ip.to_canonical()) {
+        Ok(IpAddr::V4(ip)) => ip.to_string(),
+        Ok(IpAddr::V6(ip)) => {
+            let mask = u128::MAX << (128 - u32::from(ipv6_prefix));
+            Ipv6Addr::from_bits(ip.to_bits() & mask).to_string()
+        }
+        Err(_) => source.to_string(),
     }
 }
 
@@ -618,7 +640,8 @@ impl Join {
         }
         state.retire_key(now.as_millis());
         if let Some(address) = source {
-            let hash = state.hash_source(address, now.as_millis())?;
+            let counted = counted_source(address, self.config.ipv6_prefix);
+            let hash = state.hash_source(&counted, now.as_millis())?;
             if state.sources.len() >= SOURCES_MAX {
                 state.sources.clear();
             }
@@ -726,8 +749,9 @@ impl Join {
             {
                 return Err(unavailable(format!(
                     "join lobby `{lobby}` takes at most {} requests an hour from one source \
-                     address, and this one has made them",
-                    c.per_address
+                     address, counting an IPv6 /{} network as one address, and this one has made \
+                     them",
+                    c.per_address, c.ipv6_prefix
                 )));
             }
         }

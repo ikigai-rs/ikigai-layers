@@ -300,9 +300,10 @@ impl Host {
     /// its idle limit lapses here, its certificate leaves the trust set, and it is a stranger
     /// again.
     ///
-    /// `source` is the connection's address, where the door knows it, and is what the
-    /// per-address join limit counts, by a keyed hash and never as the address itself; `now`
-    /// decides expiry and when that hash's key is replaced.
+    /// `source` is the connection's address, where the door knows it, with or without a port.
+    /// The per-address join limit counts its IPv4 address or its IPv6 network (`join.ipv6_prefix`
+    /// bits, a /64 by default), by a keyed hash and never as the address itself; `now` decides
+    /// expiry and when that hash's key is replaced.
     pub fn door_capability(
         &self,
         host: &str,

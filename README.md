@@ -322,6 +322,7 @@ host_key        = "/run/credentials/layers/join.pem"  # required: `openssl genpk
 join_idle_days  = 90     # a joined identity lapses after this long without a read
 per_certificate = 5      # requests an hour from one certificate
 per_address     = 20     # requests an hour from one source address, where the door says it
+ipv6_prefix     = 64     # how many leading bits of an IPv6 address count as one address
 per_hour        = 120    # requests an hour from everyone together
 max_joined      = 10000  # live joined identities
 ```
@@ -360,6 +361,11 @@ also takes the connection's address, which the per-address limit counts.
 **The guards.** The three rates are persisted, sealed at rest in `<state>/.join-limits.age`; they
 count every request, and a request refused for a private layer counts too. A restart keeps the
 per-certificate and global counts and begins the per-address count again (below).
+`per_address` counts an IPv4 address, or an IPv6 address's first `ipv6_prefix` bits: a /64 by
+default, the block one host commonly holds, so stepping through its addresses earns no new
+count, and everyone behind one /64 shares one. Set 1 to 128, where 128 counts each full address.
+A port is never counted, and an IPv4-mapped IPv6 address counts as its IPv4 address. A source
+that is not an IP address is counted as the door gave it.
 `max_joined` caps the live set. A fingerprint in `deny.txt` (in the config home, one
 sha256 per line, `#` starts a comment) is refused at join, gets no capability at a connection,
 and is refused on a connection it already holds; a list that does not read stops joins and
@@ -369,7 +375,8 @@ leaves the trust set, a read on a connection already open is refused, and it may
 on the host's record.
 
 **What is kept.** No source address, in any file, log line or error. The host counts an
-address by `HMAC-SHA256(key, address)`, where `key` is 32 random bytes held only in memory,
+address by `HMAC-SHA256(key, address)`, where `address` is what the limit counts (the IPv4
+address or the IPv6 prefix, with no port) and `key` is 32 random bytes held only in memory,
 never written, and replaced at the first connection or request an hour or more after it was
 drawn. For each request of the last hour, `.join-limits.age` holds its time, its certificate's
 fingerprint and that hash; an entry stops counting after an hour and leaves the file at the

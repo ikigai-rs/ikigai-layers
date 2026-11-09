@@ -1082,6 +1082,7 @@ struct JoinToml {
     join_idle_days: Option<u64>,
     per_certificate: Option<usize>,
     per_address: Option<usize>,
+    ipv6_prefix: Option<u32>,
     per_hour: Option<usize>,
     max_joined: Option<usize>,
 }
@@ -1341,6 +1342,7 @@ pub const DEFAULT_JOIN_IDLE_DAYS: u64 = 90;
 /// join_idle_days  = 90     # a joined identity lapses after this long without a read
 /// per_certificate = 5      # requests an hour from one certificate
 /// per_address     = 20     # requests an hour from one source address, where the door says it
+/// ipv6_prefix     = 64     # how many leading bits of an IPv6 address count as one address
 /// per_hour        = 120    # requests an hour from everyone together
 /// max_joined      = 10000  # live joined identities the host holds
 /// ```
@@ -1361,6 +1363,8 @@ pub struct JoinConfig {
     pub per_certificate: usize,
     /// Requests an hour from one source address.
     pub per_address: usize,
+    /// The leading bits of an IPv6 address that count as one address, 1 to 128.
+    pub ipv6_prefix: u8,
     /// Requests an hour from everyone together.
     pub per_hour: usize,
     /// Live joined identities the host holds.
@@ -1438,12 +1442,23 @@ pub fn load_join(
         table.join_idle_days.map(|d| d as usize),
         DEFAULT_JOIN_IDLE_DAYS as usize,
     )? as u64;
+    let ipv6_prefix = match table.ipv6_prefix {
+        Some(bits @ 1..=128) => bits as u8,
+        Some(bits) => {
+            return err(format!(
+                "{at}: `join.ipv6_prefix` is {bits}, and an IPv6 prefix here is 1 to 128 bits; \
+                 give one in that range, or leave it out for the default of 64"
+            ))
+        }
+        None => 64,
+    };
     Ok(Some(JoinConfig {
         lobby,
         host_key,
         idle_days,
         per_certificate: positive("per_certificate", table.per_certificate, 5)?,
         per_address: positive("per_address", table.per_address, 20)?,
+        ipv6_prefix,
         per_hour: positive("per_hour", table.per_hour, 120)?,
         max_joined: positive("max_joined", table.max_joined, 10_000)?,
     }))
