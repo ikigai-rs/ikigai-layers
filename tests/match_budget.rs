@@ -9,14 +9,10 @@
 //! one in `tasks-two`, which answered `Ok` at `max_overdue = 1`. Now the host builds one
 //! budget and every layer gets a clone, so the second is refused (`Unavailable`).
 //!
-//! ★ **Nothing here hangs on the machine's speed** (ledger #1685). The overdue evaluation
-//! that fills the host's cap is HELD until the test releases it ([`hold_overdue`]): a real
-//! template ends some time after its token (about 210 ms at k=7 in a release build on
-//! plasma), so a read "right after" its timeout was a race a descheduled test thread could
-//! lose. A refusal "at once" is told from a wait for a slot by giving the refused read a
-//! budget it would have waited out ([`WOULD_WAIT`]), not by a 50 ms stopwatch. The one real
-//! template that must outlast the budget runs against a 10 ms budget, which k=7 outlasts
-//! about 25 times over in a release build.
+//! The cap is filled by a channel-held evaluation, not by a query assumed to be slow.
+//! A separate real-layer timeout test holds tuple decoding behind a channel. Recovery
+//! reads get a long HOST budget: participant budget grants do not reach private intray
+//! calls, so granting only the participant more time left those reads racing 10 ms.
 
 // Every test here drives a layer host (ledger #1403: a participant build has none).
 #![cfg(feature = "host")]
@@ -29,7 +25,7 @@ use std::time::{Duration, Instant};
 use common::*;
 use ikigai_core::{Capability, Error};
 use ikigai_layers::{config, Host};
-use ikigai_store::budget::{cap_budget, EvaluationBudget, TimeBudget};
+use ikigai_store::budget::{EvaluationBudget, TimeBudget};
 
 const TWO: &str = "tasks-two";
 
@@ -66,25 +62,18 @@ fn scopes(layer: &str) -> Vec<String> {
         .to_vec()
 }
 
-/// The budget a read is given when the test must tell "refused at once" from "waited for a
-/// slot": a read that waits does so for its whole budget, so one refused in a fraction of
-/// this was refused without waiting, on a machine of any speed and under any load. Ordinary
-/// reads beside the host's small budget get it too, so a slow machine does not time them out.
+/// The host budget for cap and recovery checks. A read that waits for a slot would
+/// wait this long, while a refusal at an overdue cap returns without waiting.
 const WOULD_WAIT: Duration = Duration::from_secs(60);
 
-/// `bobby`, holding every verb on `layer` and a budget grant of [`WOULD_WAIT`].
+/// Bobby, holding every verb on `layer`.
 fn patient(layer: &str) -> Capability {
-    let mut scopes = scopes(layer);
-    scopes.push(cap_budget(WOULD_WAIT.as_millis() as u64));
-    Capability::scoped(scopes)
+    Capability::scoped(scopes(layer))
         .with_principal(&participant("bobby"))
         .expect("a principal")
 }
 
-/// `k` unconstrained triple patterns (a cross product, |tuple|^k rows) under a FILTER over
-/// every variable, so the ASK can never stop early: intray's `tests/match_time_budget.rs`
-/// shape, whose k=7 runs on well past a 50 ms token (oxigraph checks it only where it
-/// touches the dataset).
+/// `k` unconstrained triple patterns under a FILTER that never matches.
 fn template(k: usize) -> String {
     let patterns: String = (0..k).map(|i| format!("?s{i} ?p{i} ?o{i} . ")).collect();
     let all: Vec<String> = (0..k)
@@ -121,7 +110,7 @@ fn rd_match(
 fn hold_overdue(budget: &EvaluationBudget, says: &str) -> Sender<()> {
     let (release, held) = std::sync::mpsc::channel::<()>();
     let held_for = tasker(&gonk());
-    match budget.run("ASK {}", &held_for, None, move |_| {
+    match budget.run("ASK {}", &held_for, Some("10"), move |_| {
         let _ = held.recv();
         Ok(())
     }) {
@@ -171,11 +160,10 @@ fn settles(budget: &EvaluationBudget) {
 }
 
 /// The host's one budget: an evaluation overdue on it refuses a template in EVERY layer at
-/// `max_overdue = 1`, at once, and once it ends each layer answers again. And a real template
-/// in a layer runs within that budget, timed out at the 10 ms `layers.toml` sets.
+/// `max_overdue = 1`, at once, and once it ends each layer answers again.
 #[test]
 fn an_overdue_match_in_one_layer_refuses_a_match_in_another_at_the_cap() {
-    let f = two_matching_layers("[match]\nbudget_ms = 10\nmax_overdue = 1\n");
+    let f = two_matching_layers("[match]\nbudget_ms = 60000\nmax_overdue = 1\n");
     out(&f.kernel, &gonk(), &offer("a")).unwrap();
     let two = format!(
         "@prefix ik: <{IK}> .\n@prefix dcterms: <http://purl.org/dc/terms/> .\n\
@@ -190,20 +178,6 @@ fn an_overdue_match_in_one_layer_refuses_a_match_in_another_at_the_cap() {
     )
     .expect("an offer in tasks-two");
     let budget = f.host.match_budget();
-
-    // A real template in a layer is bounded by the host's budget, and named by it.
-    match rd_match(
-        &f,
-        "tasks-bobby",
-        &template(7),
-        &tasker(&participant("bobby")),
-    ) {
-        Err(Error::Timeout(message)) => {
-            assert!(message.contains("10 ms"), "names the budget: {message}")
-        }
-        other => panic!("expected a Timeout at 10 ms, got {other:?}"),
-    }
-    settles(budget);
 
     // One evaluation overdue on the host's budget, held there: a template in each layer is
     // refused at once. Before (a budget per layer): `Ok("")`, since neither layer's own

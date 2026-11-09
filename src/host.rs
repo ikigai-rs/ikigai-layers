@@ -669,3 +669,7 @@ fn open_layer(
         egress,
     })
 }
+
+#[cfg(test)]
+#[path = "../tests/match_budget/timeout.rs"]
+mod match_budget_tests;

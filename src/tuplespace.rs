@@ -303,6 +303,13 @@ fn space_iri() -> Iri {
 }
 
 impl Store {
+    // Unit tests can hold a real match inside decoding without changing production codecs.
+    #[cfg(test)]
+    pub(crate) fn set_test_codec(&mut self, codec: Arc<dyn TupleCodec>) {
+        let space = std::mem::replace(&mut self.space, SpaceEndpoint::new(PathBuf::new()));
+        self.space = space.with_codec(codec);
+    }
+
     /// The space under `dir`, its `match=` evaluations run within `budget`: the HOST's one,
     /// shared by every tuplespace layer, so one overdue count caps them all (ledger #1362).
     /// Every staged drop and claim intray left is discarded before anything reads the space
