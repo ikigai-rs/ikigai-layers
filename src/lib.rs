@@ -38,6 +38,7 @@
 //! urn:layer:{layer}:receipt:{id}    Source  one take (never changes)           read:{layer}
 //! urn:layers:feed                   Source  one wait over several feeds       feed:{each layer}
 //! urn:layers:participants           Source  who each principal is             layers:read:participants
+//! urn:layers:join:count             Source  three aggregate reader counts     layers:read:join-count
 //! urn:layers:me                     Source  who the door says the caller is   collab:read:* (any grant)
 //! urn:collab:{name}                 Source  a manifest                        collab:read:{name}
 //! urn:collab:{name}:participants    Source  who takes part in it              collab:read:{name}

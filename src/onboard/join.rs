@@ -30,6 +30,10 @@
 //!
 //! **A read is kept to the day** (ledger #3308). An identity's record says which UTC day it last
 //! read, written at most once a day, which is all its expiry needs.
+//!
+//! **Only the operator counts, and only in aggregate** (ledger #3309). The count is three
+//! numbers taken from the records, each reported in words when it is small, and no generated
+//! grant can read them: the feeds carry no reader counts.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -78,6 +82,9 @@ const DAY_MILLIS: u64 = 24 * WINDOW_MILLIS;
 /// never joins cannot grow this without bound, and losing an entry loses only the per-address
 /// count for that connection.
 const SOURCES_MAX: usize = 4096;
+/// The smallest count reported as a number. Anything under it, zero included, is reported in
+/// words, so that a count of one never singles anyone out.
+const COUNT_THRESHOLD: usize = 5;
 
 /// One joined identity's record.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -230,6 +237,48 @@ impl Granted {
             "principal": self.principal,
             "expires": self.expires,
             "layers": self.layers.iter().map(|l| layer_iri(l)).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// A count as the operator may read it: a number, or words under [`COUNT_THRESHOLD`].
+fn reported(count: usize) -> serde_json::Value {
+    if count < COUNT_THRESHOLD {
+        format!("fewer than {COUNT_THRESHOLD}").into()
+    } else {
+        count.into()
+    }
+}
+
+/// How many joined identities there are and how many read lately. Upper bounds on people: one
+/// person may hold several certificates.
+pub(crate) struct Counts {
+    joined: usize,
+    read_in_7_days: usize,
+    read_in_30_days: usize,
+}
+
+impl Counts {
+    /// The answer as plain text: one labeled line per number.
+    pub(crate) fn text(&self) -> String {
+        let line = |label: &str, count: usize| match reported(count) {
+            serde_json::Value::String(words) => format!("{label} {words}\n"),
+            number => format!("{label} {number}\n"),
+        };
+        [
+            line("joined", self.joined),
+            line("read-in-7-days", self.read_in_7_days),
+            line("read-in-30-days", self.read_in_30_days),
+        ]
+        .concat()
+    }
+
+    /// The answer as JSON: each member a number, or words under the threshold.
+    pub(crate) fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "joined": reported(self.joined),
+            "readIn7Days": reported(self.read_in_7_days),
+            "readIn30Days": reported(self.read_in_30_days),
         })
     }
 }
@@ -608,6 +657,30 @@ impl Join {
             }
         }
         Ok(())
+    }
+
+    /// The live identities at `now`, and how many of them read in the last 7 and 30 UTC days,
+    /// today among them. A join counts as a read on its day, since a record holds one day
+    /// for both. Read-only: an identity past its limit is left out here and lapses as ever.
+    pub(crate) fn counts(&self, now: Time) -> Counts {
+        let state = self.state.lock().expect("join lock");
+        let now = now.as_millis();
+        let today = day_of(now);
+        let live: Vec<&Identity> = state
+            .identities
+            .values()
+            .filter(|i| !i.lapsed(now, self.config.idle_days))
+            .collect();
+        let read_within = |days: u64| {
+            live.iter()
+                .filter(|i| today.saturating_sub(i.last_read) < days * DAY_MILLIS)
+                .count()
+        };
+        Counts {
+            joined: live.len(),
+            read_in_7_days: read_within(7),
+            read_in_30_days: read_within(30),
+        }
     }
 
     /// Count one attempt by `fingerprint` at `now`, or refuse it naming the limit it would

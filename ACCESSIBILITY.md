@@ -49,6 +49,9 @@ repository's.
   joined, and an identity that has lapsed (which says it may join again). No answer, refusal or
   diagnostic names a source address, and a door whose system cannot supply randomness gets the
   error ``the hourly key for source addresses cannot be drawn: …`` from `door_capability`.
+- **The operator's join count** (`src/onboard/join.rs`, `urn:layers:join:count`): three labeled
+  lines as `text/plain` (``joined <count>``, ``read-in-7-days <count>``, ``read-in-30-days
+  <count>``), and the same as JSON, where a count under 5 reads `fewer than 5`.
 - **Host diagnostics on stderr** (`src/onboard/apply.rs`, `src/feeds/mod.rs`): lines starting
   `ikigai-layers: onboard:`, one per onboarding verdict, and one when applying entitlements
   fails or needs the door restarted; one starting `ikigai-layers: join:` when recording a
@@ -74,7 +77,8 @@ Verified by reading the source:
   without an RDF parser.
 - The binary's lines start with a word that says what the line is (`grant`, `client`,
   `unenrolled`, `idle`, `stuck:`, `checked`, `wrote`), and a join's plain answer the same
-  (`entitlement`, `principal`, `expires`, `granted`); `--check` ends by saying nothing was
+  (`entitlement`, `principal`, `expires`, `granted`) and the join count's (`joined`,
+  `read-in-7-days`, `read-in-30-days`); `--check` ends by saying nothing was
   written; `-h`/`--help` prints the usage on stdout; a usage error exits 2 and a failure exits 1,
   each with its message on stderr.
 - No color, no terminal control sequences and no markup are written.
@@ -105,7 +109,10 @@ Verified by reading the source:
   `a_denied_fingerprint_is_refused_at_join`, `the_per_certificate_limit_survives_a_restart`,
   `the_per_address_limit_refuses_the_eleventh_attempt_within_the_hour`,
   `an_expired_identity_is_refused_and_can_join_again`,
-  `the_descriptor_refuses_a_bad_address_and_a_host_with_nothing_to_offer`).
+  `the_descriptor_refuses_a_bad_address_and_a_host_with_nothing_to_offer`), and the join count's
+  (`the_count_answers_three_numbers_and_nothing_else`,
+  `a_count_under_five_is_reported_as_fewer_than_five`,
+  `an_unknown_face_of_the_count_is_refused`).
 
 These test wording and exit codes for correctness; none was written as an accessibility test.
 **No automated accessibility checker, browser or assistive technology has been used on this
@@ -153,3 +160,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-08 | Feed layers: their refusals, the Atom face and the warm-failure stderr line. |
 | 2026-11-08 | The public join: its answer, its refusals, its stderr line, and `descriptor`. |
 | 2026-11-08 | The error when the join's hourly address key cannot be drawn; no output names an address. |
+| 2026-11-08 | The operator's join count: labeled lines and a JSON face. |
