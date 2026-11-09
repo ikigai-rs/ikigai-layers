@@ -22,13 +22,16 @@ use ikigai_core::{
 };
 use ikigai_layers::onboard::{fingerprint_of_pem, signing_bytes_of};
 use ikigai_layers::Host;
+use sha2::Digest as _;
 
 const DOOR: &str = "edge";
 const SAY: &str = "urn:layer:join:say";
 const RELEASES_ENTRIES: &str = "urn:layer:releases:entries";
 /// The instant [`TickingClock`] starts from.
 const T0: u64 = 1_791_590_400_000;
-const DAY: u64 = 24 * 60 * 60 * 1000;
+const MINUTE: u64 = 60 * 1000;
+const DAY: u64 = 24 * 60 * MINUTE;
+const ADDRESS: &str = "198.51.100.7:4433";
 const HOST_SEED: [u8; 32] = [0x33; 32];
 
 const FEED_SHAPES: &str = r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
@@ -841,9 +844,9 @@ fn the_per_certificate_limit_survives_a_restart() {
 }
 
 #[test]
-fn the_per_address_limit_survives_a_restart() {
+fn a_restart_starts_a_fresh_key_so_the_per_address_count_begins_again() {
     let mut d = door_with("per_address = 2\n");
-    let addr = Some("198.51.100.7:4433");
+    let addr = Some(ADDRESS);
     for name in ["alice", "bobby"] {
         let (pem, fp) = certificate(name);
         d.minted_at(&fp, addr, T0).expect("a lobby");
@@ -856,17 +859,15 @@ fn the_per_address_limit_survives_a_restart() {
         "from one source address",
     );
 
+    // The key was only ever in memory, so what the old process hashed matches nothing now.
     d.restart();
-    d.minted_at(&fp, addr, T0).expect("a lobby");
-    unavailable(
-        join_as(&d, &pem, &fp, &["releases"]),
-        "from one source address",
+    assert!(
+        limits(&d).iter().all(|a| a.get("source").is_none()),
+        "a hash outlived its key: {:?}",
+        limits(&d)
     );
-    // Another address is another count: the door told the host which.
-    let (pem, fp) = certificate("dana");
-    d.minted_at(&fp, Some("198.51.100.8:4433"), T0)
-        .expect("a lobby");
-    join_as(&d, &pem, &fp, &["releases"]).expect("another address joins");
+    d.minted_at(&fp, addr, T0).expect("a lobby");
+    join_as(&d, &pem, &fp, &["releases"]).expect("a fresh key counts from nothing");
 }
 
 #[test]
@@ -912,6 +913,165 @@ fn the_rates_are_sealed_at_rest() {
     .unwrap();
     assert!(bytes.starts_with(b"age-encryption.org/v1"));
     assert!(!String::from_utf8_lossy(&bytes).contains("198.51.100.7"));
+}
+
+/// The limits file as the host wrote it, opened with the state key it is sealed to.
+fn limits_text(d: &Door) -> String {
+    let bytes = std::fs::read(
+        d.state
+            .path()
+            .join(ikigai_layers::onboard::join::LIMITS_FILE),
+    )
+    .unwrap();
+    let keys = std::fs::read_to_string(d.config.path().join("state.key")).unwrap();
+    let identity: age::x25519::Identity = keys
+        .lines()
+        .find(|l| l.starts_with("AGE-SECRET-KEY-"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    String::from_utf8(age::decrypt(&identity, &bytes).unwrap()).unwrap()
+}
+
+fn limits(d: &Door) -> Vec<serde_json::Value> {
+    serde_json::from_str(&limits_text(d)).expect("a list of attempts")
+}
+
+/// A join request made at `millis`, by a certificate the door saw at that moment from `source`.
+fn join_at(
+    d: &Door,
+    name: &str,
+    source: Option<&str>,
+    millis: u64,
+) -> Result<serde_json::Value, Error> {
+    let (pem, fp) = certificate(name);
+    d.minted_at(&fp, source, millis).expect("a lobby");
+    issue(
+        &d.at(millis),
+        Verb::Sink,
+        SAY,
+        &[
+            ("content", &request_turtle(&pem, &fp, &["releases"])),
+            ("as", "application/json"),
+        ],
+        &d.minted(&fp),
+    )
+    .map(|r| serde_json::from_str(&text(&r)).expect("a JSON answer"))
+}
+
+#[test]
+fn the_limits_file_holds_no_address_in_any_form() {
+    let d = door();
+    let (pem, fp) = certificate("alice");
+    d.minted_at(&fp, Some(ADDRESS), T0).expect("a lobby");
+    join_as(&d, &pem, &fp, &["releases"]).unwrap();
+
+    let text = limits_text(&d);
+    let base64 = &base64::engine::general_purpose::STANDARD;
+    let bare = ADDRESS.split(':').next().unwrap();
+    for form in [ADDRESS, bare] {
+        let hex: String = form.bytes().map(|b| format!("{b:02x}")).collect();
+        for spelled in [form.to_string(), hex, base64.encode(form)] {
+            assert!(!text.contains(&spelled), "`{spelled}` is in {text}");
+        }
+        // Not even a hash anyone could recompute: it takes the key that was never written.
+        let plain: String = sha2::Sha256::digest(form.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert!(!text.contains(&plain), "an unkeyed hash is in {text}");
+    }
+    let attempts = limits(&d);
+    assert_eq!(attempts.len(), 1, "{text}");
+    let attempt = attempts[0].as_object().unwrap();
+    let mut members: Vec<&str> = attempt.keys().map(String::as_str).collect();
+    members.sort();
+    assert_eq!(members, ["at", "fingerprint", "source"], "{text}");
+    let hash = attempt["source"].as_str().unwrap();
+    assert!(
+        hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+        "`{hash}` is not an HMAC-SHA256 in hex"
+    );
+}
+
+#[test]
+fn the_per_address_limit_refuses_the_eleventh_attempt_within_the_hour() {
+    let d = door_with("per_address = 10\n");
+    for n in 0..10 {
+        join_at(&d, &format!("from-one-address-{n}"), Some(ADDRESS), T0 + n)
+            .expect("within the limit");
+    }
+    unavailable(
+        join_at(&d, "the-eleventh", Some(ADDRESS), T0 + 59 * MINUTE),
+        "at most 10 requests an hour from one source address",
+    );
+    // The hash separates addresses as the address did.
+    join_at(
+        &d,
+        "another-address",
+        Some("198.51.100.8:4433"),
+        T0 + 59 * MINUTE,
+    )
+    .expect("another address is another count");
+}
+
+#[test]
+fn a_rotated_key_no_longer_matches_last_hours_hash() {
+    let d = door_with("per_address = 2\n");
+    let at = T0 + 59 * MINUTE;
+    join_at(&d, "starts-the-key", Some("198.51.100.9:4433"), T0).expect("joined");
+    for name in ["alice", "bobby"] {
+        join_at(&d, name, Some(ADDRESS), at).expect("joined");
+    }
+    unavailable(
+        join_at(&d, "carol", Some(ADDRESS), at),
+        "from one source address",
+    );
+    let before = limits_text(&d);
+    let attempts = limits(&d);
+    let last_hour = attempts.last().unwrap()["source"].as_str().unwrap();
+    assert_eq!(
+        attempts.iter().filter(|a| a["source"] == last_hour).count(),
+        2,
+        "one address hashes alike within its hour: {before}"
+    );
+
+    // Alice's and Bobby's attempts are still inside the hour, so only the key's rotation can
+    // let Dana in: they still count toward the global limit, and no longer toward the address.
+    join_at(&d, "dana", Some(ADDRESS), T0 + 60 * MINUTE).expect("the count began again");
+    let after = limits_text(&d);
+    assert!(!after.contains(last_hour), "last hour's hash is in {after}");
+    let attempts = limits(&d);
+    let hashes: Vec<&str> = attempts
+        .iter()
+        .filter_map(|a| a.get("source").and_then(|s| s.as_str()))
+        .collect();
+    assert_eq!(hashes.len(), 1, "only this hour's hash remains: {after}");
+    assert_ne!(hashes[0], last_hour, "the same address, a new key");
+    assert_eq!(attempts.len(), 3, "the attempts still count: {after}");
+}
+
+#[test]
+fn a_limits_file_naming_an_address_is_rewritten_without_it_at_open() {
+    let mut d = door_with("per_certificate = 1\n");
+    let (pem, fp) = certificate("alice");
+    let legacy = format!(r#"[{{"at":{T0},"fingerprint":"{fp}","address":"{ADDRESS}"}}]"#);
+    std::fs::write(
+        d.state
+            .path()
+            .join(ikigai_layers::onboard::join::LIMITS_FILE),
+        sealed(d.config.path(), legacy.as_bytes()),
+    )
+    .unwrap();
+
+    d.restart();
+    let text = limits_text(&d);
+    assert!(!text.contains("198.51.100.7"), "{text}");
+    assert_eq!(limits(&d).len(), 1, "the attempt still counts: {text}");
+    unavailable(
+        join_as(&d, &pem, &fp, &["releases"]),
+        "from one certificate",
+    );
 }
 
 #[test]

@@ -301,7 +301,8 @@ impl Host {
     /// again.
     ///
     /// `source` is the connection's address, where the door knows it, and is what the
-    /// per-address join limit counts; `now` decides expiry.
+    /// per-address join limit counts, by a keyed hash and never as the address itself; `now`
+    /// decides expiry and when that hash's key is replaced.
     pub fn door_capability(
         &self,
         host: &str,

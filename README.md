@@ -356,15 +356,30 @@ through `Host::lobby_capability` needs no change: for a joined certificate it no
 and `feed` on the joined layers and nothing else. `Host::door_capability` does the same and
 also takes the connection's address, which the per-address limit counts.
 
-**The guards.** The three rates are persisted, sealed at rest in `<state>/.join-limits.age`, so
-a restart forgets nothing; they count every request, and a request refused for a private layer
-counts too. `max_joined` caps the live set. A fingerprint in `deny.txt` (in the config home, one
+**The guards.** The three rates are persisted, sealed at rest in `<state>/.join-limits.age`; they
+count every request, and a request refused for a private layer counts too. A restart keeps the
+per-certificate and global counts and begins the per-address count again (below).
+`max_joined` caps the live set. A fingerprint in `deny.txt` (in the config home, one
 sha256 per line, `#` starts a comment) is refused at join, gets no capability at a connection,
 and is refused on a connection it already holds; a list that does not read stops joins and
 says which line. An identity lapses after `join_idle_days` without a read: its certificate
 leaves the trust set, a read on a connection already open is refused, and it may join again.
 `onb:expires` says when it lapses if it is never read; each read moves that later on the
 host's record.
+
+**What is kept.** No source address, in any file, log line or error. The host counts an
+address by `HMAC-SHA256(key, address)`, where `key` is 32 random bytes held only in memory,
+never written, and replaced at the first connection or request an hour or more after it was
+drawn. For each request of the last hour, `.join-limits.age` holds its time, its certificate's
+fingerprint and that hash; an entry stops counting after an hour and leaves the file at the
+next counted request.
+
+A hash matches only others made under its own key, so once the key is replaced nothing links
+it to an address. The host forgets the replaced key's hashes then, from memory at once and
+from the file at the next counted request or open. A connection made under the old key is not
+counted by address until it reconnects, and one address can spend `per_address` once on each
+side of a replacement. A restart starts a fresh key, which costs at most one hour of
+per-address counting.
 
 **Where it lives.** `<config>/joined/`, which only the host writes: `identities/{fp}.json`
 (the record), `identities/{fp}.ttl` (the signed entitlement), `clients/{fp}.crt` (the trust set)

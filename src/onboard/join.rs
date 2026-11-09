@@ -19,14 +19,20 @@
 //! mints through [`crate::Host::door_capability`] reads the same records.
 //!
 //! **The guards.** Per certificate, per source address where the door says one, a global cap
-//! per hour (all three persisted, sealed at rest, so a restart forgets nothing), a cap on live
-//! identities, the deny list [`DENY_FILE`], and expiry: an identity lapses after
-//! `join_idle_days` without a read, its certificate leaves the trust set, and it may join again.
+//! per hour (all three persisted, sealed at rest), a cap on live identities, the deny list
+//! [`DENY_FILE`], and expiry: an identity lapses after `join_idle_days` without a read, its
+//! certificate leaves the trust set, and it may join again. A restart forgets none of the
+//! counts but the per-address one, which begins again under a fresh key.
+//!
+//! **No address is kept** (ledger #3307). A source address is counted by its HMAC-SHA256 under
+//! a random key held only in memory and replaced every hour, so a hash is comparable only with
+//! others of its own hour, and once the key is gone nothing links it to an address.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use hmac::{Hmac, Mac};
 use ikigai_core::{
     ArgRef, Capability, EndpointSpace, Error, Exact, Fallback, Iri, Kernel, Request,
     Result as CoreResult, Space, Time, Verb,
@@ -68,7 +74,7 @@ const DAY_MILLIS: u64 = 24 * WINDOW_MILLIS;
 /// How often a read is written to an identity's record: expiry counts days, so an hour's loss
 /// to a crash changes nothing, and a reader's every read does not write a file.
 const READ_PERSIST_MILLIS: u64 = WINDOW_MILLIS;
-/// The most connections the host remembers a source address for: a stranger who connects and
+/// The most connections the host remembers a source hash for: a stranger who connects and
 /// never joins cannot grow this without bound, and losing an entry loses only the per-address
 /// count for that connection.
 const SOURCES_MAX: usize = 4096;
@@ -109,16 +115,65 @@ impl Identity {
 struct Attempt {
     at: u64,
     fingerprint: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    address: Option<String>,
+    /// The keyed hash of its source address, comparable only under the key of its hour. A
+    /// file written before ledger #3307 says `address` here, which is read as no hash at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+}
+
+/// The key a source address is hashed under: random, in memory only, and never older than
+/// [`WINDOW_MILLIS`].
+struct SourceKey {
+    bytes: [u8; 32],
+    since: u64,
 }
 
 #[derive(Default)]
 struct State {
     identities: BTreeMap<String, Identity>,
     attempts: Vec<Attempt>,
-    /// The source address the door gave at each stranger's connection.
+    /// The keyed hash of the source address the door gave at each stranger's connection.
     sources: HashMap<String, String>,
+    /// This hour's key, drawn when the first address of the hour is hashed.
+    key: Option<SourceKey>,
+}
+
+impl State {
+    /// Retire a key whose hour is up, and every hash made under it: they match nothing now.
+    fn retire_key(&mut self, now: u64) {
+        if self
+            .key
+            .as_ref()
+            .is_some_and(|key| now.saturating_sub(key.since) >= WINDOW_MILLIS)
+        {
+            self.key = None;
+            self.sources.clear();
+            for attempt in &mut self.attempts {
+                attempt.source = None;
+            }
+        }
+    }
+
+    /// `address` as this hour's HMAC-SHA256, lowercase hex, drawing the hour's key if none is
+    /// held. Call [`State::retire_key`] first.
+    fn hash_source(&mut self, address: &str, now: u64) -> Result<String, String> {
+        if self.key.is_none() {
+            let mut bytes = [0; 32];
+            getrandom::getrandom(&mut bytes)
+                .map_err(|e| format!("the hourly key for source addresses cannot be drawn: {e}"))?;
+            self.key = Some(SourceKey { bytes, since: now });
+        }
+        let key = self.key.as_ref().expect("drawn above");
+        let mut mac =
+            Hmac::<sha2::Sha256>::new_from_slice(&key.bytes).expect("HMAC takes any key length");
+        mac.update(address.as_bytes());
+        Ok(mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect())
+    }
 }
 
 /// The host's public join: its configuration, its own signing kernel, and who has joined.
@@ -292,7 +347,8 @@ pub(crate) fn check_request(
 impl Join {
     /// Read what the host already holds: the joined identities and the rates, the host's own
     /// state, so that neither a restart nor an operator's apply forgets one. Identities past
-    /// their idle limit lapse here, and a certificate no record names leaves the trust set.
+    /// their idle limit lapse here, and a certificate no record names leaves the trust set. The
+    /// hashes of source addresses are not read: their key went with the last process.
     pub(crate) fn load(
         config: JoinConfig,
         config_dir: &Path,
@@ -366,11 +422,17 @@ impl Join {
             return Ok(Vec::new());
         }
         let text = self.sealer.read_text(&self.limits_path)?;
-        let attempts: Vec<Attempt> = serde_json::from_str(&text)
+        let mut attempts: Vec<Attempt> = serde_json::from_str(&text)
             .map_err(|e| format!("{}: {e}", self.limits_path.display()))?;
+        for attempt in &mut attempts {
+            attempt.source = None;
+        }
         let bytes = std::fs::read(&self.limits_path)
             .map_err(|e| format!("read {}: {e}", self.limits_path.display()))?;
-        if reseal && !self.sealer.is_current(&bytes) {
+        // Rewritten whenever this drops something, so a file from before ledger #3307 gives up
+        // its addresses at the first open and not at the next attempt, which may never come.
+        let dropped = serde_json::to_string(&attempts).expect("a list of plain records") != text;
+        if dropped || (reseal && !self.sealer.is_current(&bytes)) {
             self.write_attempts(&attempts)?;
         }
         Ok(attempts)
@@ -469,7 +531,7 @@ impl Join {
     }
 
     /// What a door mints for `fingerprint` at a connection: `Ok(Some)` for a live identity; or
-    /// `Ok(None)` to fall through to the lobby, remembering the source address for its request.
+    /// `Ok(None)` to fall through to the lobby, remembering the source's hash for its request.
     pub(crate) fn connect(
         &self,
         fingerprint: &str,
@@ -486,13 +548,13 @@ impl Join {
             }
             self.lapse_one(&mut state, fingerprint)?;
         }
+        state.retire_key(now.as_millis());
         if let Some(address) = source {
+            let hash = state.hash_source(address, now.as_millis())?;
             if state.sources.len() >= SOURCES_MAX {
                 state.sources.clear();
             }
-            state
-                .sources
-                .insert(fingerprint.to_string(), address.to_string());
+            state.sources.insert(fingerprint.to_string(), hash);
         }
         Ok(None)
     }
@@ -539,7 +601,8 @@ impl Join {
         state
             .attempts
             .retain(|a| now.saturating_sub(a.at) < WINDOW_MILLIS);
-        let address = state.sources.get(fingerprint).cloned();
+        state.retire_key(now);
+        let source = state.sources.get(fingerprint).cloned();
         let c = &self.config;
         if state.attempts.len() >= c.per_hour {
             return Err(unavailable(format!(
@@ -560,11 +623,11 @@ impl Join {
                 c.per_certificate
             )));
         }
-        if let Some(address) = &address {
+        if let Some(source) = &source {
             if state
                 .attempts
                 .iter()
-                .filter(|a| a.address.as_ref() == Some(address))
+                .filter(|a| a.source.as_ref() == Some(source))
                 .count()
                 >= c.per_address
             {
@@ -578,7 +641,7 @@ impl Join {
         state.attempts.push(Attempt {
             at: now,
             fingerprint: fingerprint.to_string(),
-            address,
+            source,
         });
         self.write_attempts(&state.attempts)
             .map_err(|e| Error::Unavailable(format!("the join rate cannot be recorded: {e}")))
