@@ -91,6 +91,11 @@
 //! # let identity = ikigai_encrypt::age::Identity::generate();
 //! # std::fs::write(dir.join("state.key"),
 //! #     ikigai_encrypt::age::ExposeSecret::expose_secret(&identity.to_string())).unwrap();
+//! # #[cfg(unix)] {
+//! #     use std::os::unix::fs::PermissionsExt;
+//! #     std::fs::set_permissions(dir.join("state.key"), std::fs::Permissions::from_mode(0o600)).unwrap();
+//! #     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+//! # }
 //! // An age identity file (`age-keygen -o state.key`), read once, at open.
 //! let key = StateKey::load(dir.join("state.key")).expect("an age identity");
 //! let host = ikigai_layers::Host::open(&config, &state, &key).expect("a configuration that checks");

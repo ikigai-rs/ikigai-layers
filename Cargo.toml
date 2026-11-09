@@ -47,6 +47,7 @@ host = [
     "dep:oxrdfio",
     "dep:oxsdatatypes",
     "dep:pem-rfc7468",
+    "dep:rustix",
     "dep:serde",
     "dep:sha2",
     "dep:toml",
@@ -198,6 +199,13 @@ oxsdatatypes = { version = "0.2.4", optional = true }
 # ⚠ `"3"` is `>=3, <4`.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 futures-timer = "3"
+
+# `StateKey::load` compares the owner of the identity file with this process's effective user,
+# and this crate forbids `unsafe`, so the call comes from rustix. On the line ikigai-intray
+# already links, so nothing new is compiled; the `process` feature adds only those few wrappers.
+# ⚠ `"1.1"` is `<2.0.0`.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["process"], optional = true }
 
 [dev-dependencies]
 # The module recipe as one test. 0.14.0 is the CURRENT published definition of "done", the

@@ -62,6 +62,11 @@
 //! # write("collabs/gw.toml", "[[mount]]\nlayer = \"gateway-a\"\na = [\"read\", \"feed\", \"out\", \"take\"]\nr = [\"read\", \"feed\", \"out\", \"take\"]\n");
 //! # write("state.key", ikigai_encrypt::age::ExposeSecret::expose_secret(
 //! #     &ikigai_encrypt::age::Identity::generate().to_string()));
+//! # #[cfg(unix)] {
+//! #     use std::os::unix::fs::PermissionsExt;
+//! #     std::fs::set_permissions(config.join("state.key"), std::fs::Permissions::from_mode(0o600)).unwrap();
+//! #     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+//! # }
 //! # let key = ikigai_layers::StateKey::load(config.join("state.key")).unwrap();
 //! let host = ikigai_layers::Host::open(&config, &state, &key).expect("a gateway configuration");
 //! let layers = Kernel::new(Arc::new(ikigai_layers::space(&host))).with_clock(Arc::new(SystemClock));

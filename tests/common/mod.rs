@@ -28,6 +28,9 @@ impl Scratch {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
+        // A state key is refused in a directory another account can write, whatever the umask.
+        #[cfg(unix)]
+        set_mode(&dir, 0o700);
         Scratch(dir)
     }
 
@@ -311,6 +314,15 @@ pub fn write_identities(path: &Path, identities: &[&age::x25519::Identity]) {
         .map(|i| format!("{}\n", i.to_string().expose_secret()))
         .collect();
     std::fs::write(path, format!("# created by a test\n{text}")).unwrap();
+    #[cfg(unix)]
+    set_mode(path, 0o600);
+}
+
+/// Set `path`'s permission bits, whatever the umask made them.
+#[cfg(unix)]
+pub fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
 }
 
 /// Write one identity as an age identity file at `path`.
