@@ -291,3 +291,71 @@ fn a_generated_grant_projects_exactly_its_layers() {
         "{own}"
     );
 }
+
+/// The door's two files, as a run of `ikigai-layers grants` left them.
+fn door_files(dir: &std::path::Path) -> (String, String) {
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+    (read("grants.json"), read("clients.json"))
+}
+
+#[test]
+fn a_missing_or_empty_config_directory_is_refused_and_nothing_is_written() {
+    let config = Scratch::new("cfg");
+    write_config(&config);
+    let out = Scratch::new("out");
+    let bin = env!("CARGO_BIN_EXE_ikigai-layers");
+    let grants = |dir: &std::path::Path| {
+        Command::new(bin)
+            .args(["grants", dir.to_str().unwrap(), "--out"])
+            .arg(out.path())
+            .output()
+            .expect("the binary runs")
+    };
+    let written = grants(config.path());
+    assert!(written.status.success(), "{written:?}");
+    let before = door_files(out.path());
+
+    let missing = config.path().join("no-such-dir");
+    let empty = Scratch::new("empty");
+    for dir in [missing.as_path(), empty.path()] {
+        let refused = grants(dir);
+        assert_eq!(refused.status.code(), Some(1), "{dir:?}: {refused:?}");
+        let said = String::from_utf8_lossy(&refused.stderr);
+        assert!(said.contains(dir.to_str().unwrap()), "{said}");
+        assert!(said.contains("nothing written"), "{said}");
+        assert_eq!(door_files(out.path()), before, "{dir:?}");
+    }
+
+    // A file where the directory should be is refused too.
+    let refused = grants(&config.path().join("participants.ttl"));
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    assert_eq!(door_files(out.path()), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn both_files_are_written_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let config = Scratch::new("cfg");
+    write_config(&config);
+    let out = Scratch::new("out");
+    // Files an earlier run (or a stale temporary) left readable by others are replaced 0600.
+    for name in [
+        "grants.json",
+        "clients.json",
+        ".grants.json.tmp",
+        ".clients.json.tmp",
+    ] {
+        out.write(name, "{}\n");
+        set_mode(&out.path().join(name), 0o644);
+    }
+    enrollment(&config).write(out.path()).unwrap();
+    for name in ["grants.json", "clients.json"] {
+        let mode = std::fs::metadata(out.path().join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "{name}");
+    }
+}

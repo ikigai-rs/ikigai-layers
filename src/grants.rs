@@ -26,10 +26,12 @@
 //! writes no `default` grant: a certificate it did not enroll is refused by the door.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::Path;
 
 use serde::Serialize;
 
+use crate::at_rest::{private, private_file};
 use crate::config::{Config, ConfigError, Participants};
 use crate::name::{collab_cap, fold_fingerprint, layer_cap, Participant};
 
@@ -209,8 +211,35 @@ pub fn generate(
 /// Everything `ikigai-layers grants` derives from the configuration under `dir`: read and check
 /// it ([`Config::load`]), read the fingerprints ([`load_fingerprints`]) and [`generate`]. One
 /// function, so every caller (the `grants` and `onboard setup` subcommands) derives the same.
+///
+/// A `dir` that is not a directory, or that holds no manifest (`collabs/*.toml`), is refused:
+/// every file the configuration reads is optional, so either would derive an enrollment that
+/// grants no one anything, and writing it would replace the door's with an empty one.
 pub fn derive(dir: &Path) -> Result<(Config, Enrollment), ConfigError> {
+    let at = dir.display();
+    match std::fs::metadata(dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(ConfigError(format!(
+                "{at} is not a directory: pass the configuration directory, which holds \
+                 collabs/*.toml; nothing written"
+            )))
+        }
+        Err(e) => {
+            return Err(ConfigError(format!(
+                "the configuration directory {at} cannot be read ({e}): pass the directory \
+                 that holds collabs/*.toml; nothing written"
+            )))
+        }
+    }
     let config = Config::load(dir)?;
+    if config.collabs.is_empty() {
+        return Err(ConfigError(format!(
+            "{at} holds no manifest (collabs/*.toml), so the enrollment would grant no one \
+             anything: pass the configuration directory that holds the manifests; nothing \
+             written"
+        )));
+    }
     let fingerprints = load_fingerprints(dir, &config)?;
     let enrollment = generate(&config, &fingerprints)?;
     Ok((config, enrollment))
@@ -241,7 +270,8 @@ impl Enrollment {
     }
 
     /// Write both files into `dir`, each atomically (a temporary file renamed over the
-    /// old), so a door re-reading them per connection never sees half of one.
+    /// old), so a door re-reading them per connection never sees half of one. Each is `0600`
+    /// on unix, whatever the umask and whatever mode a file it replaces had.
     pub fn write(&self, dir: &Path) -> Result<(), String> {
         for (name, text) in [
             ("grants.json", self.grants_json()),
@@ -249,9 +279,17 @@ impl Enrollment {
         ] {
             let path = dir.join(name);
             let tmp = dir.join(format!(".{name}.tmp"));
-            std::fs::write(&tmp, text)
-                .and_then(|()| std::fs::rename(&tmp, &path))
-                .map_err(|e| format!("write {}: {e}", path.display()))?;
+            let fail = |e: String| format!("write {}: {e}", path.display());
+            private_file()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)
+                .and_then(|mut file| file.write_all(text.as_bytes()))
+                .map_err(|e| fail(e.to_string()))?;
+            // A temporary file left by an earlier run keeps its mode when opened: set it.
+            private(&tmp).map_err(fail)?;
+            std::fs::rename(&tmp, &path).map_err(|e| fail(e.to_string()))?;
         }
         Ok(())
     }

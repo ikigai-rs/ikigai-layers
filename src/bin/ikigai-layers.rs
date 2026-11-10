@@ -19,7 +19,8 @@ const USAGE: &str = "usage: ikigai-layers grants <config dir> [--out <dir>] [--c
 
 grants derives the layer door's enrollment from <config dir>'s manifests (collabs/*.toml),
 participants (participants.ttl) and certificate fingerprints (enrollment.toml), and writes
-grants.json and clients.json into --out (default: <config dir>), each atomically.
+grants.json and clients.json into --out (default: <config dir>), each atomically and 0600.
+A <config dir> that is missing or holds no manifest is refused and nothing is written.
 --check verifies the configuration and prints what would be written, writing nothing.
 A manifest that mounts another collaboration's layer is refused and nothing is written.
 
