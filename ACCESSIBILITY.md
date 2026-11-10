@@ -65,7 +65,9 @@ repository's.
   warming a feed's shared copy after a publish fails (the entry stands, and the first reader
   computes the answer).
 - **The `ikigai-layers` binary** (`src/bin/ikigai-layers.rs`): usage text; `grants` prints one
-  line per grant, client, unenrolled participant and idle certificate, then what it wrote;
+  line per grant, client, unenrolled participant and idle certificate, then what it wrote,
+  and refuses a configuration directory that is missing, not a directory or holds no manifest,
+  saying which and that nothing was written;
   `onboard setup` prints what it did and a `stuck: …` line for each way a node would be left in
   the lobby; `descriptor` prints `wrote <path> and <path>`. Failures go to stderr.
 
