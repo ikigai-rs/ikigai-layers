@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-layers"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 # The toolchain the shared CI's msrv job builds and tests on: the line the ecosystem's other
 # declared crates (ikigai-script, ikigai-log, ikigai-cms-web) hold. Nothing here needs more
@@ -142,8 +142,12 @@ ikigai-jsonld = { version = "0.4.0", optional = true }
 # ⚠ `"0.5.0"` is `<0.6.0`.
 ikigai-sparql = { version = "0.5.0", optional = true }
 # A feed's Atom face (ledger #3284): the SELECT's XML results through a stylesheet kept as a
-# file, called as a function. 0.7.0 is the release on core 0.3. ⚠ `"0.7.0"` is `<0.8.0`.
-ikigai-xslt = { version = "0.7.0", optional = true }
+# file, called as a function. 0.8.0 moves to ikigai-xrust, preserving prefixed attribute
+# values as written, and admits the cli's 0.8.1 so a host links one XSLT engine. The Atom
+# stylesheet needs neither 0.8.1's union-template nor parameter-analysis fixes, so 0.8.0 is
+# the minimum. No XSLT types are exposed in this crate's public API.
+# ⚠ `"0.8.0"` is `<0.9.0`.
+ikigai-xslt = { version = "0.8.0", optional = true }
 # Turtle and JSON-LD in (`say`'s content, the shapes and the participants graph), Turtle out.
 # 0.3.4 / 0.2.4 / 0.2.6 are the model, serializer and parser oxigraph 0.5.11 uses, so the
 # graph carries one of each beside ikigai-shacl in a host. oxrdfio's JSON-LD parser has no
