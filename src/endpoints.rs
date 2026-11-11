@@ -1178,6 +1178,14 @@ impl LayerEndpoint {
         let _write = self.state.write.lock().await;
         join.check_room(&fingerprint, now)?;
         let seq = self.settle_feed()?;
+        // As for `say`: a request supersedes only its own author's entry. The lobby's shapes
+        // are the operator's, and one that admits `ik:supersedes` must not let one stranger's
+        // request retire another's.
+        self.state
+            .channel()
+            .read()
+            .expect("channel lock")
+            .check_supersedes(&draft, &author)?;
         let id = id::mint(now.as_millis(), seq);
         let iri = format!("{}{id}", entry_prefix(self.layer()));
         let created = xsd_date_time(now);

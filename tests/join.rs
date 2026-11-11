@@ -1729,3 +1729,72 @@ fn the_counts_description_says_what_the_numbers_are_not() {
     }
     assert!(!described.contains("  "), "{described}");
 }
+
+/// A join request supersedes only its own author's entry, as a `say` does: the join path
+/// stores what the lobby admits, and an operator's join shapes may admit `ik:supersedes`, so
+/// without the host's own check one stranger's request retires another's in `latest`.
+#[test]
+fn a_join_request_never_supersedes_another_joiners() {
+    let config = join_config("");
+    let shapes = include_str!("../onboard/layers/join.shapes.ttl").replace(
+        "    [ sh:path prov:wasAttributedTo ;",
+        "    [ sh:path ik:supersedes ; sh:nodeKind sh:IRI ] ,\n    [ sh:path prov:wasAttributedTo ;",
+    );
+    assert!(shapes.contains("ik:supersedes"), "{shapes}");
+    config.write("layers/join.shapes.ttl", &shapes);
+    let state = Scratch::new("join-state");
+    let host = Host::open(config.path(), state.path(), &key(config.path())).expect("the host");
+    let kernel = kernel_over(&host);
+    let d = Door {
+        config,
+        state,
+        host,
+        kernel,
+    };
+
+    join(&d, "alice", &["releases"]).expect("alice joins");
+    let reader = cap(&gonk(), &["urn:cap:layer:read:join"]);
+    let entries = source(&d.kernel, "urn:layer:join:entries", &[], &reader);
+    let alices = triples(&entries)
+        .iter()
+        .map(|t| t.subject.to_string())
+        .find(|s| s.starts_with("<urn:layer:join:entry:"))
+        .expect("alice's request")
+        .trim_matches(|c| c == '<' || c == '>')
+        .to_string();
+
+    let (pem, fp) = certificate("mallory");
+    let content = request_turtle(&pem, &fp, &["releases"]).replace(
+        "onb:JoinRequest ;",
+        &format!("onb:JoinRequest ;\n  <https://ikigai-rs.dev/ns#supersedes> <{alices}> ;"),
+    );
+    let refused = issue(
+        &d.kernel,
+        Verb::Sink,
+        SAY,
+        &[("content", &content), ("as", "application/json")],
+        &d.minted(&fp),
+    );
+    match refused {
+        Err(Error::Denied(m)) => assert!(m.contains("another participant's entry"), "{m}"),
+        other => panic!("mallory's request superseded alice's: {other:?}"),
+    }
+
+    // And one that supersedes no entry at all is refused as a `say` refuses it.
+    let (pem, fp) = certificate("trent");
+    let content = request_turtle(&pem, &fp, &["releases"]).replace(
+        "onb:JoinRequest ;",
+        "onb:JoinRequest ;\n  <https://ikigai-rs.dev/ns#supersedes> <urn:layer:join:entry:nothing> ;",
+    );
+    let refused = issue(
+        &d.kernel,
+        Verb::Sink,
+        SAY,
+        &[("content", &content), ("as", "application/json")],
+        &d.minted(&fp),
+    );
+    assert!(
+        matches!(refused, Err(Error::InvalidArgument { .. })),
+        "{refused:?}"
+    );
+}
