@@ -1,8 +1,7 @@
-# A feed layer's entries over its graph (ledger #3284), newest last, in one SELECT: every entry,
-# or those whose dcterms:subject reaches a wanted concept through skos:broader* (a property
-# path, no reasoner). The host fills three holes, each with a value it has already checked:
-# the VALUES cells (concept IRIs of the layer's scheme, or UNDEF for no filter), and two numbers.
-# A row with no ?entry names the feed alone, so an empty answer still has a feed to describe.
+# A feed layer's entries, newest last. Concept values arrive as RDF bindings; only
+# generated variable names and checked integer page bounds enter the query text.
+# Aggregate optional text per entry before paging, even if its shapes allow several values.
+# Keep the optional match outside the alternatives: one empty row describes an empty feed.
 PREFIX rss: <http://purl.org/rss/1.0/>
 PREFIX content: <http://purl.org/rss/1.0/modules/content/>
 PREFIX dc: <http://purl.org/dc/elements/1.1/>
@@ -11,18 +10,19 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
 PREFIX ik: <https://ikigai-rs.dev/ns#>
 
-SELECT DISTINCT ?layer ?feedLabel ?entry ?seq ?title ?content ?issued ?creator
+SELECT ?layer ?feedLabel ?entry ?seq (MIN(?entryTitle) AS ?title)
+       (MIN(?entryContent) AS ?content) ?issued ?creator __WANTED__
 WHERE {
-  VALUES ?wanted { __CONCEPTS__ }
   ?layer a ik:Feed ; rdfs:label ?feedLabel .
   OPTIONAL {
     ?entry a rss:item ; dcterms:isPartOf ?layer ; ik:seq ?seq ;
            dcterms:issued ?issued ; dc:creator ?creator .
-    OPTIONAL { ?entry rss:title ?title }
-    OPTIONAL { ?entry content:encoded ?content }
+    OPTIONAL { ?entry rss:title ?entryTitle }
+    OPTIONAL { ?entry content:encoded ?entryContent }
     FILTER(?seq > __AFTER__)
-    FILTER(!BOUND(?wanted) || EXISTS { ?entry dcterms:subject/skos:broader* ?wanted })
+    FILTER(__FILTER__)
   }
 }
+GROUP BY ?layer ?feedLabel ?entry ?seq ?issued ?creator __WANTED__
 ORDER BY ?seq
 LIMIT __LIMIT__

@@ -26,10 +26,10 @@ const FEED_SHAPES: &str = r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 
 <urn:example:shape:announcement> a sh:NodeShape ;
-  sh:targetClass ik:Message ;
+  sh:targetClass ik:Message, <urn:example:Special> ;
   sh:closed true ;
   sh:ignoredProperties ( rdf:type ) ;
-  sh:property [ sh:path dcterms:title ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] ,
+  sh:property [ sh:path dcterms:title ; sh:minCount 1 ; sh:maxCount 2 ; sh:datatype xsd:string ] ,
               [ sh:path ik:body ; sh:maxCount 1 ; sh:datatype xsd:string ] ,
               [ sh:path dcterms:subject ; sh:nodeKind sh:IRI ] ,
               [ sh:path prov:wasAttributedTo ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ,
@@ -56,7 +56,11 @@ const SCHEME_TTL: &str = r#"@prefix skos: <http://www.w3.org/2004/02/skos/core#>
 
 /// A host with the `releases` feed, read by Bobby and Chris and published by Brian.
 fn feed_fixture() -> Fixture {
-    feed_fixture_with(
+    feed_fixture_with_scheme(SCHEME_TTL)
+}
+
+fn feed_fixture_with_scheme(scheme: &str) -> Fixture {
+    feed_fixture_with_scheme_and_options(scheme,
         "model = \"channel\"\nlabel = \"Releases\"\nshapes = \"feed.shapes.ttl\"\ncontext = \"feed.context.jsonld\"\nshared = [\"audience\"]\nfeed = true\npublic = true\npublishers = [\"brian\"]\nscheme = \"releases.scheme.ttl\"\n",
         "[[mount]]\nlayer = \"releases\"\nbrian = [\"read\", \"feed\", \"say\"]\nbobby = [\"read\", \"feed\"]\nchris = [\"read\"]\n",
     )
@@ -64,11 +68,19 @@ fn feed_fixture() -> Fixture {
 }
 
 fn feed_fixture_with(definition: &str, audience: &str) -> Result<Fixture, String> {
+    feed_fixture_with_scheme_and_options(SCHEME_TTL, definition, audience)
+}
+
+fn feed_fixture_with_scheme_and_options(
+    scheme: &str,
+    definition: &str,
+    audience: &str,
+) -> Result<Fixture, String> {
     let config = Scratch::new("config");
     write_config(&config);
     config.write("layers/feed.shapes.ttl", FEED_SHAPES);
     config.write("layers/feed.context.jsonld", FEED_CONTEXT);
-    config.write("layers/releases.scheme.ttl", SCHEME_TTL);
+    config.write("layers/releases.scheme.ttl", scheme);
     config.write("layers/releases.toml", definition);
     config.write("collabs/audience.toml", audience);
     let state = Scratch::new("state");
@@ -513,4 +525,274 @@ fn feed_options_are_refused_where_they_mean_nothing() {
             .unwrap_or_else(|| panic!("should refuse: {definition}"));
         assert!(err.contains(expected), "{expected} in {err}");
     }
+}
+
+#[test]
+fn an_unmatched_requested_concept_does_not_consume_a_page_slot() {
+    let f = feed_fixture();
+    let entry = publish(&f, "Release", &[RELEASE]);
+    let concepts = format!("{FEATURE},{RELEASE}");
+    for face in ["text/turtle", "application/atom+xml"] {
+        let page = source(
+            &f.kernel,
+            ENTRIES,
+            &[("concept", &concepts), ("limit", "1"), ("as", face)],
+            &reader("bobby"),
+        );
+        assert!(page.contains(&entry), "{face}: {page}");
+    }
+}
+
+#[test]
+fn concept_and_type_filters_apply_before_the_page_limit() {
+    let f = feed_fixture();
+    publish(&f, "First", &[RELEASE]);
+    let content = format!("@prefix ik: <{IK}> . @prefix dcterms: <http://purl.org/dc/terms/> . <urn:layer:new> a ik:Message, <urn:example:Special> ; dcterms:title \"Second\" ; dcterms:subject <{RELEASE}> .");
+    let entry = text(
+        &issue(
+            &f.kernel,
+            Verb::Sink,
+            "urn:layer:releases:say",
+            &[("content", &content)],
+            &publisher(),
+        )
+        .unwrap(),
+    );
+    let page = source(
+        &f.kernel,
+        ENTRIES,
+        &[
+            ("concept", RELEASE),
+            ("type", "urn:example:Special"),
+            ("limit", "1"),
+        ],
+        &reader("bobby"),
+    );
+    assert!(page.contains(&entry), "{page}");
+}
+
+#[test]
+fn concept_filter_follows_mixed_hierarchy_directions_transitively() {
+    let scheme = SCHEME_TTL.replace(
+        "skos:broader <urn:example:concept:release>",
+        "skos:narrower <urn:example:concept:feature>",
+    ) + "\n<urn:example:concept:release> skos:narrower <urn:example:concept:patch> .";
+    let f = feed_fixture_with_scheme(&scheme);
+    let entry = publish(&f, "Deep descendant", &[FEATURE]);
+    let page = source(
+        &f.kernel,
+        ENTRIES,
+        &[("concept", RELEASE)],
+        &reader("bobby"),
+    );
+    assert!(page.contains(&entry), "{page}");
+}
+
+#[test]
+fn the_graph_jsonld_preserves_scheme_relationships() {
+    let scheme = SCHEME_TTL.to_string() + "\n<urn:example:concept:release> skos:narrower <urn:example:concept:patch> ; skos:exactMatch <urn:other:release> ; skos:closeMatch <urn:other:similar> ; <urn:example:annotation> \"An annotation\"@en .";
+    let f = feed_fixture_with_scheme(&scheme);
+    publish(&f, "Release", &[RELEASE]);
+    publish(&f, "Patch", &[PATCH]);
+    let turtle = source(&f.kernel, GRAPH, &[], &reader("bobby"));
+    let ld = source(
+        &f.kernel,
+        GRAPH,
+        &[("as", "application/ld+json")],
+        &reader("bobby"),
+    );
+    use oxrdfio::{RdfFormat, RdfParser};
+    let expanded: std::collections::HashSet<_> = RdfParser::from_format(RdfFormat::JsonLd {
+        profile: Default::default(),
+    })
+    .for_reader(ld.as_bytes())
+    .map(|q| {
+        let q = q.unwrap();
+        oxrdf::Triple::new(q.subject, q.predicate, q.object)
+    })
+    .collect();
+    let original: std::collections::HashSet<_> = triples(&turtle).into_iter().collect();
+    assert_eq!(expanded, original);
+}
+
+#[test]
+fn a_concept_iri_is_not_rewritten_as_a_query_placeholder() {
+    let concept = "urn:example:concept:__AFTER____LIMIT__";
+    let scheme = SCHEME_TTL.replace(RELEASE, concept);
+    let f = feed_fixture_with_scheme(&scheme);
+    let entry = publish(&f, "Placeholder in IRI", &[concept]);
+    let page = source(
+        &f.kernel,
+        ENTRIES,
+        &[("concept", concept)],
+        &reader("bobby"),
+    );
+    assert!(page.contains(&entry), "{page}");
+}
+
+#[test]
+fn hierarchy_cycles_terminate_and_mappings_and_labels_do_not_expand_the_filter() {
+    let scheme = SCHEME_TTL.to_string()
+        + r#"
+<urn:example:concept:release> skos:broader <urn:example:concept:patch> ;
+    skos:exactMatch <urn:example:concept:feature> ; skos:closeMatch <urn:other:release> .
+<urn:example:concept:feature> skos:prefLabel "Release" .
+"#;
+    let f = feed_fixture_with_scheme(&scheme);
+    let patch = publish(&f, "In cycle", &[PATCH]);
+    let unrelated = publish(&f, "Same label and mapping", &[FEATURE]);
+    let page = source(
+        &f.kernel,
+        ENTRIES,
+        &[("concept", RELEASE)],
+        &reader("bobby"),
+    );
+    assert!(page.contains(&patch), "{page}");
+    assert!(!page.contains(&unrelated), "{page}");
+    assert!(matches!(issue(&f.kernel, Verb::Source, ENTRIES,
+        &[("concept", "urn:other:release")], &reader("bobby")),
+        Err(Error::InvalidArgument { name, .. }) if name == "concept"));
+}
+
+#[test]
+fn entry_pages_stay_in_sequence_when_a_publish_arrives_between_requests() {
+    let f = feed_fixture();
+    let first = publish(&f, "First", &[PATCH, RELEASE]);
+    let second = publish(&f, "Second", &[RELEASE]);
+    let third = publish(&f, "Third", &[PATCH]);
+    let concepts = format!("{PATCH},{RELEASE},{FEATURE}");
+    for face in ["text/turtle", "application/atom+xml"] {
+        let page = source(
+            &f.kernel,
+            ENTRIES,
+            &[("concept", &concepts), ("limit", "2"), ("as", face)],
+            &reader("bobby"),
+        );
+        assert!(
+            page.find(&first).unwrap() < page.find(&second).unwrap(),
+            "{page}"
+        );
+        assert!(!page.contains(&third), "{page}");
+        if face == "application/atom+xml" {
+            assert_eq!(page.matches("<entry>").count(), 2, "{page}");
+        }
+    }
+    let fourth = publish(&f, "Fourth", &[RELEASE]);
+    for face in ["text/turtle", "application/atom+xml"] {
+        let page = source(
+            &f.kernel,
+            ENTRIES,
+            &[
+                ("concept", &concepts),
+                ("after", "2"),
+                ("limit", "2"),
+                ("as", face),
+            ],
+            &reader("bobby"),
+        );
+        assert!(
+            page.find(&third).unwrap() < page.find(&fourth).unwrap(),
+            "{page}"
+        );
+        assert!(!page.contains(&first) && !page.contains(&second), "{page}");
+        let empty = source(
+            &f.kernel,
+            ENTRIES,
+            &[("concept", &concepts), ("after", "4"), ("as", face)],
+            &reader("bobby"),
+        );
+        assert!(!empty.contains(&fourth), "{empty}");
+        if face == "application/atom+xml" {
+            assert_eq!(page.matches("<entry>").count(), 2, "{page}");
+            assert!(empty.contains("<id>urn:layer:releases</id>"), "{empty}");
+        }
+    }
+}
+
+#[test]
+fn empty_graph_and_jsonld_faces_describe_the_same_feed_and_scheme() {
+    let f = feed_fixture();
+    let turtle = source(&f.kernel, GRAPH, &[], &reader("bobby"));
+    let ld = source(
+        &f.kernel,
+        GRAPH,
+        &[("as", "application/ld+json")],
+        &reader("bobby"),
+    );
+    let parsed: std::collections::HashSet<_> =
+        oxrdfio::RdfParser::from_format(oxrdfio::RdfFormat::JsonLd {
+            profile: Default::default(),
+        })
+        .for_reader(ld.as_bytes())
+        .map(|q| {
+            let q = q.unwrap();
+            oxrdf::Triple::new(q.subject, q.predicate, q.object)
+        })
+        .collect();
+    assert_eq!(parsed, triples(&turtle).into_iter().collect());
+    assert!(turtle.contains("urn:layer:releases"));
+}
+
+#[test]
+fn multiple_titles_do_not_repeat_an_entry_or_consume_its_neighbors_page_slot() {
+    let f = feed_fixture();
+    let content = format!("@prefix ik: <{IK}> . @prefix dcterms: <http://purl.org/dc/terms/> . <urn:layer:new> a ik:Message ; dcterms:title \"Alpha\", \"Beta\" ; dcterms:subject <{RELEASE}> .");
+    let first = text(
+        &issue(
+            &f.kernel,
+            Verb::Sink,
+            "urn:layer:releases:say",
+            &[("content", &content)],
+            &publisher(),
+        )
+        .unwrap(),
+    );
+    let second = publish(&f, "Second", &[RELEASE]);
+    for face in ["text/turtle", "application/atom+xml"] {
+        let page = source(
+            &f.kernel,
+            ENTRIES,
+            &[("concept", RELEASE), ("limit", "2"), ("as", face)],
+            &reader("bobby"),
+        );
+        assert!(
+            page.contains(&first) && page.contains(&second),
+            "{face}: {page}"
+        );
+        if face == "application/atom+xml" {
+            assert_eq!(page.matches("<entry>").count(), 2, "{page}");
+        }
+    }
+}
+
+#[test]
+fn concept_and_author_filters_apply_before_the_page_limit() {
+    let f = feed_fixture_with(
+        "model = \"channel\"\nshapes = \"feed.shapes.ttl\"\ncontext = \"feed.context.jsonld\"\nfeed = true\npublishers = [\"brian\", \"chris\"]\nscheme = \"releases.scheme.ttl\"\n",
+        "[[mount]]\nlayer = \"releases\"\nbrian = [\"read\", \"say\"]\nbobby = [\"read\"]\nchris = [\"read\", \"say\"]\n",
+    ).unwrap();
+    publish(&f, "Brian first", &[RELEASE]);
+    let content = format!("@prefix ik: <{IK}> . @prefix dcterms: <http://purl.org/dc/terms/> . <urn:layer:new> a ik:Message ; dcterms:title \"Chris second\" ; dcterms:subject <{RELEASE}> .");
+    let chris = cap(&participant("chris"), &["urn:cap:layer:say:releases"]);
+    let entry = text(
+        &issue(
+            &f.kernel,
+            Verb::Sink,
+            "urn:layer:releases:say",
+            &[("content", &content)],
+            &chris,
+        )
+        .unwrap(),
+    );
+    let page = source(
+        &f.kernel,
+        ENTRIES,
+        &[
+            ("concept", RELEASE),
+            ("from", &participant("chris")),
+            ("limit", "1"),
+        ],
+        &reader("bobby"),
+    );
+    assert!(page.contains(&entry), "{page}");
 }

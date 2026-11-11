@@ -546,13 +546,20 @@ publishers and read by everyone holding its `read` grant.
   `dcterms:subject`, `dcterms:isPartOf <urn:layer:{layer}>`), unioned with the scheme, from one
   SPARQL CONSTRUCT kept as a file (`src/feeds/graph.rq`). An entry's title is its
   `dcterms:title` and its content its `ik:body`; `dcterms:issued` and `dc:creator` are the
-  stamps the host wrote.
+  stamps the host wrote. Its JSON-LD face compacts without pruning scheme annotations.
 - **Filtered entries.** `entries concept=<c>[,<c>...]` answers the entries whose
-  `dcterms:subject/skos:broader*` reaches any given concept, from one SPARQL SELECT over the
-  graph (`src/feeds/entries.rq`, property paths, no reasoner), keyed by the concepts and never
-  by the caller. An unknown concept is `invalid-argument` naming it.
+  `dcterms:subject/(skos:broader|^skos:narrower)*` reaches any given concept, from one
+  SPARQL SELECT over the graph (`src/feeds/entries.rq`, property paths, no reasoner), keyed by the concepts and never
+  by the caller. Both hierarchy directions are followed transitively; cycles terminate.
+  Labels and `skos:exactMatch`/`skos:closeMatch` do not widen the filter. An unknown concept
+  is `invalid-argument` naming it. Entries are ordered by their host-stamped sequence,
+  oldest first. `after=<seq>` is exclusive; resume after the last entry received. All
+  filters apply before `limit` (default 100, at most 1000), so a new publish between pages
+  neither repeats nor skips an earlier entry. There is no `since` argument.
 - **Atom.** `entries as=application/atom+xml`, with or without `concept=`, is an Atom 1.0
   document from the same SELECT through a stylesheet kept as a file (`src/feeds/atom.xsl`).
+  If shapes allow several titles or bodies, Atom uses the SPARQL minimum of each, with
+  one row per entry before paging. A missing body becomes empty text content.
 
 A reader asks about a feed entry in its own Talk channel, not on the feed. Opening a
 feed to a clean installation, and approving a join, are a door's concern: gonk's and the
@@ -583,6 +590,10 @@ front, MCP and the action manifold all offer the same ones.
 A face a resource does not offer is refused (`invalid-argument` on `as`), never answered in
 another. One tuple (`tuple=`) is a graph, so it is refused as `application/json`, a list's
 face. In the lists, `seq` is a JSON number, as in the feed.
+
+A feed layer's `:graph` face preserves its scheme annotations, including properties outside
+its context, under compact IRIs or full IRIs. The following egress rules apply to stored
+entry and tuple faces.
 
 **A graph** is the layer's egress context, PRUNED and compacted: the stored graph is
 expanded, everything the context does not define is removed (a property, a type, a datatype;

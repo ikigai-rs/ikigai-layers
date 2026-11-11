@@ -51,31 +51,47 @@ fn source_iri(layer: &str) -> String {
     format!("{}:source", layer_iri(layer))
 }
 
-/// The [`ENTRIES_QUERY`] for these already-checked values: `concepts` are concepts of the
-/// layer's scheme (so their IRIs are the operator's, and no IRI can hold a `>`), or empty for
-/// no filter; `after` and `limit` are numbers.
+/// The [`ENTRIES_QUERY`] for a concept count and checked integer page bounds.
+/// Concept IRIs never enter the query text: issue this query with [`entries_bindings`].
 ///
 /// ```
-/// let q = ikigai_layers::feeds::entries_query(&["urn:example:c".to_string()], 3, 7);
-/// assert!(q.contains("VALUES ?wanted { <urn:example:c> }"));
+/// let concepts = vec!["urn:example:c".to_string()];
+/// let q = ikigai_layers::feeds::entries_query(&concepts, 3, 7);
+/// assert!(!q.contains("urn:example:c"));
+/// assert!(q.contains("?wanted0"));
 /// assert!(q.contains("FILTER(?seq > 3)"));
 /// assert!(q.contains("LIMIT 7"));
-/// assert!(ikigai_layers::feeds::entries_query(&[], 0, 1).contains("VALUES ?wanted { UNDEF }"));
 /// ```
 pub fn entries_query(concepts: &[String], after: u64, limit: u64) -> String {
-    let cells = if concepts.is_empty() {
-        "UNDEF".to_string()
+    let variables: Vec<_> = (0..concepts.len()).map(|i| format!("?wanted{i}")).collect();
+    let filter = if variables.is_empty() {
+        "true".to_string()
     } else {
-        concepts
-            .iter()
-            .map(|c| format!("<{c}>"))
-            .collect::<Vec<_>>()
-            .join(" ")
+        format!(
+            "EXISTS {{ ?entry dcterms:subject/(skos:broader|^skos:narrower)* ?ancestor . FILTER(?ancestor IN ({})) }}",
+            variables.join(", ")
+        )
     };
     ENTRIES_QUERY
-        .replace("__CONCEPTS__", &cells)
+        .replace("__WANTED__", &variables.join(" "))
+        .replace("__FILTER__", &filter)
         .replace("__AFTER__", &after.to_string())
         .replace("__LIMIT__", &limit.to_string())
+}
+
+/// RDF term bindings for [`entries_query`], in the SPARQL endpoint's JSON format.
+pub fn entries_bindings(concepts: &[String]) -> String {
+    let bindings: serde_json::Map<String, serde_json::Value> = concepts
+        .iter()
+        .enumerate()
+        .map(|(i, concept)| {
+            (
+                format!("wanted{i}"),
+                serde_json::json!({"type": "uri", "value": concept}),
+            )
+        })
+        .collect();
+    serde_json::Value::Object(bindings).to_string()
 }
 
 /// What `ikigai_xslt` turned the SELECT's rows into, or the host's own error.
@@ -226,6 +242,16 @@ mod tests {
     }
 
     #[test]
+    fn an_atom_entry_without_a_body_still_has_content() {
+        let xml = rows(&format!(
+            r#"<result>{FEED}<binding name="entry"><uri>urn:entry:Empty</uri></binding><binding name="issued"><literal>2026-11-10T12:00:00Z</literal></binding><binding name="creator"><uri>urn:participant:Brian</uri></binding></result>"#
+        ));
+        let atom = atom_from_rows(&xml).unwrap();
+        // RFC 4287 section 4.1.2: content or an alternate link is required.
+        assert!(atom.contains("<content type='text'"), "{atom}");
+    }
+
+    #[test]
     fn empty_atom_is_byte_stable() {
         let xml = rows(&format!("<result>{FEED}</result>"));
         assert_eq!(
@@ -269,7 +295,7 @@ mod tests {
                 "<published>2026-11-10T13:00:00Z</published>",
                 "<author>",
                 "<name>urn:participant:Brian</name>",
-                "</author></entry>",
+                "</author><content type='text'></content></entry>",
                 "</feed>",
             )
         );

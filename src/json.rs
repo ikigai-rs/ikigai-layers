@@ -231,10 +231,23 @@ impl Egress {
     /// The prune's own refusal, as it answered it (a context it cannot read an allowlist
     /// from), or `Endpoint` when its answer is not JSON.
     pub async fn compact(&self, context: &Value, triples: &[Triple]) -> Result<Value> {
+        self.process(PRUNE, context, triples).await
+    }
+
+    /// Compact a host-owned feed graph without applying a layer's egress allowlist.
+    pub(crate) async fn compact_preserving(
+        &self,
+        context: &Value,
+        triples: &[Triple],
+    ) -> Result<Value> {
+        self.process("urn:jsonld:compact", context, triples).await
+    }
+
+    async fn process(&self, operation: &str, context: &Value, triples: &[Triple]) -> Result<Value> {
         if triples.is_empty() {
             return Ok(json!({ "@context": context, "@graph": [] }));
         }
-        let request = Request::new(Verb::Source, Iri::parse(PRUNE).expect("a constant IRI"))
+        let request = Request::new(Verb::Source, Iri::parse(operation).expect("a constant IRI"))
             .with_arg(
                 "content",
                 ArgRef::Inline(expanded(triples).to_string().into_bytes()),
@@ -248,7 +261,7 @@ impl Egress {
             .issue(request, &Capability::scoped(Vec::<String>::new()))
             .await?;
         let compacted: Value = serde_json::from_slice(&answer.bytes)
-            .map_err(|e| Error::Endpoint(format!("the JSON-LD prune answered no JSON: {e}")))?;
+            .map_err(|e| Error::Endpoint(format!("{operation} answered no JSON: {e}")))?;
         Ok(shape(compacted))
     }
 

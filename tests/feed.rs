@@ -228,3 +228,40 @@ fn every_layer_in_the_cursor_needs_its_own_exact_grant() {
     let none = multi(&f, &[("after", "talk:0")], &["urn:cap:layer:read:talk"]);
     assert!(matches!(none, Err(Error::Denied(_))), "{none:?}");
 }
+
+#[test]
+fn the_json_resume_cursor_stops_at_the_last_delivered_event() {
+    let mut f = fixture();
+    let count = ikigai_layers::feed::MAX_EVENTS as u64 + 1;
+    let log: String = (1..=count).map(|seq| {
+        let line = format!("{seq}\t2026-10-10T00:00:00Z\tsay\turn:example:entry:{seq}\turn:collab:participant:bobby");
+        format!("{}\n", sealed_line(f.config.path(), &line))
+    }).collect();
+    f.state.write("talk/feed.log", &log);
+    f.reopen();
+    let page: serde_json::Value = serde_json::from_str(
+        &feed(&f, "talk", &[("after", "0"), ("as", "application/json")]).unwrap(),
+    )
+    .unwrap();
+    let events = page["events"].as_array().unwrap();
+    assert_eq!(events.len(), ikigai_layers::feed::MAX_EVENTS);
+    assert_eq!(page["last"], events.last().unwrap()["seq"]);
+    let after = page["last"].to_string();
+    let next: serde_json::Value = serde_json::from_str(
+        &feed(&f, "talk", &[("after", &after), ("as", "application/json")]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(next["events"][0]["seq"], count);
+    assert_eq!(next["last"], count);
+    let empty: serde_json::Value = serde_json::from_str(
+        &feed(
+            &f,
+            "talk",
+            &[("after", &count.to_string()), ("as", "application/json")],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(empty["last"], count);
+    assert_eq!(empty["events"].as_array().unwrap().len(), 0);
+}
