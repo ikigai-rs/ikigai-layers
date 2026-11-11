@@ -373,6 +373,9 @@ says which line. An identity lapses after `join_idle_days` without a read: its c
 leaves the trust set, a read on a connection already open is refused, and it may join again.
 `onb:expires` says when it lapses if it is never read; a read on a later day moves that later
 on the host's record.
+Taking `public = true` off a layer (or removing the layer) revokes, at the host's next open,
+every identity that joined for it: its record and certificate go, and it may join again for
+what is still public.
 
 **What is kept.** No source address, in any file, log line or error. The host counts an
 address by `HMAC-SHA256(key, address)`, where `address` is what the limit counts (the IPv4

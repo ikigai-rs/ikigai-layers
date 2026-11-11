@@ -219,6 +219,8 @@ fn counted_source(source: &str, ipv6_prefix: u8) -> String {
 /// The host's public join: its configuration, its own signing kernel, and who has joined.
 pub(crate) struct Join {
     pub(crate) config: JoinConfig,
+    /// The layers that say `public = true` in the configuration this host opened with.
+    public: BTreeSet<String>,
     dir: PathBuf,
     config_dir: PathBuf,
     limits_path: PathBuf,
@@ -431,8 +433,14 @@ impl Join {
     /// state, so that neither a restart nor an operator's apply forgets one. Identities past
     /// their idle limit lapse here, and a certificate no record names leaves the trust set. The
     /// hashes of source addresses are not read: their key went with the last process.
+    ///
+    /// `public` is the layers that say `public = true` now. An identity holding a layer that no
+    /// longer does (made private, or gone) is revoked here whole, so making a layer private
+    /// takes it from every joiner at the next open, and the joiner may join again for what is
+    /// still public.
     pub(crate) fn load(
         config: JoinConfig,
+        public: BTreeSet<String>,
         config_dir: &Path,
         state_dir: &Path,
         sealer: &Sealer,
@@ -450,6 +458,7 @@ impl Join {
         let spaces: Vec<Arc<dyn Space>> = vec![Arc::new(ikigai_sign::space()), Arc::new(key)];
         let join = Join {
             config,
+            public,
             dir,
             config_dir: config_dir.to_path_buf(),
             limits_path: state_dir.join(LIMITS_FILE),
@@ -543,13 +552,14 @@ impl Join {
             .join(format!("{fingerprint}.{suffix}"))
     }
 
-    /// Lapse every identity past its idle limit and make the trust set the live records exactly.
+    /// Lapse every identity past its idle limit, revoke every one holding a layer that is not
+    /// public now, and make the trust set the live records exactly.
     fn reconcile(&self, state: &mut State, now: u64) -> Result<(), String> {
         let idle = self.config.idle_days;
         let lapsed: Vec<String> = state
             .identities
             .values()
-            .filter(|i| i.lapsed(now, idle))
+            .filter(|i| i.lapsed(now, idle) || !i.layers.iter().all(|l| self.public.contains(l)))
             .map(|i| i.fingerprint.clone())
             .collect();
         for fp in &lapsed {
