@@ -211,3 +211,67 @@ impl Endpoint for FeedSource {
             .output(TURTLE)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::atom_from_rows;
+
+    // Fixed SELECT rows keep timestamps and entry identifiers stable across engine upgrades.
+    const FEED: &str = r#"<binding name="layer"><uri>urn:layer:releases</uri></binding><binding name="feedLabel"><literal>Releases &amp; News</literal></binding>"#;
+
+    fn rows(results: &str) -> String {
+        format!(
+            r#"<sparql xmlns="http://www.w3.org/2005/sparql-results#"><head/><results>{results}</results></sparql>"#
+        )
+    }
+
+    #[test]
+    fn empty_atom_is_byte_stable() {
+        let xml = rows(&format!("<result>{FEED}</result>"));
+        assert_eq!(
+            atom_from_rows(&xml).unwrap(),
+            concat!(
+                "<feed xmlns='http://www.w3.org/2005/Atom'>",
+                "<id>urn:layer:releases</id>",
+                "<title>Releases &amp; News</title>",
+                "<updated>1970-01-01T00:00:00Z</updated>",
+                "</feed>",
+            )
+        );
+    }
+
+    #[test]
+    fn populated_atom_is_byte_stable() {
+        let xml = rows(&format!(
+            r#"<result>{FEED}<binding name="entry"><uri>urn:entry:First</uri></binding><binding name="title"><literal>Release &amp; News</literal></binding><binding name="issued"><literal>2026-11-10T12:00:00Z</literal></binding><binding name="creator"><uri>urn:participant:Brian</uri></binding><binding name="content"><literal>Read &lt;this&gt;.</literal></binding></result><result>{FEED}<binding name="entry"><uri>urn:entry:Second</uri></binding><binding name="issued"><literal>2026-11-10T13:00:00Z</literal></binding><binding name="creator"><uri>urn:participant:Brian</uri></binding></result>"#
+        ));
+        assert_eq!(
+            atom_from_rows(&xml).unwrap(),
+            concat!(
+                "<feed xmlns='http://www.w3.org/2005/Atom'>",
+                "<id>urn:layer:releases</id>",
+                "<title>Releases &amp; News</title>",
+                "<updated>2026-11-10T13:00:00Z</updated>",
+                "<entry>",
+                "<id>urn:entry:First</id>",
+                "<title>Release &amp; News</title>",
+                "<updated>2026-11-10T12:00:00Z</updated>",
+                "<published>2026-11-10T12:00:00Z</published>",
+                "<author>",
+                "<name>urn:participant:Brian</name>",
+                "</author>",
+                "<content type='text'>Read &lt;this&gt;.</content>",
+                "</entry>",
+                "<entry>",
+                "<id>urn:entry:Second</id>",
+                "<title>(untitled)</title>",
+                "<updated>2026-11-10T13:00:00Z</updated>",
+                "<published>2026-11-10T13:00:00Z</published>",
+                "<author>",
+                "<name>urn:participant:Brian</name>",
+                "</author></entry>",
+                "</feed>",
+            )
+        );
+    }
+}
