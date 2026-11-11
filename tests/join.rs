@@ -1798,3 +1798,43 @@ fn a_join_request_never_supersedes_another_joiners() {
         "{refused:?}"
     );
 }
+
+#[test]
+fn making_a_layer_private_revokes_its_joiners_at_the_next_open() {
+    let mut d = door();
+    publish(&d);
+    let (pem, fp) = certificate("alice");
+    join_as(&d, &pem, &fp, &["releases", "features"]).unwrap();
+    let (other_pem, other_fp) = certificate("bobby");
+    join_as(&d, &other_pem, &other_fp, &["features"]).unwrap();
+
+    // The operator takes `public = true` off releases.
+    d.config.write(
+        "layers/releases.toml",
+        &format!("{FEED}label = \"Releases\"\n"),
+    );
+    d.restart();
+
+    // Alice held releases: she is a stranger again, with nothing to read and no trust.
+    let stranger = d.minted_at(&fp, None, T0).expect("a lobby");
+    assert_eq!(scopes(&stranger), ["urn:cap:layer:say:join"]);
+    assert!(matches!(read(&d, &stranger), Err(Error::Denied(_))));
+    assert!(d.read(&format!("joined/identities/{fp}.json")).is_none());
+    assert!(d.read(&format!("joined/clients/{fp}.crt")).is_none());
+    let grants = d.read("joined/grants.json").unwrap();
+    assert!(!grants.contains("releases"), "{grants}");
+
+    // Bobby held only what is still public, and keeps it.
+    assert_eq!(scopes(&d.minted(&other_fp)).len(), 2);
+
+    // Alice may join again for what is still public, and not for releases.
+    assert!(matches!(
+        join_as(&d, &pem, &fp, &["releases"]),
+        Err(Error::Denied(_))
+    ));
+    join_as(&d, &pem, &fp, &["features"]).expect("joined again");
+    assert_eq!(
+        scopes(&d.minted(&fp)),
+        ["urn:cap:layer:feed:features", "urn:cap:layer:read:features"]
+    );
+}

@@ -168,6 +168,12 @@ impl Host {
         }
         let onboard = onboard.map(Onboard::new);
         let join_config = config::load_join(&config.dir, &config.layers)?;
+        let public: std::collections::BTreeSet<String> = config
+            .layers
+            .values()
+            .filter(|d| d.feed.as_ref().is_some_and(|f| f.public))
+            .map(|d| d.name.clone())
+            .collect();
         let json = Egress::new();
         let mut egress = BTreeMap::new();
         for (name, def) in &config.layers {
@@ -190,6 +196,7 @@ impl Host {
             .map(|join| {
                 Join::load(
                     join,
+                    public,
                     &config.dir,
                     state_dir,
                     &sealer,
