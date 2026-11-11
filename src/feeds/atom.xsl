@@ -35,9 +35,8 @@
           <updated><xsl:value-of select="r:binding[@name='issued']/r:literal"/></updated>
           <published><xsl:value-of select="r:binding[@name='issued']/r:literal"/></published>
           <author><name><xsl:value-of select="r:binding[@name='creator']/r:uri"/></name></author>
-          <xsl:if test="r:binding[@name='content']">
-            <content type="text"><xsl:value-of select="r:binding[@name='content']/r:literal"/></content>
-          </xsl:if>
+          <!-- An entry without an alternate link must carry content, even when empty. -->
+          <content type="text"><xsl:value-of select="r:binding[@name='content']/r:literal"/></content>
         </entry>
       </xsl:for-each>
     </feed>

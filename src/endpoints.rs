@@ -808,8 +808,17 @@ impl LayerEndpoint {
         if concepts.is_empty() {
             return self.entries(inv).await;
         }
+        // The graph faces apply all metadata filters before taking their page. Do not
+        // truncate the concept candidates before those filters have seen them.
+        let from = self.author_filter(inv)?;
+        let class = optional_str(inv, "type")?.map(str::to_string);
+        let candidate_limit = if from.is_some() || class.is_some() {
+            u64::MAX
+        } else {
+            limit
+        };
         let rows = self
-            .select(inv, &concepts, after, limit, SPARQL_JSON)
+            .select(inv, &concepts, after, candidate_limit, SPARQL_JSON)
             .await?;
         let rows: serde_json::Value = serde_json::from_str(&rows).map_err(|e| {
             Error::Endpoint(format!(
@@ -823,8 +832,6 @@ impl LayerEndpoint {
             .flatten()
             .filter_map(|row| row["entry"]["value"].as_str().map(str::to_string))
             .collect();
-        let from = self.author_filter(inv)?;
-        let class = optional_str(inv, "type")?.map(str::to_string);
         self.entries_where(inv, |m| {
             matching.contains(&m.iri)
                 && from.as_ref().is_none_or(|a| &m.author == a)
@@ -849,6 +856,10 @@ impl LayerEndpoint {
         .with_arg(
             "query",
             ArgRef::Inline(feeds::entries_query(concepts, after, limit).into_bytes()),
+        )
+        .with_arg(
+            "bindings",
+            ArgRef::Inline(feeds::entries_bindings(concepts).into_bytes()),
         )
         .with_arg(
             "graph",
@@ -900,7 +911,7 @@ impl LayerEndpoint {
             let doc = self
                 .host()
                 .json()
-                .compact(&context["@context"], &triples)
+                .compact_preserving(&context["@context"], &triples)
                 .await?;
             Representation::new(ReprType::new(JSON_LD), doc.to_string().into_bytes())
         } else {
@@ -909,11 +920,11 @@ impl LayerEndpoint {
         Ok(repr.cacheable().depends_on(self.say_thread()))
     }
 
-    fn feed(&self, events: &[Event], as_json: bool) -> Representation {
+    fn feed(&self, events: &[Event], after: u64, as_json: bool) -> Representation {
         if as_json {
             let body = serde_json::json!({
                 "layer": self.layer(),
-                "last": self.state.last_seq(),
+                "last": events.last().map_or(after, |event| event.seq),
                 "events": events,
             });
             Representation::new(ReprType::new(JSON), body.to_string().into_bytes())
@@ -942,7 +953,7 @@ impl LayerEndpoint {
         }
         let state = &self.state;
         feed::wait_until(self.host().notify(), wait, || state.last_seq() > after).await;
-        Ok(self.feed(&self.state.events_after(after), as_json))
+        Ok(self.feed(&self.state.events_after(after), after, as_json))
     }
 
     /// The caller's principal, which must be a participant: every write is attributed.
