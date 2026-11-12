@@ -10,13 +10,14 @@ how to report a barrier. It is not a conformance claim. Adapted from the
 | Status | Evaluation in progress. No conformance claim. |
 | Owner | the maintainers of this repository |
 | Report a barrier | [a GitHub issue](https://github.com/ikigai-rs/ikigai-layers/issues/new?labels=accessibility) with the `accessibility` label; anything security-sensitive through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-layers/security/advisories/new) |
-| Last reviewed | 2026-10-31 |
+| Last reviewed | 2026-11-12 |
 
 ## What it emits that people read
 
 This is a layer host library and one binary. A host's door (QUIC, an HTTP front, MCP) carries
 the library's answers to participants; the door and any page it serves are the host's, not this
-repository's.
+repository's. Documentation is Markdown, read on GitHub or in an editor; its rendered
+presentation has not been evaluated here.
 
 - **Answers from the layer resources** (`src/endpoints.rs`): a write (`say`, `out`) answers the
   new entry's or tuple's IRI as `text/plain`; the feeds, the pending tuples and the receipts list
@@ -76,7 +77,8 @@ answered as written; and how a door, a client or a terminal presents any of this
 
 ## The rules that output follows
 
-Verified by reading the source:
+These rules describe the intended output. The results below distinguish the checks run from
+limitations and checks that could not run:
 
 - A refusal is a sentence that names the layer, the argument or the participant it is about and
   says why; many say what to do instead (resynchronize from 0, give one of two arguments, pass a
@@ -84,76 +86,77 @@ Verified by reading the source:
 - Every answer a participant reads has a JSON face, so a client can present it its own way
   without an RDF parser.
 - The binary's lines start with a word that says what the line is (`grant`, `client`,
-  `unenrolled`, `idle`, `stuck:`, `checked`, `wrote`), and a join's plain answer the same
+  `unenrolled`, `idle`, `stuck:`, `checked`, `wrote`, `unchanged`, `kept`, `differs`, `backup`), and a join's plain answer the same
   (`entitlement`, `principal`, `expires`, `granted`) and the join count's (`joined`,
   `read-in-7-days`, `read-in-30-days`); `--check` ends by saying nothing was
   written; `-h`/`--help` prints the usage on stdout; a usage error exits 2 and a failure exits 1,
   each with its message on stderr.
-- No color, no terminal control sequences and no markup are written.
+- The binary writes plain terminal text without color or terminal control sequences. Resource
+  answers also include structured formats such as Turtle and Atom XML.
 
 ## How it is tested
 
-- `tests/grants.rs`: `the_binary_writes_both_files_or_nothing` runs the binary and checks that a
-  refused configuration writes nothing and names the offending layer on stderr.
-- `tests/setup.rs`: `setup_refuses_without_writing_anything` pins exit code 2 and the sentence
-  naming `--door-dir`; the `check_finds_…` tests and
-  `check_on_a_bare_config_names_every_missing_piece` pin exit code 1, each `stuck` reason and
-  `nothing written (--check)`.
-- `tests/channel.rs`, `tests/tuplespace.rs` and `tests/door.rs` check that a write outside the
-  shapes is refused with `does not conform`; `tests/feed.rs`
-  (`after_is_required_and_a_cursor_from_the_future_is_refused`), `tests/onboard.rs`
-  (`an_entitlement_naming_a_hand_enrolled_participant_is_refused`,
-  `an_entitlement_naming_a_participant_entitled_under_another_certificate_is_refused`,
-  `an_entitlement_naming_a_participant_a_manifest_grants_and_no_certificate_holds_is_refused`,
-  `an_entitlement_naming_the_uncertified_controller_is_refused`),
-  `tests/me.rs`
-  (`no_principal_is_a_refusal`, `an_unknown_face_is_refused`), `tests/feed_layers.rs`
-  (`a_non_publisher_with_a_say_grant_is_refused_naming_the_feed`,
-  `an_entry_subject_outside_the_scheme_is_refused_naming_it`,
-  `an_unknown_concept_is_refused_naming_it`) and `tests/door.rs`
-  (`a_second_host_over_one_state_directory_is_refused_naming_the_first`) pin other refusals.
-- `tests/join.rs` pins the public join's refusals and answers
-  (`a_request_naming_a_non_public_layer_gets_nothing`, `the_plain_answer_labels_each_line`,
-  `a_denied_fingerprint_is_refused_at_join`, `the_per_certificate_limit_survives_a_restart`,
-  `the_per_address_limit_refuses_the_eleventh_attempt_within_the_hour`,
-  `two_addresses_in_one_ipv6_64_share_the_per_address_limit`,
-  `an_expired_identity_is_refused_and_can_join_again`,
-  `the_descriptor_refuses_a_bad_address_and_a_host_with_nothing_to_offer`), and the join count's
-  (`the_count_answers_three_numbers_and_nothing_else`,
-  `a_count_under_five_is_reported_as_fewer_than_five`,
-  `an_unknown_face_of_the_count_is_refused`).
-- `tests/at_rest.rs` pins the state key's refusals
-  (`a_key_another_account_can_read_or_write_is_refused_naming_the_chmod`,
-  `a_key_in_a_directory_another_account_can_write_is_refused_naming_the_chmod`,
-  `a_path_with_a_space_is_quoted_in_the_chmod`).
+Every named check has a result: Pass, Fail or Blocked, with evidence. A Pass covers only the
+stated check, not overall accessibility or WCAG conformance. Completed checks below were run on
+2026-11-12 against main at `92e37d77603f132a77793ab98f6e159f243fa913`, before this documentation
+change. The result format follows [gonk-starter PR 91](https://github.com/ikigai-rs/ikigai-gonk-starter/pull/91).
+The Rust tests check wording, data and exit codes for correctness; none was written
+as an accessibility test. CI repeats the Rust tests, but not the manual source review or
+assistive technology checks.
 
-These test wording and exit codes for correctness; none was written as an accessibility test.
-**No automated accessibility checker, browser or assistive technology has been used on this
-output.**
+The test command was `cargo test --test grants --test setup --test channel --test tuplespace
+--test door --test feed --test onboard --test me --test feed_layers --test join --test at_rest
+--test json`, using Cargo 1.99.0 and rustc 1.99.0: all 230 tests passed. Each test-file row below identifies the part
+of that run it covers. Source-review rows use Git 2.43.0's `git show` against the main commit
+above; they describe code inspection, not a user evaluation.
+
+| Check | Result | Evidence |
+|---|---|---|
+| Enrollment binary refusals and no-write behavior | Pass | `tests/grants.rs`: `the_binary_writes_both_files_or_nothing` and `a_missing_or_empty_config_directory_is_refused_and_nothing_is_written` check stderr naming the layer or directory and that refusal writes nothing. Does not evaluate terminal presentation. |
+| Setup diagnostics and exit codes | Pass | `tests/setup.rs`: `setup_refuses_without_writing_anything`, the `check_finds_…` tests and `check_on_a_bare_config_names_every_missing_piece` check the named argument, exit codes 2 or 1, `stuck` reasons and no-write text. Does not test comprehension. |
+| Admission and host refusals | Pass | `tests/channel.rs`, `tests/tuplespace.rs` and `tests/door.rs` check `does not conform`; the door suite also checks `a_second_host_over_one_state_directory_is_refused_naming_the_first`. Wording assertions do not establish that long SHACL messages are usable. |
+| Feed cursor refusal | Pass | `tests/feed.rs`: `after_is_required_and_a_cursor_from_the_future_is_refused` checks the required argument and future cursor refusal; no assistive technology used. |
+| Onboarding identity refusals | Pass | `tests/onboard.rs`: the four `an_entitlement_naming_…_is_refused` tests cover a hand-enrolled participant, another certificate's participant, a manifest-granted participant and the uncertified controller. Checks refusal content, not how a door presents it. |
+| Participant identity refusals | Pass | `tests/me.rs`: `no_principal_is_a_refusal` and `an_unknown_face_is_refused` check refusal text, not client presentation. |
+| Feed publisher and concept refusals; Atom and JSON faces | Pass | `tests/feed_layers.rs`: `a_non_publisher_with_a_say_grant_is_refused_naming_the_feed`, `an_entry_subject_outside_the_scheme_is_refused_naming_it`, `an_unknown_concept_is_refused_naming_it`, and the suite's representation tests. Checks content and formats, not a rendered feed reader. |
+| Public join answers, refusals and counts | Pass | `tests/join.rs`: covers non-public layers, denied fingerprints, certificate and address limits (including IPv6 /64), expired identities, bad descriptors, labeled plain answers, three count fields, counts under five and unknown count faces. Does not evaluate reading or navigating the output with assistive technology. |
+| State key refusal guidance | Pass | `tests/at_rest.rs`: `a_key_another_account_can_read_or_write_is_refused_naming_the_chmod`, `a_key_in_a_directory_another_account_can_write_is_refused_naming_the_chmod`, `a_path_with_a_space_is_quoted_in_the_chmod`. Checks command text and quoting on Unix, not user comprehension. |
+| Machine-readable alternatives | Pass | `tests/json.rs`: write answers, entry and graph JSON-LD, tuple and receipt JSON, unknown faces and `every_json_face_is_declared`; join and feed-layer suites cover their own faces. These are representation checks, not an evaluation of any client's accessible presentation. |
+| Binary line labels, help streams and exit routing | Pass | `git show 92e37d7:src/bin/ikigai-layers.rs`: inspected `run`, `main`, `grants` and `onboard_setup` for labels, help on stdout, errors on stderr and exit codes. Source review only; no manual terminal usability pass. |
+| Binary color and terminal control sequences | Pass | `git show 92e37d7:src/bin/ikigai-layers.rs`: inspected output calls and string literals; no color or terminal control sequences added by the binary. Does not cover arbitrary supplied paths or a terminal's rendering. |
+| Manual keyboard and terminal navigation | Blocked | No person performed a keyboard or terminal navigation pass for this review; no interactive user evaluation session was available. |
+| Browser rendering of documentation or host output | Blocked | No browser evaluation was run. This repository does not supply the host's door or client UI; documentation as rendered on GitHub also remains unevaluated. |
+| Automated accessibility checker (such as axe) | Blocked | No automated accessibility checker was run; no rendered client or documentation checker was configured for this review. Rust tests are not a substitute. |
+| Screen reader | Blocked | No screen reader was used on this output; no screen reader session was available for this review. |
+| Screen magnifier | Blocked | No screen magnifier was used on this output; no magnifier session was available for this review. |
+| Speech input | Blocked | No speech-input software was used on this output; no speech-input session was available for this review. |
+| Switch access | Blocked | No switch-access software was used on this output; no switch-access session was available for this review. |
+| Braille display | Blocked | No braille display was used on this output; no braille display was available for this review. |
 
 ## Known limitations
 
-Found by reading the source on 2026-10-31:
+Rechecked by reading main's source on 2026-11-12 with `git show` (Git 2.43.0), not by testing
+with users. Fail records a remaining output limitation, not a completed WCAG assessment.
+These source reviews are dated evidence; CI does not repeat them.
 
-- **Unlabeled columns.** The plain feed, tuple and receipt listings are space-separated values
-  with no header and no labels, so what each value is depends on its position.
-- **Admission refusals are technical and long.** Each violation is the property's full IRI, the
-  SHACL constraint component's name (`MinCountConstraintComponent`) and the validator's message,
-  up to 20 of them joined by `;` on one line; `(node)` stands in when a violation has no path.
-- **`grants` does not say which argument was wrong.** An unknown flag, a stray argument or a
-  missing value answers with the usage text alone (`onboard setup` names an unknown flag).
-- **Long opaque strings**: certificate fingerprints in `client <fingerprint> -> …` lines, and
-  entry and tuple IRIs in every write answer and listing.
-- **Parenthesized plurals** (`violation(s)`, `way(s)`), read with the parentheses, and one
-  stderr line that marks urgency by capitals alone (`RESTART THE DOOR`).
-- Every message is English only.
+| Check | Result | Evidence |
+|---|---|---|
+| Plain listing column labels | Fail | `git show 92e37d7:src/endpoints.rs`: feed, tuple and receipt plain listings use space-separated values without headers or field labels; meaning depends on position. |
+| Admission refusal readability | Fail | `git show 92e37d7:src/endpoints.rs`: admission messages use full property IRIs, constraint component names and validator messages, up to 20 violations joined by semicolons on one line; `(node)` substitutes for a missing path. |
+| Naming the invalid grants argument | Fail | `git show 92e37d7:src/bin/ikigai-layers.rs`: `grants` returns usage alone for an unknown flag, stray argument or missing value. `onboard setup` names an unknown flag. |
+| Readability of opaque identifiers | Fail | `git show 92e37d7:src/bin/ikigai-layers.rs` and `git show 92e37d7:src/endpoints.rs`: client lines use full certificate fingerprints; write answers and listings use full entry and tuple IRIs. |
+| Natural plurals and urgency wording | Fail | `git show 92e37d7:src/endpoints.rs`, `git show 92e37d7:src/bin/ikigai-layers.rs` and `git show 92e37d7:src/onboard/apply.rs`: `violation(s)`, `way(s)` and `RESTART THE DOOR` remain in messages. Spoken presentation has not been tested. |
+| Message localization | Fail | Source review of `src/bin/ikigai-layers.rs`, `src/endpoints.rs` and `src/onboard/` at the main commit above: built-in messages are English only, with no localized alternatives. |
 
 ## Contributing
 
 Read this file before changing any output listed above: a write answer, a listing's plain face, a
 refusal, an onboarding diagnostic or the binary's text. Keep meaning in words, name what a
 refusal is about, and keep a JSON face for anything a participant reads. Say in the pull request
-what was tested, with what, and what was not.
+what was tested in a Check | Result | Evidence table. Give each check Pass, Fail or Blocked,
+with its test or command and tool version, or why it could not run. Keep unrun checks Blocked,
+including assistive technologies nobody used. A historical run CI does not repeat is Blocked
+with its date until rerun; it is not a current Pass.
 
 ## Reporting a barrier
 
@@ -176,3 +179,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-08 | The operator's join count: labeled lines and a JSON face. |
 | 2026-11-08 | The per-address join refusal says an IPv6 network counts as one address. |
 | 2026-11-09 | The state key's refusals, with the owner and mode ones naming the command to run. |
+| 2026-11-12 | Record checks as Pass, Fail or Blocked, with current main evidence and explicit evaluation gaps. |
