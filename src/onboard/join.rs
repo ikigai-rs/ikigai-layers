@@ -33,8 +33,10 @@
 //! read, written at most once a day, which is all its expiry needs.
 //!
 //! **Only the operator counts, and only in aggregate** (ledger #3309). The count is three
-//! numbers taken from the records, each reported in words when it is small, and no generated
-//! grant can read them: the feeds carry no reader counts.
+//! numbers taken from the records, each reported in words when it is small, and only the
+//! generated grants of the participants the operator names in `join.count_readers` can read
+//! them (ledger #3670, [`crate::config::load_count_readers`]); a joined identity never can: the
+//! feeds carry no reader counts.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -73,7 +75,7 @@ pub const JOINED_DIR: &str = "joined";
 /// The persisted rates, sealed at rest, in the state directory (no layer is named with a dot).
 pub const LIMITS_FILE: &str = ".join-limits.age";
 
-const IDENTITIES: &str = "identities";
+pub(crate) const IDENTITIES: &str = "identities";
 const TRUST: &str = "clients";
 /// Where the host's key is served in its signing kernel, which no door binds.
 const HOST_KEY: &str = "urn:layer:onboard:join-host-key";

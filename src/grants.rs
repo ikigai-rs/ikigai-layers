@@ -19,6 +19,12 @@
 //! names, `urn:cap:layer:{verb}:{layer}` per verb, and `urn:cap:collab:read:{name}` for each
 //! collaboration that mounts the layer, unioned into the participant's one grant.
 //!
+//! **The join count is named, never derived** (ledger #3670): `urn:cap:layers:read:join-count`
+//! goes to exactly the participants `join.count_readers` in `layers.toml` names
+//! ([`crate::config::load_count_readers`]), added to the grant each already has or making one
+//! that holds it alone, and to no one else. A joined identity never holds it: its grant is
+//! written by the join, never here.
+//!
 //! **Isolation is structural here.** The generator reads only manifests that
 //! [`crate::config::load_collabs`] accepted, and that refuses a manifest mounting a layer
 //! another manifest mounts unless the layer is declared shared with both. So no grant this
@@ -33,6 +39,7 @@ use serde::Serialize;
 
 use crate::at_rest::{private, private_file};
 use crate::config::{Config, ConfigError, Participants};
+use crate::endpoints::CAP_JOIN_COUNT;
 use crate::name::{collab_cap, fold_fingerprint, layer_cap, Participant};
 
 /// One `clients.json` entry, in the object form cli's door reads.
@@ -58,6 +65,8 @@ pub struct Enrollment {
     /// Participants with a certificate but no grant in any manifest (no client entry
     /// written: the door would refuse it anyway, and an entry naming no grant is noise).
     pub idle: Vec<String>,
+    /// The grants `join.count_readers` gives the join count to.
+    pub count_readers: Vec<String>,
 }
 
 /// Every certificate fingerprint, participant → fingerprints: `enrollment.toml`'s, with
@@ -155,7 +164,20 @@ pub fn generate(
             }
         }
     }
-    let mut enrollment = Enrollment::default();
+    for reader in &config.count_readers {
+        scopes
+            .entry(reader.clone())
+            .or_default()
+            .insert(CAP_JOIN_COUNT.to_string());
+    }
+    let mut enrollment = Enrollment {
+        count_readers: config
+            .count_readers
+            .iter()
+            .map(|p| p.slug().to_string())
+            .collect(),
+        ..Enrollment::default()
+    };
     let mut owner: BTreeMap<String, String> = BTreeMap::new();
     for (participant, held) in &scopes {
         enrollment.grants.insert(

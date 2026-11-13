@@ -66,9 +66,13 @@ presentation has not been evaluated here.
   warming a feed's shared copy after a publish fails (the entry stands, and the first reader
   computes the answer).
 - **The `ikigai-layers` binary** (`src/bin/ikigai-layers.rs`): usage text; `grants` prints one
-  line per grant, client, unenrolled participant and idle certificate, then what it wrote,
+  line per grant, client, unenrolled participant and idle certificate, and one
+  ``count-reader <grant>: gains urn:cap:layers:read:join-count, …`` line per participant
+  `join.count_readers` names, then what it wrote,
   and refuses a configuration directory that is missing, not a directory or holds no manifest,
-  saying which and that nothing was written;
+  saying which and that nothing was written; it refuses a `join.count_readers` entry that is no
+  participant or is a joined identity, naming the entry, saying what to do instead and that
+  nothing was written;
   `onboard setup` prints what it did and a `stuck: …` line for each way a node would be left in
   the lobby; `descriptor` prints `wrote <path> and <path>`. Failures go to stderr.
 
@@ -86,7 +90,7 @@ limitations and checks that could not run:
 - Every answer a participant reads has a JSON face, so a client can present it its own way
   without an RDF parser.
 - The binary's lines start with a word that says what the line is (`grant`, `client`,
-  `unenrolled`, `idle`, `stuck:`, `checked`, `wrote`, `unchanged`, `kept`, `differs`, `backup`), and a join's plain answer the same
+  `unenrolled`, `idle`, `count-reader`, `stuck:`, `checked`, `wrote`, `unchanged`, `kept`, `differs`, `backup`), and a join's plain answer the same
   (`entitlement`, `principal`, `expires`, `granted`) and the join count's (`joined`,
   `read-in-7-days`, `read-in-30-days`); `--check` ends by saying nothing was
   written; `-h`/`--help` prints the usage on stdout; a usage error exits 2 and a failure exits 1,
@@ -180,3 +184,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-08 | The per-address join refusal says an IPv6 network counts as one address. |
 | 2026-11-09 | The state key's refusals, with the owner and mode ones naming the command to run. |
 | 2026-11-12 | Record checks as Pass, Fail or Blocked, with current main evidence and explicit evaluation gaps. |
+| 2026-11-13 | `grants`' `count-reader` line and its refusals of a `join.count_readers` entry. |
