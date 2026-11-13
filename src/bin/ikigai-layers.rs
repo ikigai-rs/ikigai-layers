@@ -20,6 +20,8 @@ const USAGE: &str = "usage: ikigai-layers grants <config dir> [--out <dir>] [--c
 grants derives the layer door's enrollment from <config dir>'s manifests (collabs/*.toml),
 participants (participants.ttl) and certificate fingerprints (enrollment.toml), and writes
 grants.json and clients.json into --out (default: <config dir>), each atomically and 0600.
+The participants layers.toml's join.count_readers names gain urn:cap:layers:read:join-count,
+listed as count-reader lines; a name that is no participant, or a joined identity, is refused.
 A <config dir> that is missing or holds no manifest is refused and nothing is written.
 --check verifies the configuration and prints what would be written, writing nothing.
 A manifest that mounts another collaboration's layer is refused and nothing is written.
@@ -104,6 +106,12 @@ fn grants(args: &[String]) -> Outcome {
     }
     for iri in &enrollment.idle {
         println!("idle {iri}: a certificate, but no manifest grants it anything");
+    }
+    for grant in &enrollment.count_readers {
+        println!(
+            "count-reader {grant}: gains urn:cap:layers:read:join-count, the join count's three \
+             aggregate numbers (join.count_readers)"
+        );
     }
     if check {
         println!("checked; nothing written (--check)");

@@ -1085,6 +1085,10 @@ struct JoinToml {
     ipv6_prefix: Option<u32>,
     per_hour: Option<usize>,
     max_joined: Option<usize>,
+    /// Read and checked by [`load_count_readers`]; named here so the host's strict read of the
+    /// table accepts it.
+    #[allow(dead_code)]
+    count_readers: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -1345,12 +1349,14 @@ pub const DEFAULT_JOIN_IDLE_DAYS: u64 = 90;
 /// ipv6_prefix     = 64     # how many leading bits of an IPv6 address count as one address
 /// per_hour        = 120    # requests an hour from everyone together
 /// max_joined      = 10000  # live joined identities the host holds
+/// count_readers   = ["brian", "hub"] # participants who may read the join count
 /// ```
 ///
 /// Required when a layer says `join = "public"`, and refused when none does: a table with no
 /// lobby to answer means an operator expected a join this host cannot make. `host_key` signs
 /// every entitlement; give a path outside the configuration's git tree. A relative path is
-/// resolved against the config directory.
+/// resolved against the config directory. `count_readers` is read by the grants generator, not
+/// here: [`load_count_readers`].
 #[derive(Clone, Debug)]
 pub struct JoinConfig {
     /// The join lobby's name.
@@ -1462,6 +1468,88 @@ pub fn load_join(
         per_hour: positive("per_hour", table.per_hour, 120)?,
         max_joined: positive("max_joined", table.max_joined, 10_000)?,
     }))
+}
+
+/// `join.count_readers` in [`HOST_FILE`] under `dir`: the participants the operator names to
+/// read the join count, `urn:layers:join:count` (ledger #3670). The grants generator gives
+/// each of them `urn:cap:layers:read:join-count`, and nobody else holds it.
+///
+/// ```toml
+/// # layers.toml
+/// [join]
+/// count_readers = ["brian", "hub"]   # as a manifest names a participant
+/// ```
+///
+/// Absent, nobody is named, and no generated grant holds the capability. Refused, so nothing is
+/// written: an entry that is no participant in `participants.ttl`, any entry naming a joined
+/// identity (one with a record in `joined/identities/`, which never holds it), and the key on a
+/// host where no layer says `join = "public"`, which has no count to read. Only this key is read
+/// here; the rest of the table is [`load_join`]'s, when the host opens.
+pub fn load_count_readers(
+    dir: &Path,
+    layers: &BTreeMap<String, LayerDef>,
+    participants: &Participants,
+) -> Result<BTreeSet<Participant>, ConfigError> {
+    let path = dir.join(HOST_FILE);
+    let at = path.display();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) => return err(format!("read {at}: {e}")),
+    };
+    let table: toml::Table =
+        toml::from_str(&text).map_err(|e| ConfigError(format!("{at}: {e}")))?;
+    let Some(value) = table
+        .get("join")
+        .and_then(toml::Value::as_table)
+        .and_then(|join| join.get("count_readers"))
+    else {
+        return Ok(BTreeSet::new());
+    };
+    let not_a_list = || {
+        ConfigError(format!(
+            "{at}: `join.count_readers` is a list of participant names, such as \
+             count_readers = [\"brian\"]; nothing written"
+        ))
+    };
+    let names: Vec<&str> = value
+        .as_array()
+        .ok_or_else(not_a_list)?
+        .iter()
+        .map(|v| v.as_str().ok_or_else(not_a_list))
+        .collect::<Result<_, _>>()?;
+    if !layers.values().any(|d| d.join) {
+        return err(format!(
+            "{at}: `join.count_readers`, and no layer says `join = \"public\"`: this host has no \
+             join count to read; remove the key; nothing written"
+        ));
+    }
+    let joined = dir
+        .join(crate::onboard::join::JOINED_DIR)
+        .join(crate::onboard::join::IDENTITIES);
+    let mut readers = BTreeSet::new();
+    for name in names {
+        let participant = Participant::from_manifest_key(name).map_err(|e| {
+            ConfigError(format!("{at}: `join.count_readers`: {e}; nothing written"))
+        })?;
+        if let Some(fp) = participant.fingerprint() {
+            if joined.join(format!("{fp}.json")).exists() {
+                return err(format!(
+                    "{at}: `join.count_readers` names `{name}`, a joined identity, and a joined \
+                     identity never reads the join count: name a participant from \
+                     participants.ttl instead; nothing written"
+                ));
+            }
+        }
+        if !participants.names(participant.iri()) {
+            return err(format!(
+                "{at}: `join.count_readers` names `{name}`, which is no participant in \
+                 participants.ttl: name a participant, or remove the entry; nothing written"
+            ));
+        }
+        readers.insert(participant);
+    }
+    Ok(readers)
 }
 
 /// The file the host writes what its verified entitlements grant into (ledger #2009), beside
@@ -1627,6 +1715,8 @@ pub struct Config {
     pub collabs: BTreeMap<String, Manifest>,
     /// What verified entitlements grant ([`ENTITLEMENTS_FILE`]), beside the manifests.
     pub entitled: Vec<Entitled>,
+    /// Who may read the join count: `join.count_readers` ([`load_count_readers`]).
+    pub count_readers: BTreeSet<Participant>,
 }
 
 impl Config {
@@ -1638,12 +1728,14 @@ impl Config {
         check_publishers(&layers, &participants)?;
         let collabs = load_collabs(&dir, &layers, &participants)?;
         let entitled = load_entitled(&dir, &layers, &participants, &collabs)?;
+        let count_readers = load_count_readers(&dir, &layers, &participants)?;
         Ok(Config {
             dir,
             layers,
             participants,
             collabs,
             entitled,
+            count_readers,
         })
     }
 }

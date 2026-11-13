@@ -57,7 +57,7 @@ Layers are inspired by Daniel Suarez's novel *Daemon*
 | `urn:layer:{layer}:feed` | Source | events `after=` a sequence, `wait=` up to 60 s | `urn:cap:layer:feed:{layer}` |
 | `urn:layers:feed` | Source | one wait over several feeds, `after=talk:12,notes:3` | `urn:cap:layer:feed:{each}` |
 | `urn:layers:participants` | Source | who each principal is, across the host (the operator's) | `urn:cap:layers:read:participants` |
-| `urn:layers:join:count` | Source | a host with a join only: three aggregate numbers about its joined readers ([Counting joined readers](#counting-joined-readers)) | `urn:cap:layers:read:join-count`, which no generated grant holds |
+| `urn:layers:join:count` | Source | a host with a join only: three aggregate numbers about its joined readers ([Counting joined readers](#counting-joined-readers)) | `urn:cap:layers:read:join-count`, held only by the participants `join.count_readers` names |
 | `urn:layers:me` | Source | who the door says the caller is: its principal and, when it is a participant, its kind and the collaborations granting it anything (`as=application/json` for a client) | `urn:cap:collab:read:*`, which every generated grant holds |
 | `urn:collab:{name}` | Source | a collaboration's manifest | `urn:cap:collab:read:{name}` |
 | `urn:collab:{name}:participants` | Source | who takes part in that collaboration: each participant its manifest grants anything, as the participants graph describes it | `urn:cap:collab:read:{name}` |
@@ -325,6 +325,7 @@ per_address     = 20     # requests an hour from one source address, where the d
 ipv6_prefix     = 64     # how many leading bits of an IPv6 address count as one address
 per_hour        = 120    # requests an hour from everyone together
 max_joined      = 10000  # live joined identities
+count_readers   = ["brian"] # optional: participants who may read the join count
 ```
 
 Only a feed may be public (a plain channel saying `public` is refused), and a host has one join
@@ -433,9 +434,32 @@ fingerprint, no per-identity row and no address, and reading it writes nothing.
 The numbers are **upper bounds on people**, since one person may hold several certificates.
 **Collaborators' enrolled identities are not counted**, since their reads are not recorded.
 
-It declares `urn:cap:layers:read:join-count`, which no generated grant holds and a joined
-identity never does, so a reader and a collaborator are both refused it: the feeds carry no
-reader counts. A host with no `[join]` table does not bind it.
+It declares `urn:cap:layers:read:join-count`. A joined identity never holds it, and a
+generated grant holds it only when the operator names that participant (ledger #3670):
+
+```toml
+# layers.toml
+[join]
+host_key      = "/run/credentials/layers/join.pem"
+count_readers = ["brian", "hub"]   # participants, as a manifest names them
+```
+
+Then `ikigai-layers grants` adds `urn:cap:layers:read:join-count` to exactly those participants'
+grants (a participant no manifest grants anything gets a grant holding it alone), and
+`--check` shows which, one line each:
+
+```text
+count-reader brian: gains urn:cap:layers:read:join-count, the join count's three aggregate numbers (join.count_readers)
+```
+
+Every other reader and collaborator is refused it, so the feeds carry no reader counts. Naming
+someone changes who may ask, never what is answered: still the three aggregate numbers above,
+never a row per identity. `grants` refuses, naming the entry and writing nothing, a name that is
+no participant in `participants.ttl`, a joined identity (a certificate with a record in
+`joined/identities/`), and `count_readers` on a host where no layer says `join = "public"`.
+Without the key nobody holds it. Add it by hand to `grants.json` and the next `grants`
+overwrites it, so name the participant here instead. A host with no `[join]` table does not
+bind the count.
 
 ### The door descriptor
 

@@ -90,9 +90,10 @@ pub const CAP_PARTICIPANTS: &str = "urn:cap:layers:read:participants";
 /// `urn:layers:join:count`: the operator's aggregate count of joined readers (ledger #3309).
 pub const JOIN_COUNT: &str = "urn:layers:join:count";
 
-/// The capability that reads [`JOIN_COUNT`]. Not generated for anyone, and a joined identity
-/// holds read and feed on public layers only, so this is the operator's (root's): the feeds
-/// carry no reader counts.
+/// The capability that reads [`JOIN_COUNT`]. Generated only for the participants the operator
+/// names in `join.count_readers` ([`crate::config::load_count_readers`], ledger #3670), and a
+/// joined identity holds read and feed on public layers only, so it is the operator's to give:
+/// the feeds carry no reader counts.
 pub const CAP_JOIN_COUNT: &str = "urn:cap:layers:read:join-count";
 
 /// `urn:layers:me`: who the door says the caller is.
@@ -2612,7 +2613,7 @@ impl Endpoint for JoinCount {
         Description::new("layers-join-count")
             .title("Joined reader count")
             .summary(
-                "Three aggregate numbers, the operator's alone: the live joined identities, \
+                "Three aggregate numbers, for the operator and the participants it names: the live joined identities, \
                  and those with a read in the last 7 and in the last 30 UTC days (a join \
                  counts as a read on its day). A count under 5, zero included, reads `fewer \
                  than 5`. The numbers are upper bounds on people, since one person may hold \

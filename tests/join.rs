@@ -1683,6 +1683,200 @@ fn its_own_capability_reads_the_count() {
     );
 }
 
+// Who reads the count: `join.count_readers` (ledger #3670).
+
+const COUNT_READERS: &str = "count_readers = [\"brian\", \"hub\"]";
+
+/// The enrollment `ikigai-layers grants` derives from `d`'s configuration.
+fn derived(d: &Door) -> ikigai_layers::grants::Enrollment {
+    let loaded = Config::load(d.config.path()).expect("the configuration");
+    let fingerprints = load_fingerprints(d.config.path(), &loaded).unwrap();
+    generate(&loaded, &fingerprints).expect("an enrollment")
+}
+
+/// What the door mints for participant `slug`'s certificate: its generated grant's scopes.
+fn granted(enrollment: &ikigai_layers::grants::Enrollment, slug: &str) -> Capability {
+    let scopes: Vec<&str> = enrollment
+        .grants
+        .get(slug)
+        .map(|s| s.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    cap(&participant(slug), &scopes)
+}
+
+fn run_grants(config: &Scratch, extra: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_ikigai-layers"))
+        .arg("grants")
+        .arg(config.path())
+        .args(extra)
+        .output()
+        .expect("the binary runs")
+}
+
+#[test]
+fn a_named_count_reader_reads_the_count_and_no_one_else_does() {
+    let d = door_with(COUNT_READERS);
+    let readers = joined(&d, "reader", 5);
+    let enrollment = derived(&d);
+    assert_eq!(enrollment.count_readers, ["brian", "hub"]);
+
+    for slug in ["brian", "hub"] {
+        assert!(
+            enrollment.grants[slug].iter().any(|s| s == COUNT_CAP),
+            "{slug}: {:?}",
+            enrollment.grants[slug]
+        );
+        assert_eq!(
+            source(&d.kernel, COUNT, &[], &granted(&enrollment, slug)),
+            "joined 5\nread-in-7-days 5\nread-in-30-days 5\n",
+            "{slug} reads the three aggregate numbers"
+        );
+    }
+    // Still talk and notes for brian: the count is added to a grant, never replaces it.
+    assert!(enrollment.grants["brian"]
+        .iter()
+        .any(|s| s == "urn:cap:layer:say:talk"));
+
+    for (slug, scopes) in &enrollment.grants {
+        if slug == "brian" || slug == "hub" {
+            continue;
+        }
+        assert!(!scopes.iter().any(|s| s == COUNT_CAP), "{slug}: {scopes:?}");
+    }
+    // Chris collaborates with brian on two layers, and is not named.
+    for slug in ["chris", "bobby"] {
+        let refused = issue(
+            &d.kernel,
+            Verb::Source,
+            COUNT,
+            &[],
+            &granted(&enrollment, slug),
+        );
+        assert!(
+            matches!(refused, Err(Error::Denied(_))),
+            "{slug}: {refused:?}"
+        );
+    }
+    for held in &readers {
+        assert!(!scopes(held).iter().any(|s| s == COUNT_CAP));
+        let refused = issue(&d.kernel, Verb::Source, COUNT, &[], held);
+        assert!(matches!(refused, Err(Error::Denied(_))), "{refused:?}");
+    }
+    let joined_grants = d.read("joined/grants.json").expect("the joined grants");
+    assert!(!joined_grants.contains(COUNT_CAP), "{joined_grants}");
+}
+
+#[test]
+fn a_count_reader_no_manifest_grants_gets_a_grant_holding_the_count_alone() {
+    let d = door_with("count_readers = [\"bobby-claude\"]");
+    let enrollment = derived(&d);
+    assert!(enrollment.grants["bobby-claude"]
+        .iter()
+        .any(|s| s == COUNT_CAP));
+
+    // A participant some manifest grants nothing has a grant only for the count.
+    let config = join_config("count_readers = [\"bobby-gonk\"]");
+    config.write(
+        "collabs/bobby.toml",
+        &BOBBY_TOML.replace("bobby-gonk = [\"read\", \"feed\", \"out\", \"take\"]\n", ""),
+    );
+    let loaded = Config::load(config.path()).unwrap();
+    let fingerprints = load_fingerprints(config.path(), &loaded).unwrap();
+    let alone = generate(&loaded, &fingerprints).unwrap();
+    assert_eq!(alone.grants["bobby-gonk"], [COUNT_CAP]);
+    assert!(alone.idle.is_empty(), "{:?}", alone.idle);
+}
+
+#[test]
+fn check_shows_which_grants_gain_the_count_and_writes_nothing() {
+    let config = join_config(COUNT_READERS);
+    let checked = run_grants(&config, &["--check"]);
+    assert!(checked.status.success(), "{checked:?}");
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    let gains: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.starts_with("count-reader "))
+        .collect();
+    assert_eq!(gains.len(), 2, "{stdout}");
+    assert!(gains[0].starts_with("count-reader brian: gains urn:cap:layers:read:join-count"));
+    assert!(gains[1].starts_with("count-reader hub: gains urn:cap:layers:read:join-count"));
+    assert!(!config.path().join("grants.json").exists());
+
+    // Without the key, no line and no grant holds it: today's enrollment.
+    let plain = join_config("");
+    let checked = run_grants(&plain, &["--check"]);
+    assert!(checked.status.success(), "{checked:?}");
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert!(!stdout.contains("count-reader"), "{stdout}");
+    assert!(!stdout.contains(COUNT_CAP), "{stdout}");
+}
+
+#[test]
+fn an_unknown_count_reader_is_refused_at_grants_with_nothing_written() {
+    let config = join_config("count_readers = [\"brian\", \"nobody\"]");
+    for extra in [&[][..], &["--check"][..]] {
+        let refused = run_grants(&config, extra);
+        assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(stderr.contains("`nobody`"), "{stderr}");
+        assert!(stderr.contains("no participant"), "{stderr}");
+        assert!(stderr.contains("nothing written"), "{stderr}");
+        assert!(!config.path().join("grants.json").exists());
+        assert!(!config.path().join("clients.json").exists());
+    }
+    for bad in [
+        "count_readers = \"brian\"",
+        "count_readers = [1]",
+        "count_readers = [\"Not A Name\"]",
+    ] {
+        let config = join_config(bad);
+        let refused = run_grants(&config, &[]);
+        assert_eq!(refused.status.code(), Some(1), "{bad}: {refused:?}");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("join.count_readers"),
+            "{bad}: {refused:?}"
+        );
+        assert!(!config.path().join("grants.json").exists());
+    }
+}
+
+#[test]
+fn a_joined_identity_is_refused_as_a_count_reader() {
+    let d = door();
+    joined(&d, "reader", 1);
+    let (_, fp) = certificate("reader0");
+    let principal = format!("urn:iki:host:{DOOR}:client:{fp}");
+    d.config.write(
+        "layers.toml",
+        &format!("[join]\nhost_key = \"join.pem\"\ncount_readers = [\"brian\", \"{principal}\"]\n"),
+    );
+    let refused = run_grants(&d.config, &[]);
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains(&principal), "{stderr}");
+    assert!(stderr.contains("a joined identity"), "{stderr}");
+    assert!(!d.config.path().join("grants.json").exists());
+}
+
+#[test]
+fn count_readers_on_a_host_with_no_join_is_refused() {
+    let config = Scratch::new("no-join");
+    write_config(&config);
+    config.write("layers.toml", "[join]\ncount_readers = [\"brian\"]\n");
+    let refused = run_grants(&config, &[]);
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("no join count to read"), "{stderr}");
+    assert!(!config.path().join("grants.json").exists());
+}
+
+#[test]
+fn a_host_opens_with_count_readers() {
+    let d = door_with(COUNT_READERS);
+    joined(&d, "reader", 5);
+    assert_eq!(count_at(&d, T0), count_of(5, 5, 5));
+}
+
 #[test]
 fn a_host_with_no_join_has_no_count() {
     let f = fixture();
