@@ -115,6 +115,8 @@ pub struct LayerDef {
     pub context: String,
     /// The bound on one entry's (or tuple's) content, in bytes.
     pub entry_max: usize,
+    /// Taken receipts expire after this duration. None keeps them indefinitely.
+    pub retain: Option<std::time::Duration>,
     /// The predicate `latest about=` reads (default `dcterms:subject`). A channel's only.
     pub about: String,
     /// A tuplespace's only: whether a tuple carrying `ik:addressedTo` may be taken only by a
@@ -208,6 +210,7 @@ struct LayerToml {
     context: String,
     label: Option<String>,
     entry_max: Option<toml::Value>,
+    retain: Option<String>,
     about: Option<String>,
     addressed: Option<bool>,
     #[serde(rename = "match")]
@@ -309,6 +312,29 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
             ))
         }
         _ => {}
+    }
+    let retain = parsed
+        .retain
+        .as_deref()
+        .map(|value| {
+            let millis = value
+                .strip_suffix('d')
+                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|n| n.parse::<u64>().ok())
+                .filter(|n| *n > 0)
+                .and_then(|n| n.checked_mul(86_400_000));
+            millis.map(std::time::Duration::from_millis).ok_or_else(|| {
+                ConfigError(format!(
+                    "{at}: retain must be a positive whole number of days, such as \"30d\", \
+                     within the millisecond clock's range"
+                ))
+            })
+        })
+        .transpose()?;
+    if retain.is_some() && model != Model::Tuplespace {
+        return err(format!(
+            "{at}: retain is a tuplespace option: it expires taken receipts"
+        ));
     }
     let feed_options = parsed.feed.unwrap_or(false);
     if !feed_options {
@@ -421,6 +447,7 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         target_classes,
         context,
         entry_max,
+        retain,
         about,
         addressed: parsed.addressed.unwrap_or(false),
         matching: parsed.matching.unwrap_or(false),

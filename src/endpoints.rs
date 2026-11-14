@@ -930,10 +930,7 @@ impl LayerEndpoint {
             });
             Representation::new(ReprType::new(JSON), body.to_string().into_bytes())
         } else {
-            let text: String = events
-                .iter()
-                .map(|e| format!("{} {} {} {} {}\n", e.seq, e.time, e.kind, e.iri, e.by))
-                .collect();
+            let text: String = events.iter().map(Event::plain).collect();
             Representation::new(ReprType::new(TEXT), text.into_bytes())
         }
     }
@@ -1120,6 +1117,7 @@ impl LayerEndpoint {
             .append(&stamped)
             .map_err(Error::Endpoint)?;
         let logged = self.log_stored(Event {
+            sweep: None,
             seq,
             time: created,
             kind: "say".into(),
@@ -1210,6 +1208,7 @@ impl LayerEndpoint {
             .append(&stamped)
             .map_err(Error::Endpoint)?;
         let logged = self.log_stored(Event {
+            sweep: None,
             seq,
             time: created,
             kind: "say".into(),
@@ -1569,8 +1568,8 @@ impl LayerEndpoint {
 
     fn gone(&self, subject: &str) -> Error {
         Error::Conflict(format!(
-            "<{subject}> left layer `{}`'s space without a take through this host, so there is \
-             no receipt and nobody can take it",
+            "<{subject}> is no longer in layer `{}`'s space and has no receipt, \
+             so nobody can take it",
             self.layer()
         ))
     }
@@ -1601,7 +1600,14 @@ impl LayerEndpoint {
             return Err(self.no_match());
         }
         let space = self.state.tuplespace();
-        let answer = |r: Representation| Ok(r.cacheable().depends_on(self.tuples_thread()));
+        // Expiration advances without a Sink or Delete to cut the kernel's cache.
+        let answer = |r: Representation| {
+            Ok(if self.def().retain.is_some() {
+                r
+            } else {
+                r.cacheable().depends_on(self.tuples_thread())
+            })
+        };
         if let (Some(_), Some(_)) = (tuple, template) {
             return Err(Error::InvalidArgument {
                 name: "match".into(),
@@ -1633,7 +1639,7 @@ impl LayerEndpoint {
                         Err(format!("<{subject}> is pending: nobody has taken it"))
                     }
                     (_, Lookup::Gone) => Err(format!(
-                        "<{subject}> left the space without a take through this host"
+                        "<{subject}> is no longer in the space and has no receipt"
                     )),
                     (_, Lookup::Unknown) => {
                         Err(format!("no tuple <{subject}> in layer `{}`", self.layer()))
@@ -1796,13 +1802,18 @@ impl LayerEndpoint {
             .receipt(id)
             .map(|r| r.id.clone());
         match found {
-            // A receipt never changes: cacheable for as long as the layer exists.
+            // A retained receipt never changes, but a configured window can remove it.
             Some(id) => {
                 let text = space
                     .store
                     .receipt_text(&id)
                     .map_err(|e| self.space_error(e))?;
-                Ok(self.graph_face(text, as_ld).await?.cacheable())
+                let repr = self.graph_face(text, as_ld).await?;
+                Ok(if self.def().retain.is_some() {
+                    repr
+                } else {
+                    repr.cacheable()
+                })
             }
             None => Err(self.not_found_tuple(
                 inv,
@@ -1986,6 +1997,21 @@ impl Endpoint for LayerEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         if let (false, Some(principal)) = (self.is_share(), inv.capability.principal()) {
             self.host().gate(principal, inv.now())?;
+        }
+        if self.def().retain.is_some()
+            && self
+                .state
+                .sweep_retention(inv.now().ok_or_else(|| {
+                    Error::Endpoint(format!(
+                        "layer `{}` has retain configured, so its retention sweep needs a clock: \
+                     give the kernel one with with_clock",
+                        self.layer()
+                    ))
+                })?)
+                .await
+                .map_err(Error::Endpoint)?
+        {
+            self.host().notify().bump();
         }
         if self.def().is_feed() && self.action.is_shared_feed_read() {
             return if self.is_share() {
@@ -2451,10 +2477,9 @@ impl Endpoint for MultiFeed {
             let events: Vec<serde_json::Value> = events
                 .iter()
                 .map(|(layer, e)| {
-                    serde_json::json!({
-                        "layer": layer, "seq": e.seq, "time": e.time, "kind": e.kind,
-                        "iri": e.iri, "by": e.by,
-                    })
+                    let mut event = serde_json::to_value(e).expect("feed event JSON");
+                    event["layer"] = serde_json::json!(layer);
+                    event
                 })
                 .collect();
             let body = serde_json::json!({
@@ -2465,12 +2490,7 @@ impl Endpoint for MultiFeed {
         } else {
             let text: String = events
                 .iter()
-                .map(|(layer, e)| {
-                    format!(
-                        "{layer} {} {} {} {} {}\n",
-                        e.seq, e.time, e.kind, e.iri, e.by
-                    )
-                })
+                .map(|(layer, e)| format!("{layer} {}", e.plain()))
                 .collect();
             Representation::new(ReprType::new(TEXT), text.into_bytes())
         };

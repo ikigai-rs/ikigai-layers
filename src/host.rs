@@ -69,6 +69,46 @@ impl LayerState {
         }
     }
 
+    /// Expire this layer's old taken receipts under its write lock. Logging the aggregate
+    /// first commits the batch; replay finishes any interrupted deletion before another batch.
+    pub(crate) async fn sweep_retention(&self, now: ikigai_core::Time) -> Result<bool, String> {
+        let Some(retain) = self.def.retain else {
+            return Ok(false);
+        };
+        let _write = self.write.lock().await;
+        let space = self.tuplespace();
+        let mut feed = self.feed.lock().expect("feed lock");
+        feed.settle()?;
+        if let Some(event) = feed.events().iter().rev().find(|e| e.sweep.is_some()) {
+            space.expire(
+                &event.sweep.as_ref().expect("sweep event").before,
+                event.seq,
+            )?;
+        }
+        let Some(cutoff) = now.as_millis().checked_sub(retain.as_millis() as u64) else {
+            return Ok(false);
+        };
+        let before = crate::time::xsd_date_time(ikigai_core::Time::from_millis(cutoff));
+        let seq = feed.next();
+        let count = space.expired(&before, seq)?.len() as u64;
+        if count == 0 {
+            return Ok(false);
+        }
+        feed.append(Event {
+            seq,
+            time: crate::time::xsd_date_time(now),
+            kind: "sweep".into(),
+            iri: crate::name::layer_iri(&self.def.name),
+            by: "urn:layers:retention".into(),
+            sweep: Some(feed::Sweep {
+                count,
+                before: before.clone(),
+            }),
+        })?;
+        space.expire(&before, seq)?;
+        Ok(true)
+    }
+
     /// The feed's events after `after`, at most [`feed::MAX_EVENTS`].
     pub fn events_after(&self, after: u64) -> Vec<Event> {
         self.feed.lock().expect("feed lock").after(after).to_vec()
@@ -252,7 +292,23 @@ impl Host {
         // Catch up on the grants layer: an entitlement said while no host ran is applied now,
         // and one already applied changes nothing (ledger #2009).
         futures::executor::block_on(host.apply_entitlements(opened_at));
+        futures::executor::block_on(host.sweep_retention(opened_at))?;
         Ok(host)
+    }
+
+    /// Sweep configured retention windows using the supplied clock. Called at open and
+    /// on layer requests; an idle deployment can also schedule this method periodically.
+    pub async fn sweep_retention(&self, now: ikigai_core::Time) -> Result<(), ConfigError> {
+        for (name, state) in &self.layers {
+            if state
+                .sweep_retention(now)
+                .await
+                .map_err(|e| ConfigError(format!("layer `{name}` retention: {e}")))?
+            {
+                self.notify.bump();
+            }
+        }
+        Ok(())
     }
 
     /// The configuration directory the host was opened over: where its door's enrollment
@@ -631,6 +687,7 @@ fn open_layer(
                     ));
                 }
                 feed.append(Event {
+                    sweep: None,
                     seq: meta.seq,
                     time: meta.created.clone(),
                     kind: "say".into(),
@@ -664,6 +721,12 @@ fn open_layer(
                     ));
                 }
                 feed.append(event)?;
+            }
+            if let Some(event) = feed.events().iter().rev().find(|e| e.sweep.is_some()) {
+                space.expire(
+                    &event.sweep.as_ref().expect("sweep event").before,
+                    event.seq,
+                )?;
             }
             ModelState::Tuplespace(space)
         }

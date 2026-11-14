@@ -22,7 +22,9 @@ presentation has not been evaluated here.
 - **Answers from the layer resources** (`src/endpoints.rs`): a write (`say`, `out`) answers the
   new entry's or tuple's IRI as `text/plain`; the feeds, the pending tuples and the receipts list
   one line per item as `text/plain`, space-separated (`<seq> <time> <kind> <iri> <participant>`
-  for a feed event); entries, definitions and shapes are Turtle; and every answer a participant
+  for a feed event; a retention `sweep` appends labeled `count=N before=<UTC cutoff>`
+  fields and includes the same aggregate in the event's JSON `sweep` object); entries,
+  definitions and shapes are Turtle; and every answer a participant
   reads also comes as JSON or JSON-LD (README, "JSON faces").
 - **Feed answers** (`src/feeds/`): a feed layer's entries also come as Atom 1.0 XML
   (`as=application/atom+xml`), written from the SELECT's rows by a stylesheet (a missing title

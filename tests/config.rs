@@ -263,3 +263,47 @@ fn participants_are_named_and_typed() {
         assert!(message.contains(says), "{graph}: {message}");
     }
 }
+
+#[test]
+fn a_tuplespace_accepts_a_retention_window() {
+    let config = Scratch::new("retention-config");
+    write_config(&config);
+    config.write(
+        "layers/extra.toml",
+        &layer("tuplespace", "retain = \"30d\"\n"),
+    );
+    let config =
+        Config::load(config.path()).expect("a layer may expire taken receipts after 30 days");
+    assert_eq!(
+        config.layers["extra"].retain.unwrap().as_secs(),
+        30 * 86_400
+    );
+    assert!(config.layers["tasks-bobby"].retain.is_none());
+}
+
+#[test]
+fn retain_refuses_invalid_windows_and_channels() {
+    let config = Scratch::new("retention-config");
+    write_config(&config);
+    for value in [
+        "0d",
+        "-1d",
+        "1.5d",
+        "30",
+        "30h",
+        "d",
+        "18446744073709551615d",
+    ] {
+        config.write(
+            "layers/extra.toml",
+            &layer("tuplespace", &format!("retain = \"{value}\"\n")),
+        );
+        let reason = refused(&config);
+        assert!(
+            reason.contains("retain") && reason.contains("positive whole number of days"),
+            "{reason}"
+        );
+    }
+    config.write("layers/extra.toml", &layer("channel", "retain = \"30d\"\n"));
+    assert!(refused(&config).contains("tuplespace option"));
+}

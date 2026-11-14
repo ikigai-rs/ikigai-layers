@@ -112,9 +112,10 @@ shapes    = "tasks.shapes.ttl"
 context   = "tasks.context.jsonld"
 addressed = true                 # a tuple with ik:addressedTo is taken only by an addressee
 match     = false                # optional; the default: `rd match=` is refused
+# retain  = "30d"                # optional: expire taken receipts after 30 days
 ```
 
-`addressed` and `match` are a tuplespace's options and `about` a channel's; naming one on
+`addressed`, `match` and `retain` are a tuplespace's options and `about` a channel's; naming one on
 the other model is refused, like a misspelled key.
 
 **`match` is off by default.** A `match=` template is the caller's own SPARQL ASK,
@@ -538,6 +539,22 @@ Before the reply, the host commits a receipt: the take as a `prov:Activity` that
 `prov:used` the offer, `prov:wasAssociatedWith` the taker, ended at a time, numbered in the
 feed, with the tuple as taken. A taker that lost its reply reads
 `source urn:layer:tasks-bobby:tuples state=taken tuple=<offer>`.
+
+A tuplespace may set `retain = "30d"` (a positive whole number of days). Without it,
+receipts stay indefinitely. A sweep deletes receipts whose take time is strictly older than
+`now - retain`, including the tuple each receipt holds. Pending tuples stay. Receipts remain
+unchanged inside the window; after expiration, retries and reports cannot use that receipt.
+The tuple's subject stays reserved, so an expired tuple cannot be submitted again.
+
+The host sweeps when it opens and before requests on a layer with retention configured.
+For expiration while idle, the deployment schedules `Host::sweep_retention(now)` with its
+clock. The feed keeps its existing events and adds one `sweep` event per nonempty batch,
+with the layer IRI, `by = urn:layers:retention` and aggregate fields only. Plain lines append
+`count=N before=<UTC cutoff>`; JSON events add `"sweep": {"count": N, "before": "..."}`.
+No receipt IDs, tuple subjects or contents are included in that aggregate. The aggregate is
+synced before deletion, committing the batch; if deletion fails or the host stops, a retry or
+restart finishes that batch without adding another event. Deletion does not remove copies
+held by clients or backups.
 
 Reports (`ik:Progress`, `ik:Release`, `ik:Handback` with `ik:evidence`) name the offer
 with `ik:offer` and are addressed to its offerer with `ik:addressedTo`. The host admits a
