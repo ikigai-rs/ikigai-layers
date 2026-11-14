@@ -8,6 +8,9 @@
 //! {seq}\t{time}\t{kind}\t{iri}\t{by}
 //! ```
 //!
+//! A `sweep` line adds `\t{count}\t{before}`: a committed retention batch, replayed
+//! after interruption. Its IRI names the layer, never a tuple.
+//!
 //! `seq` starts at 1 and every event is the previous one plus one, assigned under the
 //! layer's write lock by the verb that wrote it, so a follower that resumes after the last
 //! number it saw cannot miss an event, and a gap is a defect rather than a quiet hour.
@@ -42,39 +45,75 @@ pub use crate::time::MAX_WAIT_SECS;
 /// sequence number it received; the sequence is gapless, so paging loses nothing.
 pub const MAX_EVENTS: usize = 1000;
 
+/// A committed expiration batch. Only aggregate data, never receipt or tuple contents.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Sweep {
+    /// Number of receipts selected for deletion.
+    pub count: u64,
+    /// Delete takes strictly older than this UTC timestamp.
+    pub before: String,
+}
+
 /// One event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Event {
+    /// Aggregate retention data, present only for a `sweep` event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<Sweep>,
     /// Its place in the layer's feed, from 1, gapless.
     pub seq: u64,
     /// When, as `xsd:dateTime` (the kernel clock).
     pub time: String,
-    /// What happened: `say` (the channel model), `out` or `taken` (the tuplespace model).
+    /// What happened: `say` (channel), `out`, `taken` or `sweep` (tuplespace).
     pub kind: String,
     /// What it happened to: an entry's IRI for `say`, a tuple's subject for `out` and
-    /// `taken`.
+    /// `taken`, and the layer IRI for `sweep`.
     pub iri: String,
-    /// Who did it: the principal.
+    /// Who did it: the principal, or `urn:layers:retention` for a sweep.
     pub by: String,
 }
 
 impl Event {
+    /// A feed line for participants; sweep fields are labeled in words.
+    pub fn plain(&self) -> String {
+        let mut text = format!(
+            "{} {} {} {} {}",
+            self.seq, self.time, self.kind, self.iri, self.by
+        );
+        if let Some(sweep) = &self.sweep {
+            text.push_str(&format!(" count={} before={}", sweep.count, sweep.before));
+        }
+        text.push('\n');
+        text
+    }
+
     fn line(&self) -> String {
-        format!(
+        let mut line = format!(
             "{}\t{}\t{}\t{}\t{}",
             self.seq, self.time, self.kind, self.iri, self.by
-        )
+        );
+        if let Some(sweep) = &self.sweep {
+            line.push_str(&format!("\t{}\t{}", sweep.count, sweep.before));
+        }
+        line
     }
 
     fn parse(line: &str) -> Option<Event> {
         let mut parts = line.split('\t');
-        let event = Event {
+        let mut event = Event {
+            sweep: None,
             seq: parts.next()?.parse().ok()?,
             time: parts.next()?.to_string(),
             kind: parts.next()?.to_string(),
             iri: parts.next()?.to_string(),
             by: parts.next()?.to_string(),
         };
+        if event.kind == "sweep" {
+            event.sweep = Some(Sweep {
+                count: parts.next()?.parse().ok()?,
+                before: parts.next()?.to_string(),
+            });
+        }
         parts.next().is_none().then_some(event)
     }
 }

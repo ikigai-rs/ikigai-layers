@@ -650,6 +650,94 @@ impl Tuplespace {
         Ok(changed)
     }
 
+    /// Select expired receipts, bounded by a sweep's sequence so replay cannot delete
+    /// a later take even if its clock moved backward. Called under the layer write lock.
+    pub(crate) fn expired(
+        &self,
+        before: &str,
+        seq: u64,
+    ) -> std::result::Result<Vec<String>, String> {
+        use std::str::FromStr;
+        let cutoff = oxsdatatypes::DateTime::from_str(before)
+            .map_err(|_| "the retention cutoff is not an xsd:dateTime".to_string())?;
+        let index = self.index.read().expect("tuplespace lock");
+        let mut ids = Vec::new();
+        for receipt in index.receipts.iter().filter(|r| r.seq < seq) {
+            let taken = oxsdatatypes::DateTime::from_str(&receipt.time)
+                .map_err(|_| format!("receipt {} has no valid take time", receipt.iri))?;
+            if taken < cutoff {
+                ids.push(receipt.id.clone());
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Finish a durably logged sweep. Missing files mean a previous attempt deleted them.
+    /// Keep the subject reserved, as for a tuple that left the space without a receipt.
+    pub(crate) fn expire(&self, before: &str, seq: u64) -> std::result::Result<(), String> {
+        let ids = self.expired(before, seq)?;
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut staged: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        for path in read_dir(&self.store.staging)? {
+            if let Some(id) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".ttl"))
+                .and_then(|n| n.split_once('.').map(|(_, id)| id))
+            {
+                staged.entry(id.to_string()).or_default().push(path);
+            }
+        }
+        let mut deleted = BTreeSet::new();
+        let result = (|| {
+            for id in ids {
+                let path = self.store.receipt_path(&id);
+                let mut paths = vec![path];
+                paths.extend(staged.remove(&id).unwrap_or_default());
+                // A committed take may still be staged after a failed rename. Delete
+                // both copies, so neither a read fallback nor open resurrects it.
+                for path in paths {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            return Err(format!("delete expired receipt {}: {e}", path.display()))
+                        }
+                    }
+                }
+                deleted.insert(id);
+            }
+            Ok(())
+        })();
+        // Update even on partial failure. Keep take order and reserve expired subjects;
+        // a retry uses the logged batch and does not append another aggregate.
+        let mut index = self.index.write().expect("tuplespace lock");
+        let subjects: Vec<_> = index
+            .receipts
+            .iter()
+            .filter(|r| deleted.contains(&r.id))
+            .map(|r| r.tuple.subject.clone())
+            .collect();
+        for subject in subjects {
+            index.subjects.insert(subject, Place::Gone);
+        }
+        index.receipts.retain(|r| !deleted.contains(&r.id));
+        index.by_receipt_id.clear();
+        let positions: Vec<_> = index
+            .receipts
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (i, r.id.clone(), r.tuple.subject.clone()))
+            .collect();
+        for (i, id, subject) in positions {
+            index.by_receipt_id.insert(id, i);
+            index.subjects.insert(subject, Place::Taken(i));
+        }
+        result
+    }
+
     /// Record a drop that has been stored and logged.
     pub fn record_out(&self, meta: TupleMeta) {
         self.index
@@ -804,6 +892,7 @@ fn reseal_settled(sealer: &Sealer, dir: &Path) -> std::result::Result<usize, Str
 /// The `out` event a stored tuple carries.
 pub fn out_event(meta: &TupleMeta) -> Event {
     Event {
+        sweep: None,
         seq: meta.seq,
         time: meta.created.clone(),
         kind: "out".into(),
@@ -815,6 +904,7 @@ pub fn out_event(meta: &TupleMeta) -> Event {
 /// The `taken` event a receipt carries.
 pub fn taken_event(receipt: &Receipt) -> Event {
     Event {
+        sweep: None,
         seq: receipt.seq,
         time: receipt.time.clone(),
         kind: "taken".into(),
