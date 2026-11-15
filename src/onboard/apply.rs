@@ -62,6 +62,10 @@ use crate::time::xsd_date_time;
 
 /// Where the controller's public key is served in the host's verification kernel, which no
 /// door binds.
+const RESTART_NOTICE: &str = "ikigai-layers: onboard: entitlements applied; RESTART THE DOOR: it \
+                         reads its trust list only when it starts (onboard.trust_reload = \
+                         \"start\")";
+
 const CONTROLLER_KEY: &str = "urn:layer:onboard:controller-key";
 const VERIFY: &str = "urn:sign:verify";
 
@@ -372,11 +376,7 @@ impl Onboard {
             Ok(changed) => {
                 if changed && self.config.trust_reload == TrustReload::Start {
                     status.restart_pending = true;
-                    eprintln!(
-                        "ikigai-layers: onboard: entitlements applied; RESTART THE DOOR: it \
-                         reads its trust list only when it starts (onboard.trust_reload = \
-                         \"start\")"
-                    );
+                    eprintln!("{RESTART_NOTICE}");
                 }
             }
             Err(e) => {
@@ -944,5 +944,13 @@ impl LobbyRate {
         }
         window.push_back((now, who.to_string()));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod message_tests {
+    #[test]
+    fn restart_notice_uses_sentence_case_and_explains_why() {
+        assert_eq!(super::RESTART_NOTICE, "ikigai-layers: onboard: entitlements applied; restart the door: it reads its trust list only when it starts (onboard.trust_reload = \"start\")");
     }
 }

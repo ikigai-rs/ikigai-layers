@@ -359,3 +359,32 @@ fn both_files_are_written_0600() {
         assert_eq!(mode, 0o600, "{name}");
     }
 }
+
+#[test]
+fn grants_names_invalid_arguments_before_usage() {
+    for (args, sentence) in [
+        (vec!["grants", "--unknown"], "unknown flag --unknown"),
+        (
+            vec!["grants", "config", "extra"],
+            "unexpected argument extra: grants takes one config directory",
+        ),
+        (vec!["grants", "config", "--out"], "--out takes a value"),
+        (
+            vec!["grants", "config", "--out", "--check"],
+            "--out takes a value; got flag --check",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ikigai-layers"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(stderr.lines().next(), Some(sentence), "{stderr}");
+        assert!(
+            stderr.contains("\n\nusage: ikigai-layers grants"),
+            "{stderr}"
+        );
+    }
+}

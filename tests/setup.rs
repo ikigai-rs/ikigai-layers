@@ -524,3 +524,25 @@ fn check_on_a_bare_config_names_every_missing_piece() {
         "{said}"
     );
 }
+
+#[test]
+fn lobby_check_uses_natural_plurals() {
+    let (config, door) = completed();
+    let output = check(&config, &door, "Edge");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "1 way a node would be left in the lobby; nothing written (--check)\n"
+    );
+    let bare = self::config();
+    let output = check(&bare, &door, "edge");
+    let count = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("stuck: "))
+        .count();
+    assert!(count > 1);
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!("{count} ways a node would be left in the lobby; nothing written (--check)\n")
+    );
+}
