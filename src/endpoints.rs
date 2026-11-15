@@ -1899,8 +1899,13 @@ fn violations(layer: &str, report: &serde_json::Value) -> String {
         lines.push(format!("and {} more", all.len() - SHOWN));
     }
     format!(
-        "does not conform to layer `{layer}`'s shapes ({} violation(s)): {}",
+        "does not conform to layer `{layer}`'s shapes ({} {}): {}",
         all.len(),
+        if all.len() == 1 {
+            "violation"
+        } else {
+            "violations"
+        },
         lines.join("; ")
     )
 }

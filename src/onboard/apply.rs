@@ -60,12 +60,12 @@ use crate::name::{fold_fingerprint, Participant, PARTICIPANT_PREFIX};
 use crate::rdf::{self, object_iri};
 use crate::time::xsd_date_time;
 
+const RESTART_NOTICE: &str = "ikigai-layers: onboard: entitlements applied; restart the door: it \
+    reads its trust list only when it starts (onboard.trust_reload = \
+    \"start\")";
+
 /// Where the controller's public key is served in the host's verification kernel, which no
 /// door binds.
-const RESTART_NOTICE: &str = "ikigai-layers: onboard: entitlements applied; RESTART THE DOOR: it \
-                         reads its trust list only when it starts (onboard.trust_reload = \
-                         \"start\")";
-
 const CONTROLLER_KEY: &str = "urn:layer:onboard:controller-key";
 const VERIFY: &str = "urn:sign:verify";
 

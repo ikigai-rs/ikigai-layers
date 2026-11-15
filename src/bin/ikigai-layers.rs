@@ -82,15 +82,33 @@ fn grants(args: &[String]) -> Outcome {
     let mut check = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--out" => out = Some(PathBuf::from(args.next().ok_or_else(usage)?)),
+            "--out" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| (2, format!("--out takes a value\n\n{USAGE}")))?;
+                if value.starts_with('-') {
+                    return Err((
+                        2,
+                        format!("--out takes a value; got flag {value}\n\n{USAGE}"),
+                    ));
+                }
+                out = Some(PathBuf::from(value));
+            }
             "--check" => check = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
             }
-            flag if flag.starts_with('-') => return Err(usage()),
+            flag if flag.starts_with('-') => {
+                return Err((2, format!("unknown flag {flag}\n\n{USAGE}")))
+            }
             path if dir.is_none() => dir = Some(PathBuf::from(path)),
-            _ => return Err(usage()),
+            argument => {
+                let message = format!(
+                    "unexpected argument {argument}: grants takes one config directory\n\n{USAGE}"
+                );
+                return Err((2, message));
+            }
         }
     }
     let dir = dir.ok_or_else(usage)?;
@@ -233,8 +251,9 @@ fn onboard_setup(args: &[String]) -> Outcome {
         return Err((
             1,
             format!(
-                "{} way(s) a node would be left in the lobby; nothing written (--check)",
-                problems.len()
+                "{} {} a node would be left in the lobby; nothing written (--check)",
+                problems.len(),
+                if problems.len() == 1 { "way" } else { "ways" }
             ),
         ));
     }
@@ -274,8 +293,9 @@ fn onboard_setup(args: &[String]) -> Outcome {
     Err((
         1,
         format!(
-            "{} way(s) a node would still be left in the lobby",
-            problems.len()
+            "{} {} a node would still be left in the lobby",
+            problems.len(),
+            if problems.len() == 1 { "way" } else { "ways" }
         ),
     ))
 }

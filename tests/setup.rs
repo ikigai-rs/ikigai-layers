@@ -546,3 +546,35 @@ fn lobby_check_uses_natural_plurals() {
         format!("{count} ways a node would be left in the lobby; nothing written (--check)\n")
     );
 }
+
+#[test]
+fn setup_summary_uses_natural_plurals() {
+    let (config, _door) = completed();
+    let other = door_dir("another-door");
+    for (count, sentence) in [
+        (1, "1 way a node would still be left in the lobby\n"),
+        (2, "2 ways a node would still be left in the lobby\n"),
+    ] {
+        if count == 2 {
+            let lobby = std::fs::read_to_string(config.path().join("layers/enroll.toml")).unwrap();
+            config.write(
+                "layers/enroll.toml",
+                &lobby.replace("lobby   = true", "lobby   = false"),
+            );
+        }
+        let output = run(
+            &[
+                "onboard",
+                "setup",
+                p(config.path()),
+                "--door-dir",
+                p(other.path()),
+                "--door-name",
+                "edge",
+            ],
+            None,
+        );
+        assert_eq!(output.status.code(), Some(1), "{}", out(&output));
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), sentence);
+    }
+}

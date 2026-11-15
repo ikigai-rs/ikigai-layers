@@ -38,7 +38,8 @@ presentation has not been evaluated here.
   manifest grants answers ``onb:principal <participant> is granted by manifest `<name>`, …`` and
   says how to change that, and one naming `onboard.controller` says it is never entitled, both
   in the same two places. A write that fails admission answers ``does not conform to layer
-  `talk`'s shapes (N violation(s)): …``, listing up to 20 violations and a count of the rest.
+  `talk`'s shapes (1 violation): …`` (``N violations`` for other counts), listing up to 20
+  violations and a count of the rest.
   A `say` on a feed by a non-publisher answers ``layer `releases` is a feed, written only by
   its publishers, and <participant> is not one of them: ask in a Talk channel instead``; an
   entry whose `dcterms:subject` is outside the feed's scheme, and a `concept=` the scheme does
@@ -143,15 +144,17 @@ above; they describe code inspection, not a user evaluation.
 
 Rechecked by reading main's source on 2026-11-12 with `git show` (Git 2.43.0), not by testing
 with users. Fail records a remaining output limitation, not a completed WCAG assessment.
-These source reviews are dated evidence; CI does not repeat them.
+These source reviews are dated evidence; CI does not repeat them. The two Pass rows below
+were retested on 2026-11-15 and identify regression tests CI repeats; the remaining Fail rows
+retain the original source-review evidence.
 
 | Check | Result | Evidence |
 |---|---|---|
 | Plain listing column labels | Fail | `git show 92e37d7:src/endpoints.rs`: feed, tuple and receipt plain listings use space-separated values without headers or field labels; meaning depends on position. |
 | Admission refusal readability | Fail | `git show 92e37d7:src/endpoints.rs`: admission messages use full property IRIs, constraint component names and validator messages, up to 20 violations joined by semicolons on one line; `(node)` substitutes for a missing path. |
-| Naming the invalid grants argument | Fail | `git show 92e37d7:src/bin/ikigai-layers.rs`: `grants` returns usage alone for an unknown flag, stray argument or missing value. `onboard setup` names an unknown flag. |
+| Naming the invalid grants argument | Pass | Reproduced and retested on 2026-11-15 with Cargo/rustc 1.99.0: `tests/grants.rs::grants_names_invalid_arguments_before_usage` checks the first stderr line names an unknown flag, stray argument or missing `--out` value (also when another flag follows), followed by usage, with exit 2 and no stdout. |
 | Readability of opaque identifiers | Fail | `git show 92e37d7:src/bin/ikigai-layers.rs` and `git show 92e37d7:src/endpoints.rs`: client lines use full certificate fingerprints; write answers and listings use full entry and tuple IRIs. |
-| Natural plurals and urgency wording | Fail | `git show 92e37d7:src/endpoints.rs`, `git show 92e37d7:src/bin/ikigai-layers.rs` and `git show 92e37d7:src/onboard/apply.rs`: `violation(s)`, `way(s)` and `RESTART THE DOOR` remain in messages. Spoken presentation has not been tested. |
+| Natural plurals and urgency wording | Pass | Reproduced and retested on 2026-11-15 with Cargo/rustc 1.99.0: `endpoints::message_tests::admission_refusal_uses_natural_plurals` pins the refusal for 0, 1, 2 and 21 violations, including truncation; `tests/setup.rs::lobby_check_uses_natural_plurals` and `setup_summary_uses_natural_plurals` pin singular and plural lobby summaries; `onboard::apply::message_tests::restart_notice_uses_sentence_case_and_explains_why` pins the sentence-case restart instruction and startup-only trust-list reason. Spoken presentation has not been tested. |
 | Message localization | Fail | Source review of `src/bin/ikigai-layers.rs`, `src/endpoints.rs` and `src/onboard/` at the main commit above: built-in messages are English only, with no localized alternatives. |
 
 ## Contributing
@@ -187,3 +190,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-09 | The state key's refusals, with the owner and mode ones naming the command to run. |
 | 2026-11-12 | Record checks as Pass, Fail or Blocked, with current main evidence and explicit evaluation gaps. |
 | 2026-11-13 | `grants`' `count-reader` line and its refusals of a `join.count_readers` entry. |
+| 2026-11-15 | Fix natural plurals, name invalid grants arguments, and use sentence case for the restart notice; add wording regression tests. |
