@@ -55,7 +55,7 @@ presentation has not been evaluated here.
   joined, and an identity that has lapsed (which says it may join again). No answer, refusal or
   diagnostic names a source address, and a door whose system cannot supply randomness gets the
   error ``the hourly key for source addresses cannot be drawn: …`` from `door_capability`.
-- **Whether a name is in use** (`src/endpoints.rs`, `urn:layers:participant-name:{name}`):
+- **Whether a name is in use** (`src/endpoints.rs`, `urn:layers:participant:name:{name}`):
   `true` or `false` on one line as `text/plain`, and `{"name", "inUse"}` as JSON. A verb other
   than `Exists` is refused with a sentence that says what the resource answers, names the verb
   asked and ends ``ask with Exists``; a malformed name is refused naming it and spelling out a

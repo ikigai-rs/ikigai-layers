@@ -21,7 +21,7 @@
 //! urn:layers:participants          Source  layers-participants       urn:cap:layers:read:participants
 //! urn:layers:join:count            Source  layers-join-count         urn:cap:layers:read:join-count  (a host with a join)
 //! urn:layers:me                    Source  layers-me                 urn:cap:collab:read:*  (any participant grant)
-//! urn:layers:participant-name:{name} Exists layers-participant-name urn:cap:layer:say:{grants}  (a host with [onboard])
+//! urn:layers:participant:name:{name} Exists layers-participant-name urn:cap:layer:say:{grants}  (a host with [onboard])
 //! urn:collab:{name}                Source  collab                    urn:cap:collab:read:* (+ exact per manifest)
 //! urn:collab:{name}:participants   Source  collab-participants       urn:cap:collab:read:* (+ exact per manifest)
 //! ```
@@ -100,10 +100,10 @@ pub const CAP_JOIN_COUNT: &str = "urn:cap:layers:read:join-count";
 /// `urn:layers:me`: who the door says the caller is.
 pub const ME: &str = "urn:layers:me";
 
-/// `urn:layers:participant-name:{name}`: whether a participant name is in use, for the
+/// `urn:layers:participant:name:{name}`: whether a participant name is in use, for the
 /// onboarding controller (ledger #3316), answered `true` or `false` to an `Exists`. Bound only
 /// on a host with `[onboard]`, under the grants layer's `say`, the controller's.
-pub const PARTICIPANT_NAME: &str = "urn:layers:participant-name:{name}";
+pub const PARTICIPANT_NAME: &str = "urn:layers:participant:name:{name}";
 
 /// The family `urn:layers:feed` declares (and then checks exactly, per layer).
 pub const CAP_FEED_FAMILY: &str = "urn:cap:layer:feed:*";
@@ -2589,7 +2589,7 @@ impl Endpoint for StatusEndpoint {
     }
 }
 
-/// `urn:layers:participant-name:{name}`: whether `urn:collab:participant:{name}` is in use,
+/// `urn:layers:participant:name:{name}`: whether `urn:collab:participant:{name}` is in use,
 /// answered `true` or `false` to an `Exists` and nothing else (ledger #3316).
 ///
 /// **In use** is exactly what the host's apply would refuse an entitlement naming it for, from
@@ -2653,7 +2653,7 @@ impl Endpoint for ParticipantName {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         if inv.request.verb != Verb::Exists {
             return Err(Error::Endpoint(format!(
-                "urn:layers:participant-name:{{name}} answers whether a name is in use, true or \
+                "urn:layers:participant:name:{{name}} answers whether a name is in use, true or \
                  false, to an Exists request only, and this request is {:?}: ask with Exists",
                 inv.request.verb
             )));

@@ -1473,7 +1473,7 @@ fn onboarding_names_its_layer_key_and_trust_directory() {
 
 // ---- whether a name is in use (ledger #3316) ----------------------------------------------
 
-const NAME: &str = "urn:layers:participant-name:";
+const NAME: &str = "urn:layers:participant:name:";
 
 /// The edge, and a collaboration `solo` the controller is not in: its own layer, granted to
 /// `dana` alone. `erin` is in participants.ttl and granted nothing.
@@ -1758,4 +1758,37 @@ fn a_host_with_no_onboard_table_binds_no_name_question() {
     )
     .unwrap_err();
     assert!(matches!(asked, Error::Unresolved(_)), "{asked}");
+}
+
+#[test]
+fn the_name_question_is_keyed_and_leaves_the_roster_alone() {
+    let edge = edge_with_solo();
+    // The roster keeps its own resource: root still reads it, and it lists `dana`.
+    let roster = source(
+        &edge.kernel,
+        "urn:layers:participants",
+        &[],
+        &Capability::root(),
+    );
+    assert!(roster.contains("urn:collab:participant:dana"), "{roster}");
+    // The keyed name answers; the unkeyed spelling and a key under the roster bind nothing.
+    assert_eq!(
+        in_use(&edge, "dana", &Capability::root()).unwrap(),
+        "true\n"
+    );
+    for unbound in [
+        "urn:layers:participant-name:dana",
+        "urn:layers:participants:name:dana",
+        "urn:layers:participant:dana",
+    ] {
+        let asked = issue(
+            &edge.kernel,
+            Verb::Exists,
+            unbound,
+            &[],
+            &Capability::root(),
+        )
+        .unwrap_err();
+        assert!(matches!(asked, Error::Unresolved(_)), "{unbound}: {asked}");
+    }
 }

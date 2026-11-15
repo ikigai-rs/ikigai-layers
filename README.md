@@ -58,7 +58,7 @@ Layers are inspired by Daniel Suarez's novel *Daemon*
 | `urn:layers:feed` | Source | one wait over several feeds, `after=talk:12,notes:3` | `urn:cap:layer:feed:{each}` |
 | `urn:layers:participants` | Source | who each principal is, across the host (the operator's) | `urn:cap:layers:read:participants` |
 | `urn:layers:join:count` | Source | a host with a join only: three aggregate numbers about its joined readers ([Counting joined readers](#counting-joined-readers)) | `urn:cap:layers:read:join-count`, held only by the participants `join.count_readers` names |
-| `urn:layers:participant-name:{name}` | Exists | a host with `[onboard]` only: `true` or `false`, whether this host would refuse an entitlement naming `{name}` for a new certificate ([Onboarding](#asking-whether-a-node-name-is-in-use)) | `urn:cap:layer:say:{grants}`, the controller's |
+| `urn:layers:participant:name:{name}` | Exists | a host with `[onboard]` only: `true` or `false`, whether this host would refuse an entitlement naming `{name}` for a new certificate ([Onboarding](#asking-whether-a-node-name-is-in-use)) | `urn:cap:layer:say:{grants}`, the controller's |
 | `urn:layers:me` | Source | who the door says the caller is: its principal and, when it is a participant, its kind and the collaborations granting it anything (`as=application/json` for a client) | `urn:cap:collab:read:*`, which every generated grant holds |
 | `urn:collab:{name}` | Source | a collaboration's manifest | `urn:cap:collab:read:{name}` |
 | `urn:collab:{name}:participants` | Source | who takes part in that collaboration: each participant its manifest grants anything, as the participants graph describes it | `urn:cap:collab:read:{name}` |
@@ -266,7 +266,7 @@ let in on a signed decision, with no file copied by hand (ledger #2009):
 The controller checks a node's name when it invites it, before the host's apply refuses it.
 It cannot read the whole roster (`urn:layers:participants` is the operator's) and reads only
 its own collaborations' participants, so a name that only another collaboration grants would
-be caught at apply time alone. **`urn:layers:participant-name:{name}`** answers that one
+be caught at apply time alone. **`urn:layers:participant:name:{name}`** answers that one
 question for the controller (ledger #3316): an `Exists` on it answers `true` or `false`
 (`as=application/json`: `{"name", "inUse"}`), one name at a time, naming no collaboration and
 listing nothing.
@@ -284,8 +284,8 @@ any other principal is refused even with that token. Any verb but
 `[a-z0-9-]`, at most 48 characters).
 
 ```text
-Exists urn:layers:participant-name:brian-gonk      -> true
-Exists urn:layers:participant-name:brian-gonk-2    -> false
+Exists urn:layers:participant:name:brian-gonk      -> true
+Exists urn:layers:participant:name:brian-gonk-2    -> false
 ```
 
 With ikigai-cli at or after the release carrying
@@ -981,7 +981,7 @@ kernel with a clock. State is files, sealed at rest (see below): each entry is w
   roster and no generated grant reads it; each participant reads
   `urn:collab:{name}:participants` for its own collaborations, under the
   `urn:cap:collab:read:{name}` its grant already carries. The onboarding controller may also
-  ask whether one name is in use, at `urn:layers:participant-name:{name}`, and learn one bit.
+  ask whether one name is in use, at `urn:layers:participant:name:{name}`, and learn one bit.
 - **Who a participant is, by its own door's word.** `urn:layers:me` answers the principal the
   door minted for the caller, so a client never infers its identity from the attribution on
   records it already holds. It is readable under any generated grant, needs no new token, and
