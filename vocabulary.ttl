@@ -1,0 +1,11 @@
+@prefix layers: <https://ikigai-rs.dev/ns/layers#> .
+@prefix ik: <https://ikigai-rs.dev/ns#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+layers:entryMax a rdf:Property ;
+    rdfs:label "Entry content byte limit" ;
+    rdfs:comment "The maximum number of bytes in submitted entry or tuple content, before RDF parsing. This includes whitespace and encoding overhead and is separate from SHACL literal length constraints." ;
+    rdfs:domain ik:Layer ;
+    rdfs:range xsd:integer .
