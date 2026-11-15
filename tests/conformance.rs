@@ -85,6 +85,7 @@ fn suite(
     receipt: &str,
 ) -> Suite {
     let mut suite = Suite::new()
+        .vocabulary(ikigai_layers::rdf::VOCABULARY)
         .host_named_space(SPACE_LABEL, Arc::new(ikigai_layers::space(&f.host)))
         // BODIES (conformance 0.12.0) compares each endpoint's `invoke` with its
         // `invoke_body` in the space the kernel resolves in, so it is handed the kernel's own

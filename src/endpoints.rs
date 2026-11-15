@@ -559,6 +559,7 @@ impl LayerEndpoint {
                 "layer": def.name,
                 "label": def.label.as_deref().unwrap_or(&def.name),
                 "model": def.model.as_str(),
+                "entry_max": def.entry_max,
                 "types": types,
                 "feed": def.is_feed(),
                 "public": def.feed.as_ref().is_some_and(|f| f.public),
@@ -580,6 +581,11 @@ impl LayerEndpoint {
                 Literal::new_simple_literal(def.model.as_str()),
             ),
         ];
+        triples.push(Triple::new(
+            s.clone(),
+            node(&rdf::ik_entry_max()),
+            Literal::new_typed_literal(def.entry_max.to_string(), node(rdf::XSD_INTEGER)),
+        ));
         if def.is_feed() {
             triples.push(Triple::new(
                 s.clone(),
@@ -2082,9 +2088,9 @@ impl Endpoint for LayerEndpoint {
                 .title(format!("Layer {layer}"))
                 .summary(format!(
                     "Layer `{layer}`'s definition: an ik:Layer (and ik:Feed, for a feed) with \
-                     its access model and the IRIs of its shapes, context and feed; a feed's \
-                     never lists a collaboration. As JSON: layer, label, model, types, feed, \
-                     public"
+                     its access model, content byte limit (ik:entryMax) and the IRIs of its shapes, \
+                     context and feed; a feed's never lists a collaboration. As JSON: layer, \
+                     label, model, entry_max (bytes), types, feed, public"
                 ))
                 .verb(Verb::Source)
                 .input(as_spec(&[TURTLE, JSON]))
@@ -2093,7 +2099,8 @@ impl Endpoint for LayerEndpoint {
             Action::Shapes => base
                 .title(format!("Layer {layer}: shapes"))
                 .summary(format!(
-                    "The closed SHACL shapes every entry of layer `{layer}` must conform to"
+                    "The closed SHACL shapes every entry of layer `{layer}` must conform to, \
+                     re-serialized with blank nodes named urn:layer:{layer}:shapes:nN"
                 ))
                 .verb(Verb::Source)
                 .output(TURTLE),
@@ -2110,7 +2117,8 @@ impl Endpoint for LayerEndpoint {
                 .summary(format!(
                     "Layer `{layer}`'s events after a sequence number (gapless, from 1): one \
                      line per event, `seq time kind iri by`, waiting up to wait= seconds when \
-                     there is none yet"
+                     there is none yet; kind is the operation (say, out, taken, sweep), \
+                     and an entry's RDF types are read from the entry"
                 ))
                 .verb(Verb::Source)
                 .input(after_spec(

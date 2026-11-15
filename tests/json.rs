@@ -516,3 +516,43 @@ fn every_json_face_is_declared() {
     has("layer-tasks-bobby-tuples:Delete", JSON_LD);
     has("layer-tasks-bobby-receipt:Source", JSON_LD);
 }
+
+#[test]
+fn layer_definitions_expose_the_content_byte_limit_in_both_faces() {
+    let f = fixture();
+    for (layer, expected) in [
+        ("talk", 16384),
+        ("talk-bobby", 2048),
+        ("tasks-bobby", 16384),
+    ] {
+        let iri = format!("urn:layer:{layer}");
+        let capability = cap(
+            &participant("bobby"),
+            &[&format!("urn:cap:layer:read:{layer}")],
+        );
+        let doc = json(
+            &f.kernel,
+            Verb::Source,
+            &iri,
+            &[("as", JSON)],
+            &capability,
+            JSON,
+        );
+        assert_eq!(doc["entry_max"], expected, "{layer}: {doc}");
+        let answer = issue(&f.kernel, Verb::Source, &iri, &[], &capability).unwrap();
+        let triples = ikigai_layers::rdf::parse_turtle(&text(&answer)).unwrap();
+        let limits: Vec<_> = triples
+            .iter()
+            .filter(|t| t.predicate.as_str() == format!("{IK}entryMax"))
+            .collect();
+        assert_eq!(limits.len(), 1, "{layer}: {triples:?}");
+        assert_eq!(limits[0].subject.to_string(), format!("<{iri}>"));
+        assert_eq!(
+            limits[0].object,
+            oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+                expected.to_string(),
+                oxrdf::NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+            ))
+        );
+    }
+}

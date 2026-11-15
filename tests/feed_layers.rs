@@ -449,7 +449,7 @@ fn the_definition_json_is_exactly_its_shape() {
         got,
         serde_json::json!({
             "layer": "releases", "label": "Releases", "model": "channel",
-            "types": ["Layer", "Feed"], "feed": true, "public": true,
+            "types": ["Layer", "Feed"], "feed": true, "public": true, "entry_max": 16384,
         })
     );
     let talk = cap(&participant("bobby"), &["urn:cap:layer:read:talk"]);
@@ -464,7 +464,7 @@ fn the_definition_json_is_exactly_its_shape() {
         got,
         serde_json::json!({
             "layer": "talk", "label": "Talk", "model": "channel",
-            "types": ["Layer"], "feed": false, "public": false,
+            "types": ["Layer"], "feed": false, "public": false, "entry_max": 16384,
         })
     );
 }

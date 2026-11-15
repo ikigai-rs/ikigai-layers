@@ -155,6 +155,25 @@ an entry must be typed with a targeted class and only those (SHACL answers "conf
 what nothing targets, so the host refuses that first). The context may not use `@vocab`,
 `@base`, `@import` or a remote context: it is an allowlist.
 
+A layer's description (`Source urn:layer:{layer}`) exposes its `entry_max` as
+[`ik:entryMax`](vocabulary.ttl), an `xsd:integer` number of bytes, and as the JSON number
+`entry_max`.
+This bounds the submitted Turtle or JSON-LD content before parsing, including whitespace
+and encoding overhead. It is separate from SHACL `sh:maxLength`, which bounds a literal's
+character count.
+
+`urn:layer:{layer}:shapes` serves the parsed shapes re-serialized as Turtle, with blank
+nodes (including property shapes and RDF list cells) named
+`<urn:layer:{layer}:shapes:nN>`. These are the same shapes admission validates against.
+The answer preserves the graph's meaning, rather than the file's formatting: prefixes and
+statement order may change, and a subject's statements may appear in separate blocks.
+Clients must parse the complete RDF graph instead of matching lines or assuming one block
+per subject. Treat the generated node names as local to that served shapes graph.
+
+Admission checks the layer's shapes; it does not check that a `File` entry's digest matches
+its content. Readers must decode the content as its format requires, compute the declared
+digest over the file bytes and compare it with the entry's digest before relying on it.
+
 The participants:
 
 ```turtle
@@ -215,6 +234,11 @@ to its grant with `principal` = the participant's IRI; no `default`, so a certif
 nobody enrolled is refused). ikigai-cli's door re-reads both on every connection, so an
 edit takes effect without a restart. A configuration that breaks the isolation rule writes
 nothing.
+
+The Rust enrollment generator and the Python client both use the command name
+`ikigai-layers`. If both are installed, use an explicit path to the intended executable
+(or separate environments); the `grants`, `onboard setup` and `descriptor` commands here
+belong to the Rust binary.
 
 ## Onboarding a node by itself
 
@@ -535,6 +559,11 @@ And a follower that was waiting on `source urn:layer:talk:feed after=0 wait=50` 
 1 2026-10-10T00:00:01.000Z say urn:layer:talk:entry:01m4hhr0z80000000000001 urn:collab:participant:brian
 ```
 
+A feed event's `kind` names the operation (`say`, `out`, `taken` or `sweep`), not the
+entry's `rdf:type`. Both the plain and JSON faces omit entry types. A client showing a
+new entry's types must read that entry's IRI, costing one entry read per uncached event.
+A `sweep` event describes a retention batch and names the layer, rather than an entry.
+
 ## Offering and taking work
 
 A tuple is one subject that its dropper names, under the layer's own IRI and never used
@@ -653,7 +682,7 @@ front, MCP and the action manifold all offer the same ones.
 | `receipt:{id}` | `application/ld+json` | the receipt, a graph |
 | `tuples` Source listing | `application/json` | `{"layer", "tuples": [{"seq", "created", "subject", "dropper"}]}`, the text face's lines as objects; with `state=taken`, `{"layer", "receipts": [{"seq", "time", "subject", "taker", "receipt"}]}` |
 | `say`, `tuples` Sink (out) | `application/json` | `{"@id": "<the IRI the write named>"}` |
-| `urn:layer:{layer}` | `application/json` | `{"layer", "label", "model", "types": [...], "feed": bool, "public": bool}`, with `types` as compact terms (`"Layer"`, `"Feed"`); a feed's names no collaboration |
+| `urn:layer:{layer}` | `application/json` | `{"layer", "label", "model", "entry_max": bytes, "types": [...], "feed": bool, "public": bool}`, with `types` as compact terms (`"Layer"`, `"Feed"`); a feed's names no collaboration |
 | `urn:layer:{layer}:scheme` (a feed) | `application/json` | `{"scheme": "<IRI>", "label", "concepts": [{"@id", "prefLabel", "notation", "broader": ["<IRI>"]}]}`, concepts by notation |
 | `urn:layer:{layer}:graph` (a feed) | `application/ld+json` | the graph under the host's feed context (`src/feeds/graph.context.jsonld`), not the layer's egress context |
 | `feed`, `urn:layers:feed`, `urn:layers:me`, `urn:collab:{name}` | `application/json` | as before |
