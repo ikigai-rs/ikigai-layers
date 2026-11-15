@@ -1899,8 +1899,13 @@ fn violations(layer: &str, report: &serde_json::Value) -> String {
         lines.push(format!("and {} more", all.len() - SHOWN));
     }
     format!(
-        "does not conform to layer `{layer}`'s shapes ({} violation(s)): {}",
+        "does not conform to layer `{layer}`'s shapes ({} {}): {}",
         all.len(),
+        if all.len() == 1 {
+            "violation"
+        } else {
+            "violations"
+        },
         lines.join("; ")
     )
 }
@@ -2979,5 +2984,34 @@ impl Endpoint for CollabEndpoint {
             .input(as_spec(&[TURTLE, JSON]))
             .output(TURTLE)
             .output(JSON)
+    }
+}
+
+#[cfg(test)]
+mod message_tests {
+    use super::violations;
+
+    #[test]
+    fn admission_refusal_uses_natural_plurals() {
+        for (count, noun) in [
+            (0, "violations"),
+            (1, "violation"),
+            (2, "violations"),
+            (21, "violations"),
+        ] {
+            let report = serde_json::json!({"violations": vec![serde_json::json!({"path": "urn:body", "component": "urn:sh#MinCountConstraintComponent", "message": "a body is required"}); count]});
+            let details =
+                vec!["urn:body: MinCountConstraintComponent a body is required"; count.min(20)]
+                    .join("; ");
+            let details = if count > 20 {
+                format!("{details}; and 1 more")
+            } else {
+                details
+            };
+            assert_eq!(
+                violations("talk", &report),
+                format!("does not conform to layer `talk`'s shapes ({count} {noun}): {details}")
+            );
+        }
     }
 }
