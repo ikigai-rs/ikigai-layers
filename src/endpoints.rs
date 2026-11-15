@@ -21,6 +21,7 @@
 //! urn:layers:participants          Source  layers-participants       urn:cap:layers:read:participants
 //! urn:layers:join:count            Source  layers-join-count         urn:cap:layers:read:join-count  (a host with a join)
 //! urn:layers:me                    Source  layers-me                 urn:cap:collab:read:*  (any participant grant)
+//! urn:layers:participant:name:{name} Exists layers-participant-name urn:cap:layer:say:{grants}  (a host with [onboard])
 //! urn:collab:{name}                Source  collab                    urn:cap:collab:read:* (+ exact per manifest)
 //! urn:collab:{name}:participants   Source  collab-participants       urn:cap:collab:read:* (+ exact per manifest)
 //! ```
@@ -99,6 +100,11 @@ pub const CAP_JOIN_COUNT: &str = "urn:cap:layers:read:join-count";
 /// `urn:layers:me`: who the door says the caller is.
 pub const ME: &str = "urn:layers:me";
 
+/// `urn:layers:participant:name:{name}`: whether a participant name is in use, for the
+/// onboarding controller (ledger #3316), answered `true` or `false` to an `Exists`. Bound only
+/// on a host with `[onboard]`, under the grants layer's `say`, the controller's.
+pub const PARTICIPANT_NAME: &str = "urn:layers:participant:name:{name}";
+
 /// The family `urn:layers:feed` declares (and then checks exactly, per layer).
 pub const CAP_FEED_FAMILY: &str = "urn:cap:layer:feed:*";
 
@@ -134,13 +140,21 @@ pub fn space(host: &Arc<Host>) -> EndpointSpace {
         }
     }
     if let Some(config) = host.onboard_config() {
-        space = space.bind(
-            Exact::new(onboard::STATUS),
-            StatusEndpoint {
-                host: Arc::clone(host),
-                cap: layer_cap("say", &config.grants),
-            },
-        );
+        space = space
+            .bind(
+                Exact::new(onboard::STATUS),
+                StatusEndpoint {
+                    host: Arc::clone(host),
+                    cap: layer_cap("say", &config.grants),
+                },
+            )
+            .bind(
+                template(PARTICIPANT_NAME.into()),
+                ParticipantName {
+                    host: Arc::clone(host),
+                    cap: layer_cap("say", &config.grants),
+                },
+            );
     }
     if host.join().is_some() {
         space = space.bind(
@@ -2569,6 +2583,144 @@ impl Endpoint for StatusEndpoint {
             )
             .verb(Verb::Source)
             .requires(self.cap.clone())
+            .input(as_spec(&[TEXT, JSON]))
+            .output(TEXT)
+            .output(JSON)
+    }
+}
+
+/// `urn:layers:participant:name:{name}`: whether `urn:collab:participant:{name}` is in use,
+/// answered `true` or `false` to an `Exists` and nothing else (ledger #3316).
+///
+/// **In use** is exactly what the host's apply would refuse an entitlement naming it for, from
+/// a certificate that holds nothing yet: the name is `onboard.controller`, a manifest grants it
+/// anything, `enrollment.toml` enrolls a certificate for it, or a current entitlement holds it
+/// (in force or expired; a revocation frees it). A name `participants.ttl` lists and nothing
+/// grants is free: the host never removes an entitled participant from that file, and a
+/// revoked name may be entitled again.
+///
+/// **Why it exists.** The controller checks a node name when it invites, but the roster
+/// (`urn:layers:participants`) is the operator's, and the controller reads only its own
+/// collaborations' participants, so a name only another collaboration grants was caught at
+/// apply time alone. This answers the one question and lists nothing: one bit per name asked,
+/// no collaboration named, so the roster stays private.
+///
+/// **The capability** is the grants layer's `say`, [`StatusEndpoint`]'s: the host holds it to
+/// `onboard.controller` alone (a manifest granting it to anyone else does not open, and no
+/// entitlement grants it), so no grant needs a new token and no other participant is offered
+/// the question. A request naming a principal must also name the controller; root, naming
+/// nobody, is the operator and is answered.
+struct ParticipantName {
+    host: Arc<Host>,
+    cap: String,
+}
+
+impl ParticipantName {
+    fn in_use(&self, participant: &Participant) -> Result<bool> {
+        let iri = participant.iri();
+        let controller = &self
+            .host
+            .onboard_config()
+            .expect("bound with [onboard]")
+            .controller;
+        if iri == controller {
+            return Ok(true);
+        }
+        // Read from the files on every request (enrollment is live), so never cached.
+        let participants = self.host.participants().map_err(host_error)?;
+        let granted = self
+            .host
+            .collabs_with(&participants)
+            .map_err(host_error)?
+            .values()
+            .flat_map(|m| &m.mounts)
+            .any(|mount| mount.grants.contains_key(participant));
+        if granted {
+            return Ok(true);
+        }
+        let enrolled = crate::grants::load_enrolled(self.host.config_dir(), &participants)
+            .map_err(host_error)?;
+        if enrolled.get(iri).is_some_and(|fps| !fps.is_empty()) {
+            return Ok(true);
+        }
+        let status = self.host.onboard_status().expect("bound with [onboard]");
+        Ok(status.held.contains(iri))
+    }
+}
+
+#[async_trait]
+impl Endpoint for ParticipantName {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Exists {
+            return Err(Error::Endpoint(format!(
+                "urn:layers:participant:name:{{name}} answers whether a name is in use, true or \
+                 false, to an Exists request only, and this request is {:?}: ask with Exists",
+                inv.request.verb
+            )));
+        }
+        // The token is the controller's by configuration, and manifests are read live, so the
+        // principal is checked too: a token another principal came to hold asks nothing.
+        let controller = &self
+            .host
+            .onboard_config()
+            .expect("bound with [onboard]")
+            .controller;
+        if let Some(principal) = inv.capability.principal() {
+            if principal != controller {
+                return Err(Error::Denied(format!(
+                    "only onboard.controller ({controller}) asks whether a participant name is \
+                     in use, and this request is {principal}'s"
+                )));
+            }
+        }
+        let name = inv.bindings.get("name").unwrap_or_default();
+        if !crate::name::is_short_name(name) {
+            return Err(Error::InvalidArgument {
+                name: "name".into(),
+                detail: format!(
+                    "`{name}` is not a participant short name: lowercase letters, digits and \
+                     hyphens, at most {} characters, not starting or ending with a hyphen",
+                    crate::name::MAX_SHORT_NAME
+                ),
+            });
+        }
+        let participant = Participant::parse(&format!("{}{name}", crate::name::PARTICIPANT_PREFIX))
+            .map_err(|e| Error::InvalidArgument {
+                name: "name".into(),
+                detail: e.to_string(),
+            })?;
+        let as_json = face(inv, &[TEXT, JSON])? == JSON;
+        let in_use = self.in_use(&participant)?;
+        Ok(if as_json {
+            json_repr(serde_json::json!({ "name": name, "inUse": in_use }))
+        } else {
+            Representation::new(ReprType::new(TEXT), format!("{in_use}\n").into_bytes())
+        })
+    }
+
+    fn name(&self) -> &str {
+        "layers-participant-name"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("layers-participant-name")
+            .title("Participant name in use")
+            .summary(
+                "Whether a participant name is in use, for the onboarding controller: true \
+                 when this host would refuse an entitlement naming it for a new certificate \
+                 (it is the controller, a manifest grants it, enrollment.toml enrolls it, or a \
+                 current entitlement holds it), false otherwise. Answers one name at a time and \
+                 lists nothing",
+            )
+            .verb(Verb::Exists)
+            .verb(Verb::Meta)
+            .requires(self.cap.clone())
+            .input(
+                ArgSpec::new("name")
+                    .summary("the participant's short name, as an entitlement names it")
+                    .class(xsd("string"))
+                    .binding(),
+            )
             .input(as_spec(&[TEXT, JSON]))
             .output(TEXT)
             .output(JSON)
