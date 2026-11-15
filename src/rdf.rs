@@ -6,6 +6,9 @@ use oxttl::{TurtleParser, TurtleSerializer};
 /// Layer-specific vocabulary terms used in resource descriptions, as Turtle.
 pub const VOCABULARY: &str = include_str!("../vocabulary.ttl");
 
+/// This crate's vocabulary namespace (`layers:`).
+pub const LAYERS: &str = "https://ikigai-rs.dev/ns/layers#";
+
 /// The ikigai vocabulary namespace (`ik:`), published at <https://ikigai-rs.dev/ns>.
 pub const IK: &str = "https://ikigai-rs.dev/ns#";
 /// `rdf:type`.
@@ -104,9 +107,9 @@ pub fn ik_layer_model() -> String {
     format!("{IK}layerModel")
 }
 
-/// `ik:entryMax`: the maximum submitted content size in bytes.
-pub fn ik_entry_max() -> String {
-    format!("{IK}entryMax")
+/// `layers:entryMax`: the maximum submitted content size in bytes.
+pub fn layers_entry_max() -> String {
+    format!("{LAYERS}entryMax")
 }
 
 /// `ik:Machine`: a participant that is a running host acting under its own identity.

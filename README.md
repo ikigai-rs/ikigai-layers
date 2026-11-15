@@ -156,9 +156,9 @@ what nothing targets, so the host refuses that first). The context may not use `
 `@base`, `@import` or a remote context: it is an allowlist.
 
 A layer's description (`Source urn:layer:{layer}`) exposes its `entry_max` as
-[`ik:entryMax`](vocabulary.ttl), an `xsd:integer` number of bytes, and as the JSON number
-`entry_max`.
-This bounds the submitted Turtle or JSON-LD content before parsing, including whitespace
+[`layers:entryMax`](vocabulary.ttl), an `xsd:integer` number of bytes, and as the JSON number
+`entry_max`. The `layers:` namespace is `https://ikigai-rs.dev/ns/layers#`, defined by
+this crate in `vocabulary.ttl`. This bounds the submitted Turtle or JSON-LD content before parsing, including whitespace
 and encoding overhead. It is separate from SHACL `sh:maxLength`, which bounds a literal's
 character count.
 

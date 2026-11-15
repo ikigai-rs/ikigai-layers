@@ -543,7 +543,7 @@ fn layer_definitions_expose_the_content_byte_limit_in_both_faces() {
         let triples = ikigai_layers::rdf::parse_turtle(&text(&answer)).unwrap();
         let limits: Vec<_> = triples
             .iter()
-            .filter(|t| t.predicate.as_str() == format!("{IK}entryMax"))
+            .filter(|t| t.predicate.as_str() == format!("{}entryMax", ikigai_layers::rdf::LAYERS))
             .collect();
         assert_eq!(limits.len(), 1, "{layer}: {triples:?}");
         assert_eq!(limits[0].subject.to_string(), format!("<{iri}>"));

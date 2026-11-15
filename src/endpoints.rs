@@ -583,7 +583,7 @@ impl LayerEndpoint {
         ];
         triples.push(Triple::new(
             s.clone(),
-            node(&rdf::ik_entry_max()),
+            node(&rdf::layers_entry_max()),
             Literal::new_typed_literal(def.entry_max.to_string(), node(rdf::XSD_INTEGER)),
         ));
         if def.is_feed() {
@@ -2088,8 +2088,7 @@ impl Endpoint for LayerEndpoint {
                 .title(format!("Layer {layer}"))
                 .summary(format!(
                     "Layer `{layer}`'s definition: an ik:Layer (and ik:Feed, for a feed) with \
-                     its access model, content byte limit (ik:entryMax) and the IRIs of its shapes, \
-                     context and feed; a feed's never lists a collaboration. As JSON: layer, \
+                     its access model, content byte limit and the IRIs of its shapes, context and feed; a feed's never lists a collaboration. As JSON: layer, \
                      label, model, entry_max (bytes), types, feed, public"
                 ))
                 .verb(Verb::Source)
