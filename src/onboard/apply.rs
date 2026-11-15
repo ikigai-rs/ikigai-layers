@@ -139,6 +139,11 @@ pub struct Status {
     /// The last apply's failure to write its files, if it failed: what is effective above is
     /// then NOT what the door reads.
     pub error: Option<String>,
+    /// Every participant a current entitlement holds, in force or expired (a revocation frees
+    /// it): what [`crate::endpoints::PARTICIPANT_NAME`] answers from. Not in the status's
+    /// faces, which list entries, not names.
+    #[serde(skip)]
+    pub(crate) held: BTreeSet<String>,
 }
 
 impl Status {
@@ -620,6 +625,7 @@ fn fold(
         effective: effective.into_values().collect(),
         restart_pending: false,
         error: None,
+        held: held.into_values().collect(),
     }
 }
 

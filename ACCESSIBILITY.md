@@ -55,6 +55,14 @@ presentation has not been evaluated here.
   joined, and an identity that has lapsed (which says it may join again). No answer, refusal or
   diagnostic names a source address, and a door whose system cannot supply randomness gets the
   error ``the hourly key for source addresses cannot be drawn: …`` from `door_capability`.
+- **Whether a name is in use** (`src/endpoints.rs`, `urn:layers:participant-name:{name}`):
+  `true` or `false` on one line as `text/plain`, and `{"name", "inUse"}` as JSON. A verb other
+  than `Exists` is refused with a sentence that says what the resource answers, names the verb
+  asked and ends ``ask with Exists``; a malformed name is refused naming it and spelling out a
+  short name's rule (lowercase letters, digits and hyphens, at most 48 characters, not starting
+  or ending with a hyphen). A principal other than the controller is refused with ``only
+  onboard.controller (<participant>) asks whether a participant name is in use, and this request
+  is <principal>'s``.
 - **The state key's refusals** (`src/at_rest.rs`): ``the state identity <path>: …`` says what
   is wrong (does not exist, cannot be read, a bad line by its number, or, on unix, an owner or
   mode another account could use) and, for an owner or a mode, the `chmod` or `chown` to run,
@@ -191,3 +199,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-12 | Record checks as Pass, Fail or Blocked, with current main evidence and explicit evaluation gaps. |
 | 2026-11-13 | `grants`' `count-reader` line and its refusals of a `join.count_readers` entry. |
 | 2026-11-15 | Fix natural plurals, name invalid grants arguments, and use sentence case for the restart notice; add wording regression tests. |
+| 2026-11-15 | Whether a name is in use: a one-word answer, a JSON face, and its three refusals. |

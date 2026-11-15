@@ -117,7 +117,10 @@ struct Edge {
 }
 
 fn edge(trust_reload: &str) -> Edge {
-    let config = onboard_config(trust_reload);
+    edge_over(onboard_config(trust_reload))
+}
+
+fn edge_over(config: Scratch) -> Edge {
     let state = Scratch::new("onboard-state");
     let host = Host::open(config.path(), state.path(), &key(config.path())).expect("the host");
     let kernel = kernel_over(&host);
@@ -1466,4 +1469,293 @@ fn onboarding_names_its_layer_key_and_trust_directory() {
             .to_string();
         assert!(e.contains(why), "{table}: {e}");
     }
+}
+
+// ---- whether a name is in use (ledger #3316) ----------------------------------------------
+
+const NAME: &str = "urn:layers:participant-name:";
+
+/// The edge, and a collaboration `solo` the controller is not in: its own layer, granted to
+/// `dana` alone. `erin` is in participants.ttl and granted nothing.
+fn edge_with_solo() -> Edge {
+    let config = onboard_config("live");
+    config.write(
+        "participants.ttl",
+        &format!(
+            "{}<urn:collab:participant:dana> a <http://xmlns.com/foaf/0.1/Person> .\n\
+             <urn:collab:participant:erin> a <http://xmlns.com/foaf/0.1/Person> .\n",
+            participants_ttl()
+        ),
+    );
+    config.write(
+        "layers/solo.toml",
+        "model = \"channel\"\nshapes = \"msg.shapes.ttl\"\ncontext = \"msg.context.jsonld\"\n",
+    );
+    config.write(
+        "collabs/solo.toml",
+        "[[mount]]\nlayer = \"solo\"\ndana = [\"read\", \"feed\", \"say\"]\n",
+    );
+    edge_over(config)
+}
+
+/// The grant the generator derives for `slug`, minted as the door would mint it.
+fn generated(edge: &Edge, slug: &str) -> Capability {
+    let config = Config::load(edge.config.path()).unwrap();
+    let fingerprints =
+        ikigai_layers::grants::load_fingerprints(edge.config.path(), &config).unwrap();
+    let enrollment = ikigai_layers::grants::generate(&config, &fingerprints).unwrap();
+    let scopes = &enrollment.grants[slug];
+    cap(
+        &participant(slug),
+        &scopes.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+}
+
+/// Ask whether `name` is in use, with `Exists`.
+fn in_use(edge: &Edge, name: &str, capability: &Capability) -> Result<String, Error> {
+    issue(
+        &edge.kernel,
+        Verb::Exists,
+        &format!("{NAME}{name}"),
+        &[],
+        capability,
+    )
+    .map(|r| text(&r))
+}
+
+#[test]
+fn the_controller_can_ask_whether_a_name_it_cannot_see_is_in_use() {
+    let edge = edge_with_solo();
+    let controller = generated(&edge, "brian");
+
+    // What the controller sees today: the roster is refused, `urn:layers:me` lists only its
+    // own collaborations, and `solo`'s participants are refused. So `dana` is invisible to it.
+    let roster = issue(
+        &edge.kernel,
+        Verb::Source,
+        "urn:layers:participants",
+        &[],
+        &controller,
+    )
+    .unwrap_err();
+    assert!(matches!(roster, Error::Denied(_)), "{roster}");
+    let me: serde_json::Value = serde_json::from_str(&source(
+        &edge.kernel,
+        "urn:layers:me",
+        &[("as", "application/json")],
+        &controller,
+    ))
+    .unwrap();
+    let collabs: Vec<&str> = me["collaborations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert!(!collabs.contains(&"urn:collab:solo"), "{me}");
+    let mut seen = String::new();
+    for collab in &collabs {
+        seen.push_str(&source(
+            &edge.kernel,
+            &format!("{collab}:participants"),
+            &[],
+            &controller,
+        ));
+    }
+    assert!(!seen.contains("participant:dana"), "{seen}");
+    let solo = issue(
+        &edge.kernel,
+        Verb::Source,
+        "urn:collab:solo:participants",
+        &[],
+        &controller,
+    )
+    .unwrap_err();
+    assert!(matches!(solo, Error::Denied(_)), "{solo}");
+
+    // The host asks the question it would refuse an entitlement on at apply time.
+    assert_eq!(in_use(&edge, "dana", &controller).unwrap(), "true\n");
+    assert_eq!(in_use(&edge, "dana-2", &controller).unwrap(), "false\n");
+    let json: serde_json::Value = serde_json::from_str(&text(
+        &issue(
+            &edge.kernel,
+            Verb::Exists,
+            &format!("{NAME}dana"),
+            &[("as", "application/json")],
+            &controller,
+        )
+        .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(json, serde_json::json!({"name": "dana", "inUse": true}));
+
+    // And it does refuse one: `dana` is granted by a manifest.
+    let pem = certificate("dana");
+    let fp = fingerprint_of_pem(&pem).unwrap();
+    let req = request(&edge, &pem).unwrap();
+    entitle(
+        &edge,
+        &signed(
+            &entitlement_body(&Grant {
+                fingerprint: &fp,
+                name: "dana",
+                request: Some(&req),
+                grants: TASKS,
+                supersedes: None,
+                expires: None,
+            }),
+            CONTROLLER_SEED,
+        ),
+    );
+    let s = status(&edge);
+    assert_eq!(s["records"][0]["verdict"], "refused", "{s}");
+    assert!(
+        s["records"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("is granted by manifest `solo`"),
+        "{s}"
+    );
+}
+
+#[test]
+fn a_name_is_in_use_exactly_when_the_host_would_refuse_it_to_a_new_certificate() {
+    let edge = edge_with_solo();
+    let controller = generated(&edge, "brian");
+
+    // The controller itself, and a participant enrolled by hand and granted by manifests.
+    assert_eq!(in_use(&edge, "brian", &controller).unwrap(), "true\n");
+    assert_eq!(in_use(&edge, "bobby", &controller).unwrap(), "true\n");
+    // Listed in participants.ttl and granted nothing: an entitlement may name it.
+    assert_eq!(in_use(&edge, "erin", &controller).unwrap(), "false\n");
+
+    // Held by an entitlement, then freed by its revocation.
+    assert_eq!(in_use(&edge, "mini", &controller).unwrap(), "false\n");
+    let pem = certificate("mini");
+    let fp = fingerprint_of_pem(&pem).unwrap();
+    let req = request(&edge, &pem).unwrap();
+    let grant = Grant {
+        fingerprint: &fp,
+        name: "mini",
+        request: Some(&req),
+        grants: TASKS,
+        supersedes: None,
+        expires: None,
+    };
+    let e1 = entitle(&edge, &signed(&entitlement_body(&grant), CONTROLLER_SEED));
+    assert_eq!(in_use(&edge, "mini", &controller).unwrap(), "true\n");
+    entitle(
+        &edge,
+        &signed(
+            &entitlement_body(&Grant {
+                grants: &[],
+                request: None,
+                supersedes: Some(&e1),
+                ..grant
+            }),
+            CONTROLLER_SEED,
+        ),
+    );
+    // participants.ttl still lists `mini`, and the name is free again.
+    assert!(edge
+        .read("participants.ttl")
+        .unwrap()
+        .contains("participant:mini"));
+    assert_eq!(in_use(&edge, "mini", &controller).unwrap(), "false\n");
+
+    // An expired entitlement still holds its name, as the host's apply holds it.
+    let pem = certificate("old");
+    let fp = fingerprint_of_pem(&pem).unwrap();
+    let req = request(&edge, &pem).unwrap();
+    entitle(
+        &edge,
+        &signed(
+            &entitlement_body(&Grant {
+                fingerprint: &fp,
+                name: "old",
+                request: Some(&req),
+                grants: TASKS,
+                supersedes: None,
+                expires: Some("2000-01-01T00:00:00Z"),
+            }),
+            CONTROLLER_SEED,
+        ),
+    );
+    assert_eq!(status(&edge)["records"][2]["verdict"], "expired");
+    assert_eq!(in_use(&edge, "old", &controller).unwrap(), "true\n");
+}
+
+#[test]
+fn only_the_controller_asks_and_only_with_exists() {
+    let edge = edge_with_solo();
+    let controller = generated(&edge, "brian");
+
+    // Another participant's generated grant: the question is refused, so no name is learned.
+    for slug in ["bobby", "dana"] {
+        let refused = in_use(&edge, "dana", &generated(&edge, slug)).unwrap_err();
+        assert!(matches!(refused, Error::Denied(_)), "{slug}: {refused}");
+    }
+
+    // The controller's token in another principal's hands asks nothing either.
+    let borrowed = cap(&participant("bobby"), &["urn:cap:layer:say:grants"]);
+    let refused = in_use(&edge, "dana", &borrowed).unwrap_err();
+    assert!(matches!(refused, Error::Denied(_)), "{refused}");
+    assert!(
+        refused.to_string().contains("onboard.controller"),
+        "{refused}"
+    );
+    // Root, the operator, names nobody and is answered.
+    assert_eq!(
+        in_use(&edge, "dana", &Capability::root()).unwrap(),
+        "true\n"
+    );
+
+    // Exists only: a Source is refused, so the answer is never a listing.
+    let refused = issue(
+        &edge.kernel,
+        Verb::Source,
+        &format!("{NAME}dana"),
+        &[],
+        &controller,
+    )
+    .unwrap_err();
+    assert!(!matches!(refused, Error::Denied(_)), "{refused}");
+    assert!(refused.to_string().contains("Exists"), "{refused}");
+
+    // A name no entitlement could carry is refused, not answered `false`.
+    for bad in ["Dana", "dana:x", "-dana", "urn:collab:participant:dana"] {
+        let refused = in_use(&edge, bad, &controller).unwrap_err();
+        assert!(
+            matches!(refused, Error::InvalidArgument { .. }),
+            "{bad}: {refused}"
+        );
+    }
+
+    // Offered to the controller alone.
+    let offered = manifold(&edge.kernel, &controller);
+    assert!(
+        offered.contains("layers-participant-name__exists"),
+        "{offered:?}"
+    );
+    assert!(!manifold(&edge.kernel, &generated(&edge, "bobby"))
+        .iter()
+        .any(|a| a.starts_with("layers-participant-name")));
+}
+
+#[test]
+fn a_host_with_no_onboard_table_binds_no_name_question() {
+    let config = Scratch::new("no-onboard");
+    write_config(&config);
+    let state = Scratch::new("no-onboard-state");
+    let host = Host::open(config.path(), state.path(), &key(config.path())).expect("the host");
+    let kernel = kernel_over(&host);
+    let asked = issue(
+        &kernel,
+        Verb::Exists,
+        &format!("{NAME}dana"),
+        &[],
+        &Capability::root(),
+    )
+    .unwrap_err();
+    assert!(matches!(asked, Error::Unresolved(_)), "{asked}");
 }
