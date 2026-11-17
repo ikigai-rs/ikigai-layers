@@ -114,9 +114,10 @@ context   = "tasks.context.jsonld"
 addressed = true                 # a tuple with ik:addressedTo is taken only by an addressee
 match     = false                # optional; the default: `rd match=` is refused
 # retain  = "30d"                # optional: expire taken receipts after 30 days
+# lease_max = "1h"               # optional: allow `take lease=` up to an hour
 ```
 
-`addressed`, `match` and `retain` are a tuplespace's options and `about` a channel's; naming one on
+`addressed`, `match`, `retain` and `lease_max` are a tuplespace's options and `about` a channel's; naming one on
 the other model is refused, like a misspelled key.
 
 **`match` is off by default.** A `match=` template is the caller's own SPARQL ASK,
@@ -613,11 +614,50 @@ synced before deletion, committing the batch; if deletion fails or the host stop
 restart finishes that batch without adding another event. Deletion does not remove copies
 held by clients or backups.
 
+### Leases: a take whose taker may die
+
+A take is final by default: a taker that dies after taking strands the tuple. A tuplespace
+used as a work queue sets `lease_max` (a positive whole number of seconds, minutes, hours or
+days: `90s`, `15m`, `2h`, `1d`), and a taker then asks for a lease, at most that long:
+
+```text
+$ ikigai -c 'delete urn:layer:tasks-bobby:tuples urn:layer:tasks-bobby:offer:01m4hhr0z8 lease=10m'
+```
+
+The take is the same, and its receipt also records `layers:attempt` (1 for a tuple's first
+take) and `layers:leaseUntil`. Before the lease lapses its taker, and only its taker, settles
+the receipt with a Sink on it:
+
+```text
+$ ikigai -c 'sink urn:layer:tasks-bobby:receipt:<id> settle=done result=urn:blake3:<hash>'
+$ ikigai -c 'sink urn:layer:tasks-bobby:receipt:<id> settle=renew lease=10m'
+```
+
+`settle=done` makes the take final, with an optional `result=` IRI; the same `done` again is
+answered as the one settle, and another result is a Conflict. `settle=renew lease=` extends
+the lease from now, within `lease_max`. Reading the receipt then says `layers:leaseState`
+(`held`, `done` or `lapsed`), the current `layers:leaseUntil` and any `layers:leaseResult`;
+`rd state=taken` appends `attempt=N lease=<state> until=<time>` (and `result=<iri>`) to a
+leased receipt's line, and `attempt` and `lease` to its JSON.
+
+A lease that lapses unsettled returns the tuple to the space: the same tuple, under the same
+subject and `ik:seq`, pending again for anyone to take, and the feed logs a `returned` event
+with its subject, `by = urn:layers:lease`. The next take's receipt counts the attempt. After
+the lapse, `done`, `renew` and a report on the offer from the late taker are each refused as
+a Conflict, so a tuple keeps one result. The lapsed receipt stays (retention keeps it while
+its tuple is pending again). The host returns lapsed tuples before every request on the
+layer; for an idle host, the deployment schedules `Host::sweep_leases(now)` with its clock.
+A lapse is stored before its tuple goes back, so a host that stops between the two drops the
+tuple back when it next opens.
+
+An entry is at most `entry_max` bytes (16 KiB by default), so a large input or result travels
+as a content-addressed resource the tuple, or the `result=`, names.
+
 Reports (`ik:Progress`, `ik:Release`, `ik:Handback` with `ik:evidence`) name the offer
 with `ik:offer` and are addressed to its offerer with `ik:addressedTo`. The host admits a
 report only from the participant whose take of that offer it holds a receipt for, in an
 addressed layer only when it is addressed to that offer's offerer alone, and there only an
-addressee can take it. The feed records `out` and `taken`
+addressee can take it. The feed records `out`, `taken` and `returned`
 events, with the tuple's subject and who did it.
 
 ## Feeds
@@ -1021,7 +1061,8 @@ A tuplespace layer fronts an [ikigai-intray](https://crates.io/crates/ikigai-int
 at `<state>/{layer}/tuples/`, which the host links and calls under its own
 `urn:cap:space:*`: participants never hold a space capability, and the space is never
 bound into the kernel. Intray's take is a rename, which is what makes it atomic. Receipts
-are `<state>/{layer}/receipts/{id}.ttl`. Keep the state directory out of any intray root a
+are `<state>/{layer}/receipts/{id}.ttl`, and a leased take's standing since (renewed, done or
+lapsed) is `<state>/{layer}/leases/{id}.json`, sealed like the rest. Keep the state directory out of any intray root a
 reactor watches. The space holds each tuple sealed: intray seals it as it stores it and opens
 it wherever it reads it, through a codec the host gives it, so a `match=` template is
 evaluated by intray itself, within its bounds and the host's one time budget. A pending tuple

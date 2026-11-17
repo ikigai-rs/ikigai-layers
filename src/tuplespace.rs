@@ -22,7 +22,13 @@
 //! - **reports on offers**: a tuple naming `ik:offer <X>` is admitted only from the
 //!   participant whose take of `X` this layer has a receipt for, so nobody hands back work
 //!   they never took; in an addressed layer it must be addressed to `X`'s offerer alone, so
-//!   it reaches the offerer and nobody else, exactly once.
+//!   it reaches the offerer and nobody else, exactly once;
+//! - **leases** (ledger #2119): in a layer defined with `lease_max`, a `take lease=` is a
+//!   claim with a deadline rather than a final take. Its taker settles it (`done`, naming an
+//!   optional result) or renews it before it lapses; a lapsed lease returns the tuple to the
+//!   space (the same tuple, under the same subject and `ik:seq`, with a `returned` feed event),
+//!   and the next take's receipt counts the attempt (`layers:attempt`). A settle after the lapse
+//!   is refused, so a tuple has at most one result. A take with no `lease=` stays final.
 //!
 //! # Crash order
 //!
@@ -33,6 +39,13 @@
 //! that never completed (discarded). Events stored but not logged are logged then, in order,
 //! as the channel model does. A take whose commit fails is still a take: it is recorded, its
 //! number is spent, and its receipt is read from where it is staged until that open.
+//!
+//! A receipt never changes; a leased take's standing since (renewed, done or lapsed) is a
+//! lease file beside it, `<state>/{layer}/leases/{id}.json`, replaced whole. A lapse writes
+//! the lapse (and its feed number) there FIRST, then drops the tuple back into the space, then
+//! logs the `returned` event. An open that finds a lapse whose tuple is not back drops it
+//! again from the receipt, which holds the tuple as taken; one whose tuple is back and taken
+//! again keeps both receipts, the lapsed one and the new one.
 //!
 //! # Sealed at rest
 //!
@@ -108,6 +121,8 @@ pub struct TupleMeta {
     pub addressed_to: BTreeSet<String>,
     /// The offer it reports on (`ik:offer`), for a report.
     pub offer: Option<String>,
+    /// How many leased takes of it have lapsed: 0 for a tuple never returned to the space.
+    pub attempts: u64,
     /// A digest of what the dropper sent (the tuple without its stamps), so a replay of the
     /// same drop is recognized as one.
     digest: u64,
@@ -128,6 +143,121 @@ pub struct Receipt {
     pub time: String,
     /// The tuple it took.
     pub tuple: TupleMeta,
+    /// Which take of the tuple this is, from 1 ([`TupleMeta::attempts`] + 1).
+    pub attempt: u64,
+    /// The lease, for a `take lease=`; `None` for a final take.
+    pub lease: Option<Lease>,
+}
+
+impl Receipt {
+    /// Whether this take lapsed and its tuple went (or is going) back to the space.
+    pub fn lapsed(&self) -> bool {
+        matches!(
+            self.lease,
+            Some(Lease {
+                state: LeaseState::Lapsed { .. },
+                ..
+            })
+        )
+    }
+}
+
+/// A leased take: until when it holds, and how it stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lease {
+    /// When it lapses unless settled or renewed, as `xsd:dateTime`.
+    pub until: String,
+    /// How it stands.
+    pub state: LeaseState,
+}
+
+/// A lease's standing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LeaseState {
+    /// Its taker holds the tuple until [`Lease::until`].
+    Held,
+    /// Its taker settled it, naming `result` if it gave one: the take is final.
+    Done {
+        /// The result reference (an IRI) its taker named.
+        result: Option<String>,
+    },
+    /// It lapsed at `time`, and the tuple went back to the space with the `returned` event
+    /// numbered `seq`.
+    Lapsed {
+        /// The `returned` event's sequence number.
+        seq: u64,
+        /// When it lapsed, as `xsd:dateTime`.
+        time: String,
+    },
+}
+
+impl LeaseState {
+    /// Its word, as `layers:leaseState` carries it.
+    pub fn word(&self) -> &'static str {
+        match self {
+            LeaseState::Held => "held",
+            LeaseState::Done { .. } => "done",
+            LeaseState::Lapsed { .. } => "lapsed",
+        }
+    }
+}
+
+/// A lease as its file stores it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LeaseFile {
+    until: String,
+    state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    time: Option<String>,
+}
+
+impl LeaseFile {
+    fn of(lease: &Lease) -> LeaseFile {
+        let (result, seq, time) = match &lease.state {
+            LeaseState::Held => (None, None, None),
+            LeaseState::Done { result } => (result.clone(), None, None),
+            LeaseState::Lapsed { seq, time } => (None, Some(*seq), Some(time.clone())),
+        };
+        LeaseFile {
+            until: lease.until.clone(),
+            state: lease.state.word().into(),
+            result,
+            seq,
+            time,
+        }
+    }
+
+    fn lease(self) -> std::result::Result<Lease, String> {
+        let state = match (self.state.as_str(), self.seq, self.time) {
+            ("held", _, _) => LeaseState::Held,
+            ("done", _, _) => LeaseState::Done {
+                result: self.result,
+            },
+            ("lapsed", Some(seq), Some(time)) => LeaseState::Lapsed { seq, time },
+            (other, _, _) => return Err(format!("`{other}` is not a lease state it can hold")),
+        };
+        Ok(Lease {
+            until: self.until,
+            state,
+        })
+    }
+}
+
+/// Whether `until` is at or before `now`, both `xsd:dateTime`. One that does not parse (never
+/// written by this host) counts as passed, so a lease never holds a tuple forever.
+pub fn passed(until: &str, now: &str) -> bool {
+    use std::str::FromStr;
+    match (
+        oxsdatatypes::DateTime::from_str(until),
+        oxsdatatypes::DateTime::from_str(now),
+    ) {
+        (Ok(until), Ok(now)) => until <= now,
+        _ => true,
+    }
 }
 
 /// Where a subject is now.
@@ -170,6 +300,8 @@ pub struct Index {
     receipts: Vec<Receipt>,
     by_receipt_id: HashMap<String, usize>,
     subjects: HashMap<String, Place>,
+    /// The receipts whose lease is held, or lapsed with its tuple not yet back in the space.
+    live: BTreeSet<String>,
 }
 
 impl Index {
@@ -203,9 +335,16 @@ impl Index {
         self.by_receipt_id.get(id).map(|i| &self.receipts[*i])
     }
 
-    fn insert_pending(&mut self, meta: TupleMeta) -> std::result::Result<(), String> {
-        if self.subjects.contains_key(&meta.subject) {
-            return Err(format!("{} is stored twice", meta.subject));
+    fn insert_pending(&mut self, mut meta: TupleMeta) -> std::result::Result<(), String> {
+        match self.subjects.get(&meta.subject) {
+            None => {}
+            // Back in the space after a lapse: the lapsed receipt counts its attempt.
+            Some(Place::Taken(i)) if self.receipts[*i].lapsed() => {
+                let lapsed = &self.receipts[*i];
+                meta.attempts = lapsed.attempt;
+                self.live.remove(&lapsed.id);
+            }
+            Some(_) => return Err(format!("{} is stored twice", meta.subject)),
         }
         self.subjects
             .insert(meta.subject.clone(), Place::Pending(meta.seq));
@@ -215,8 +354,25 @@ impl Index {
     }
 
     fn insert_receipt(&mut self, receipt: Receipt) -> std::result::Result<(), String> {
-        if self.subjects.contains_key(&receipt.tuple.subject) {
-            return Err(format!("{} is stored twice", receipt.tuple.subject));
+        match self.subjects.get(&receipt.tuple.subject) {
+            None => {}
+            // Taken again after a lapse: both receipts stay, and the new one is current.
+            Some(Place::Taken(i))
+                if self.receipts[*i].lapsed() && self.receipts[*i].seq < receipt.seq =>
+            {
+                let lapsed = self.receipts[*i].id.clone();
+                self.live.remove(&lapsed);
+            }
+            Some(_) => return Err(format!("{} is stored twice", receipt.tuple.subject)),
+        }
+        if matches!(
+            receipt.lease,
+            Some(Lease {
+                state: LeaseState::Held | LeaseState::Lapsed { .. },
+                ..
+            })
+        ) {
+            self.live.insert(receipt.id.clone());
         }
         let i = self.receipts.len();
         self.subjects
@@ -246,6 +402,55 @@ impl Index {
             .expect("a subject just removed from the index");
     }
 
+    /// The receipts a lease sweep at `now` acts on, in take order: a held lease that has
+    /// lapsed, and a lapse whose tuple is not back in the space yet.
+    pub fn due(&self, now: &str) -> Vec<Receipt> {
+        let mut due: Vec<Receipt> = self
+            .live
+            .iter()
+            .filter_map(|id| self.receipt(id))
+            .filter(|r| match &r.lease {
+                Some(lease) => match lease.state {
+                    LeaseState::Held => passed(&lease.until, now),
+                    LeaseState::Lapsed { .. } => true,
+                    LeaseState::Done { .. } => false,
+                },
+                None => false,
+            })
+            .cloned()
+            .collect();
+        due.sort_by_key(|r| r.seq);
+        due
+    }
+
+    /// The receipt `subject` is taken under now, if it is taken.
+    pub fn current(&self, subject: &str) -> Option<&Receipt> {
+        match self.subjects.get(subject) {
+            Some(Place::Taken(i)) => Some(&self.receipts[*i]),
+            _ => None,
+        }
+    }
+
+    /// A receipt's lease as it stands now.
+    fn set_lease(&mut self, id: &str, lease: Lease) {
+        let Some(i) = self.by_receipt_id.get(id).copied() else {
+            return;
+        };
+        if matches!(lease.state, LeaseState::Done { .. }) {
+            self.live.remove(id);
+        }
+        self.receipts[i].lease = Some(lease);
+    }
+
+    /// A lapsed take's tuple is back in the space as `meta`.
+    fn returned(&mut self, id: &str, meta: TupleMeta) {
+        self.live.remove(id);
+        self.subjects
+            .insert(meta.subject.clone(), Place::Pending(meta.seq));
+        self.by_cid.insert(meta.cid.clone(), meta.seq);
+        self.pending.insert(meta.seq, meta);
+    }
+
     /// Record that a pending tuple left the space without a receipt.
     fn gone(&mut self, subject: &str) {
         if let Some(Place::Pending(seq)) = self.subjects.get(subject).copied() {
@@ -270,6 +475,8 @@ pub struct Store {
     tuples: PathBuf,
     receipts: PathBuf,
     staging: PathBuf,
+    /// `<state>/{layer}/leases/`: a leased take's standing since its receipt.
+    leases: PathBuf,
     authority: Capability,
     /// Seals the receipts; the space seals the tuples with a clone ([`SealCodec`]).
     sealer: Sealer,
@@ -322,6 +529,8 @@ impl Store {
         let receipts = dir.join("receipts");
         let staging = receipts.join(".taking");
         at_rest::private_dir(&staging)?;
+        let leases = dir.join("leases");
+        at_rest::private_dir(&leases)?;
         let tuples = dir.join(SPACE_NAME);
         // Intray creates these with the process's umask when it first needs them; made here
         // first, they are `0700` like every other directory of the host's state.
@@ -341,6 +550,7 @@ impl Store {
             tuples,
             receipts,
             staging,
+            leases,
             sealer: sealer.clone(),
             authority: Capability::scoped([
                 ikigai_intray::CAP_OUT.to_string(),
@@ -483,6 +693,79 @@ impl Store {
     }
 }
 
+impl Store {
+    fn lease_path(&self, id: &str) -> PathBuf {
+        self.leases.join(format!("{id}.json"))
+    }
+
+    /// Store a leased take's standing, sealed and replaced whole.
+    pub fn write_lease(&self, id: &str, lease: &Lease) -> std::result::Result<(), String> {
+        let json = serde_json::to_vec(&LeaseFile::of(lease))
+            .map_err(|e| format!("lease {id} did not serialize: {e}"))?;
+        at_rest::replace(&self.lease_path(id), &self.sealer.seal(&json)?)
+    }
+
+    /// A leased take's standing since its receipt, if it has changed.
+    fn read_lease(&self, id: &str) -> std::result::Result<Option<Lease>, String> {
+        let path = self.lease_path(id);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let text = self.sealer.read_text(&path)?;
+        let file: LeaseFile =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        file.lease()
+            .map(Some)
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// A receipt as it is answered: its document, with a leased take's standing as it is
+    /// now (`layers:leaseUntil`, `layers:leaseState` and any `layers:leaseResult`) in place of
+    /// the lease the document was written with.
+    pub fn receipt_answer(&self, receipt: &Receipt) -> std::result::Result<String, String> {
+        let text = self.receipt_text(&receipt.id)?;
+        let Some(lease) = &receipt.lease else {
+            return Ok(text);
+        };
+        let until = rdf::layers_lease_until();
+        let mut triples: Vec<Triple> = rdf::parse_turtle(&text)?
+            .into_iter()
+            .filter(|t| t.predicate.as_str() != until)
+            .collect();
+        let s = node(&receipt.iri);
+        triples.push(Triple::new(
+            s.clone(),
+            node(&until),
+            Literal::new_typed_literal(&lease.until, node(rdf::XSD_DATE_TIME)),
+        ));
+        triples.push(Triple::new(
+            s.clone(),
+            node(&rdf::layers_lease_state()),
+            Literal::new_simple_literal(lease.state.word()),
+        ));
+        if let LeaseState::Done {
+            result: Some(result),
+        } = &lease.state
+        {
+            triples.push(Triple::new(
+                s,
+                node(&rdf::layers_lease_result()),
+                node(result),
+            ));
+        }
+        Ok(rdf::to_turtle(&triples))
+    }
+
+    /// The tuple a receipt holds, as it was taken.
+    fn taken_tuple(&self, receipt: &Receipt) -> std::result::Result<Vec<Triple>, String> {
+        let text = self.receipt_text(&receipt.id)?;
+        Ok(rdf::parse_turtle(&text)?
+            .into_iter()
+            .filter(|t| subject_iri(&t.subject) != Some(receipt.iri.as_str()))
+            .collect())
+    }
+}
+
 fn ids(bytes: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(bytes)
         .lines()
@@ -545,6 +828,7 @@ impl Tuplespace {
         settle_staged(&store, &pending_ids, layer)?;
         let mut index = Index::default();
         let mut stored = Vec::new();
+        let mut receipts = Vec::new();
         for file in read_dir(&store.receipts)? {
             let name = file
                 .file_name()
@@ -554,7 +838,7 @@ impl Tuplespace {
                 continue;
             };
             let text = sealer.read_text(&file)?;
-            let receipt =
+            let mut receipt =
                 parse_receipt(layer, &text).map_err(|e| format!("{}: {e}", file.display()))?;
             if receipt.id != id {
                 return Err(format!(
@@ -564,8 +848,17 @@ impl Tuplespace {
                     receipt.id
                 ));
             }
+            if let Some(lease) = store.read_lease(id)? {
+                receipt.lease = Some(lease);
+            }
             stored.push(out_event(&receipt.tuple));
             stored.push(taken_event(&receipt));
+            stored.extend(returned_event(&receipt));
+            receipts.push(receipt);
+        }
+        // In take order, so a tuple taken again after a lapse is current under its new take.
+        receipts.sort_by_key(|r| r.seq);
+        for receipt in receipts {
             index.insert_receipt(receipt)?;
         }
         let mut texts: HashMap<String, String> = HashMap::new();
@@ -588,14 +881,28 @@ impl Tuplespace {
         for subject in logged {
             index.subjects.entry(subject.clone()).or_insert(Place::Gone);
         }
+        // A tuple taken more than once carries its one `out` event in each receipt.
         stored.sort_by_key(|e| e.seq);
-        Ok((
-            Tuplespace {
-                store,
-                index: std::sync::RwLock::new(index),
-            },
-            stored,
-        ))
+        stored.dedup_by_key(|e| e.seq);
+        let space = Tuplespace {
+            store,
+            index: std::sync::RwLock::new(index),
+        };
+        // A lapse whose tuple is not back (the host stopped between the two): drop it again.
+        let due: Vec<Receipt> = {
+            let index = space.index.read().expect("tuplespace lock");
+            index
+                .live
+                .iter()
+                .filter_map(|id| index.receipt(id))
+                .filter(|r| r.lapsed())
+                .cloned()
+                .collect()
+        };
+        for receipt in due {
+            block_on(space.return_tuple(layer, &receipt))?;
+        }
+        Ok((space, stored))
     }
 
     /// Seal again, to the current identity, everything this layer's space holds that is
@@ -618,7 +925,7 @@ impl Tuplespace {
         let store = &self.store;
         let sealer = &store.sealer;
         let mut changed = 0;
-        for dir in [&store.receipts, &store.staging] {
+        for dir in [&store.receipts, &store.staging, &store.leases] {
             for file in read_dir(dir)? {
                 if reseal_file(sealer, &file)? {
                     changed += 1;
@@ -663,6 +970,17 @@ impl Tuplespace {
         let index = self.index.read().expect("tuplespace lock");
         let mut ids = Vec::new();
         for receipt in index.receipts.iter().filter(|r| r.seq < seq) {
+            // A held lease is not over yet, and a lapsed one counts the attempts of a tuple
+            // still in play (pending again, or being returned).
+            let in_play = index.live.contains(&receipt.id)
+                || (receipt.lapsed()
+                    && matches!(
+                        index.subjects.get(&receipt.tuple.subject),
+                        Some(Place::Pending(_))
+                    ));
+            if in_play {
+                continue;
+            }
             let taken = oxsdatatypes::DateTime::from_str(&receipt.time)
                 .map_err(|_| format!("receipt {} has no valid take time", receipt.iri))?;
             if taken < cutoff {
@@ -694,7 +1012,7 @@ impl Tuplespace {
         let result = (|| {
             for id in ids {
                 let path = self.store.receipt_path(&id);
-                let mut paths = vec![path];
+                let mut paths = vec![path, self.store.lease_path(&id)];
                 paths.extend(staged.remove(&id).unwrap_or_default());
                 // A committed take may still be staged after a failed rename. Delete
                 // both copies, so neither a read fallback nor open resurrects it.
@@ -714,26 +1032,33 @@ impl Tuplespace {
         // Update even on partial failure. Keep take order and reserve expired subjects;
         // a retry uses the logged batch and does not append another aggregate.
         let mut index = self.index.write().expect("tuplespace lock");
-        let subjects: Vec<_> = index
-            .receipts
+        // The receipt each taken subject is current under, by id, before positions move. A
+        // subject taken under an expired receipt stays used; a pending one stays pending.
+        let current: Vec<(String, String)> = index
+            .subjects
             .iter()
-            .filter(|r| deleted.contains(&r.id))
-            .map(|r| r.tuple.subject.clone())
+            .filter_map(|(subject, place)| match place {
+                Place::Taken(i) => Some((subject.clone(), index.receipts[*i].id.clone())),
+                _ => None,
+            })
             .collect();
-        for subject in subjects {
-            index.subjects.insert(subject, Place::Gone);
-        }
         index.receipts.retain(|r| !deleted.contains(&r.id));
         index.by_receipt_id.clear();
         let positions: Vec<_> = index
             .receipts
             .iter()
             .enumerate()
-            .map(|(i, r)| (i, r.id.clone(), r.tuple.subject.clone()))
+            .map(|(i, r)| (i, r.id.clone()))
             .collect();
-        for (i, id, subject) in positions {
+        for (i, id) in positions {
             index.by_receipt_id.insert(id, i);
-            index.subjects.insert(subject, Place::Taken(i));
+        }
+        for (subject, id) in current {
+            let place = match index.by_receipt_id.get(&id) {
+                Some(i) => Place::Taken(*i),
+                None => Place::Gone,
+            };
+            index.subjects.insert(subject, place);
         }
         result
     }
@@ -755,6 +1080,37 @@ impl Tuplespace {
     /// Record that a pending tuple was found gone from the space.
     pub fn record_gone(&self, subject: &str) {
         self.index.write().expect("tuplespace lock").gone(subject);
+    }
+
+    /// Record a leased take's standing, stored first ([`Store::write_lease`]).
+    pub fn record_lease(&self, id: &str, lease: Lease) {
+        self.index
+            .write()
+            .expect("tuplespace lock")
+            .set_lease(id, lease);
+    }
+
+    /// Drop a lapsed take's tuple back into the space, as its receipt holds it (the same
+    /// subject and `ik:seq`), and record it pending again. Called under the layer's write lock,
+    /// after the lapse is stored.
+    pub async fn return_tuple(
+        &self,
+        layer: &str,
+        receipt: &Receipt,
+    ) -> std::result::Result<(), String> {
+        let tuple = self.store.taken_tuple(receipt)?;
+        let cid = self
+            .store
+            .drop_tuple(rdf::to_turtle(&tuple).as_bytes())
+            .await
+            .map_err(|e| format!("return <{}> to the space: {e}", receipt.tuple.subject))?;
+        let mut meta = tuple_meta(layer, &tuple, &cid)?;
+        meta.attempts = receipt.attempt;
+        self.index
+            .write()
+            .expect("tuplespace lock")
+            .returned(&receipt.id, meta);
+        Ok(())
     }
 }
 
@@ -913,6 +1269,28 @@ pub fn taken_event(receipt: &Receipt) -> Event {
     }
 }
 
+/// The `returned` event of a lapsed take, by the host's lease sweep.
+pub fn returned_event(receipt: &Receipt) -> Option<Event> {
+    match &receipt.lease {
+        Some(Lease {
+            state: LeaseState::Lapsed { seq, time },
+            ..
+        }) => Some(Event {
+            sweep: None,
+            seq: *seq,
+            time: time.clone(),
+            kind: "returned".into(),
+            iri: receipt.tuple.subject.clone(),
+            by: LEASE_AGENT.into(),
+        }),
+        _ => None,
+    }
+}
+
+/// Who a `returned` event is by: the host's lease sweep, as `urn:layers:retention` is its
+/// retention sweep.
+pub const LEASE_AGENT: &str = "urn:layers:lease";
+
 fn digest<'a>(triples: impl Iterator<Item = &'a Triple>) -> u64 {
     let mut lines: Vec<String> = triples.map(|t| t.to_string()).collect();
     lines.sort();
@@ -975,6 +1353,7 @@ fn tuple_meta(
         types,
         addressed_to,
         offer,
+        attempts: 0,
         digest: digest(triples.iter().filter(|t| !is_stamp(t.predicate.as_str()))),
     })
 }
@@ -1029,7 +1408,12 @@ fn parse_receipt(layer: &str, text: &str) -> std::result::Result<Receipt, String
         .ok_or_else(|| format!("{iri} is not a receipt of layer `{layer}`"))?
         .to_string();
     let (mut taker, mut time, mut seq, mut used) = (None, None, None, None);
-    let seq_p = rdf::ik_seq();
+    let (mut attempt, mut until) = (None, None);
+    let (seq_p, attempt_p, until_p) = (
+        rdf::ik_seq(),
+        rdf::layers_attempt(),
+        rdf::layers_lease_until(),
+    );
     for t in &take {
         if subject_iri(&t.subject) != Some(iri.as_str()) {
             return Err("more than one receipt".into());
@@ -1047,6 +1431,14 @@ fn parse_receipt(layer: &str, text: &str) -> std::result::Result<Receipt, String
             }
         } else if p == rdf::PROV_USED {
             used = object_iri(&t.object).map(str::to_string);
+        } else if p == attempt_p {
+            if let Term::Literal(l) = &t.object {
+                attempt = l.value().parse::<u64>().ok();
+            }
+        } else if p == until_p {
+            if let Term::Literal(l) = &t.object {
+                until = Some(l.value().to_string());
+            }
         }
     }
     let seq = seq.ok_or("no ik:seq")?;
@@ -1064,6 +1456,11 @@ fn parse_receipt(layer: &str, text: &str) -> std::result::Result<Receipt, String
         taker: taker.ok_or("no prov:wasAssociatedWith")?,
         time: time.ok_or("no prov:endedAtTime")?,
         tuple: meta,
+        attempt: attempt.unwrap_or(1),
+        lease: until.map(|until| Lease {
+            until,
+            state: LeaseState::Held,
+        }),
     })
 }
 
@@ -1197,6 +1594,7 @@ impl TupleDraft {
                 .collect(),
             addressed_to: self.addressed_to.clone(),
             offer: self.offer.clone(),
+            attempts: 0,
             digest: self.digest,
         }
     }
@@ -1204,6 +1602,10 @@ impl TupleDraft {
 
 /// A receipt's document: the take (a `prov:Activity` that used the tuple, associated with
 /// its taker, ended at `time`, numbered `seq` in the feed), then the tuple as taken.
+///
+/// A leased take (`lease_until`) records when its lease lapses, and a take that is not the
+/// tuple's first (`attempt` above 1) or is leased records which attempt it is.
+#[allow(clippy::too_many_arguments)]
 pub fn receipt_document(
     layer: &str,
     id: &str,
@@ -1212,6 +1614,8 @@ pub fn receipt_document(
     seq: u64,
     subject: &str,
     tuple: &[Triple],
+    attempt: u64,
+    lease_until: Option<&str>,
 ) -> (String, String) {
     let iri = format!("{}{id}", receipt_prefix(layer));
     let s = node(&iri);
@@ -1230,6 +1634,20 @@ pub fn receipt_document(
             Literal::new_typed_literal(seq.to_string(), node(rdf::XSD_INTEGER)),
         ),
     ];
+    if attempt > 1 || lease_until.is_some() {
+        triples.push(Triple::new(
+            node(&iri),
+            node(&rdf::layers_attempt()),
+            Literal::new_typed_literal(attempt.to_string(), node(rdf::XSD_INTEGER)),
+        ));
+    }
+    if let Some(until) = lease_until {
+        triples.push(Triple::new(
+            node(&iri),
+            node(&rdf::layers_lease_until()),
+            Literal::new_typed_literal(until, node(rdf::XSD_DATE_TIME)),
+        ));
+    }
     triples.extend(tuple.iter().cloned());
     (iri, rdf::to_turtle(&triples))
 }

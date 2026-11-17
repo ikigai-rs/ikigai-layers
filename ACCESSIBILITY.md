@@ -23,7 +23,9 @@ presentation has not been evaluated here.
   new entry's or tuple's IRI as `text/plain`; the feeds, the pending tuples and the receipts list
   one line per item as `text/plain`, space-separated (`<seq> <time> <kind> <iri> <participant>`
   for a feed event; a retention `sweep` appends labeled `count=N before=<UTC cutoff>`
-  fields and includes the same aggregate in the event's JSON `sweep` object); entries,
+  fields and includes the same aggregate in the event's JSON `sweep` object; a leased receipt
+  appends labeled `attempt=N lease=<held, done or lapsed> until=<UTC time>` fields, and
+  `result=<iri>` once done, with the same in its JSON); entries,
   definitions and shapes are Turtle; and every answer a participant
   reads also comes as JSON or JSON-LD (README, "JSON faces").
 - **Feed answers** (`src/feeds/`): a feed layer's entries also come as Atom 1.0 XML
@@ -39,7 +41,11 @@ presentation has not been evaluated here.
   says how to change that, and one naming `onboard.controller` says it is never entitled, both
   in the same two places. A write that fails admission answers ``does not conform to layer
   `talk`'s shapes (1 violation): …`` (``N violations`` for other counts), listing up to 20
-  violations and a count of the rest.
+  violations and a count of the rest. A settle after a lease lapsed answers ``receipt <iri>'s
+  lease lapsed at <time>, and <tuple> went back to the space: a settle after the lapse is
+  refused, so the tuple keeps one result. Take it again to work on it``; a `lease=` longer than
+  the layer allows answers ``… a lease is at most 1h``, and one that is not a length spells out
+  the form (``such as "90s", "15m", "2h" or "1d"``).
   A `say` on a feed by a non-publisher answers ``layer `releases` is a feed, written only by
   its publishers, and <participant> is not one of them: ask in a Talk channel instead``; an
   entry whose `dcterms:subject` is outside the feed's scheme, and a `concept=` the scheme does

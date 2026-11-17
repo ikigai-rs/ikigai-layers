@@ -86,6 +86,27 @@ pub fn ik_addressed_to() -> String {
     format!("{IK}addressedTo")
 }
 
+/// `layers:attempt`: which take of a tuple a receipt records, counting from 1; more than 1 when
+/// an earlier leased take of the same tuple lapsed.
+pub fn layers_attempt() -> String {
+    format!("{LAYERS}attempt")
+}
+
+/// `layers:leaseUntil`: when a leased take lapses unless its taker settles or renews it.
+pub fn layers_lease_until() -> String {
+    format!("{LAYERS}leaseUntil")
+}
+
+/// `layers:leaseState`: a leased take's standing, `held`, `done` or `lapsed`.
+pub fn layers_lease_state() -> String {
+    format!("{LAYERS}leaseState")
+}
+
+/// `layers:leaseResult`: what a leased take's taker named as its result when it settled it.
+pub fn layers_lease_result() -> String {
+    format!("{LAYERS}leaseResult")
+}
+
 /// `ik:offer`: the offer a report is about.
 pub fn ik_offer() -> String {
     format!("{IK}offer")
