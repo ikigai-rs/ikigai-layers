@@ -9,3 +9,22 @@ layers:entryMax a rdf:Property ;
     rdfs:comment "The maximum number of bytes in submitted entry or tuple content, before RDF parsing. This includes whitespace and encoding overhead and is separate from SHACL literal length constraints." ;
     rdfs:domain ik:Layer ;
     rdfs:range xsd:integer .
+
+layers:attempt a rdf:Property ;
+    rdfs:label "Take attempt" ;
+    rdfs:comment "Which take of a tuple a receipt records, counting from 1. It is more than 1 when an earlier leased take of the same tuple lapsed and the tuple went back to the space." ;
+    rdfs:range xsd:integer .
+
+layers:leaseUntil a rdf:Property ;
+    rdfs:label "Lease until" ;
+    rdfs:comment "When a leased take lapses unless its taker settles or renews it first. A lapsed take returns its tuple to the space." ;
+    rdfs:range xsd:dateTime .
+
+layers:leaseState a rdf:Property ;
+    rdfs:label "Lease state" ;
+    rdfs:comment "A leased take's standing: held (its taker is working on it), done (its taker settled it, and the take is final) or lapsed (its tuple went back to the space, and a settle is refused)." ;
+    rdfs:range xsd:string .
+
+layers:leaseResult a rdf:Property ;
+    rdfs:label "Lease result" ;
+    rdfs:comment "What a leased take's taker named as its result when it settled it as done, such as a content-addressed resource. A tuple has at most one." .

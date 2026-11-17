@@ -64,7 +64,7 @@ use crate::name::{collab_cap, collab_iri, endpoint_id, layer_cap, layer_iri, Par
 use crate::onboard;
 use crate::rdf::{self, node};
 use crate::time::xsd_date_time;
-use crate::tuplespace::{self, Lookup, Receipt, TupleMeta};
+use crate::tuplespace::{self, Lease, LeaseState, Lookup, Receipt, TupleMeta};
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 const TURTLE: &str = "text/turtle";
@@ -277,6 +277,16 @@ fn wait_spec() -> ArgSpec {
         ))
         .class(xsd("nonNegativeInteger"))
         .default_value("0")
+}
+
+fn lease_spec(max: Duration) -> ArgSpec {
+    ArgSpec::new("lease")
+        .summary(format!(
+            "how long the take holds before it lapses: a whole number of seconds, minutes, \
+             hours or days (90s, 15m, 2h, 1d), at most {}",
+            lease_words(max)
+        ))
+        .class(xsd("string"))
 }
 
 fn limit_spec() -> ArgSpec {
@@ -1467,6 +1477,7 @@ impl LayerEndpoint {
         let as_ld = face(inv, &GRAPH_FACES)? == JSON_LD;
         let (taker, _) = self.attributed(inv, "take")?;
         let subject = take_subject(inv)?;
+        let lease = lease_of(self.def(), inv)?;
         let space = self.state.tuplespace();
         let _write = self.state.write.lock().await;
         let meta: TupleMeta = {
@@ -1514,8 +1525,18 @@ impl LayerEndpoint {
         let now = self.now(inv)?;
         let time = xsd_date_time(now);
         let id = id::mint(now.as_millis(), seq);
-        let (_, document) =
-            tuplespace::receipt_document(self.layer(), &id, &taker, &time, seq, &subject, &tuple);
+        let until = lease.map(|lease| lease_until(now, lease)).transpose()?;
+        let (_, document) = tuplespace::receipt_document(
+            self.layer(),
+            &id,
+            &taker,
+            &time,
+            seq,
+            &subject,
+            &tuple,
+            meta.attempts + 1,
+            until.as_deref(),
+        );
         let receipt: Receipt = tuplespace::receipt_of(self.layer(), &document)?;
         space
             .store
@@ -1620,13 +1641,16 @@ impl LayerEndpoint {
             return Err(self.no_match());
         }
         let space = self.state.tuplespace();
-        // Expiration advances without a Sink or Delete to cut the kernel's cache.
+        // Expiration and a lapsed lease advance without a Sink or Delete to cut the kernel's
+        // cache.
         let answer = |r: Representation| {
-            Ok(if self.def().retain.is_some() {
-                r
-            } else {
-                r.cacheable().depends_on(self.tuples_thread())
-            })
+            Ok(
+                if self.def().retain.is_some() || self.def().lease_max.is_some() {
+                    r
+                } else {
+                    r.cacheable().depends_on(self.tuples_thread())
+                },
+            )
         };
         if let (Some(_), Some(_)) = (tuple, template) {
             return Err(Error::InvalidArgument {
@@ -1649,7 +1673,7 @@ impl LayerEndpoint {
                 let index = space.index.read().expect("tuplespace lock");
                 match (taken, index.lookup(subject)) {
                     (false, Lookup::Pending(meta)) => Ok(Err(meta.cid.clone())),
-                    (true, Lookup::Taken(receipt)) => Ok(Ok(receipt.id.clone())),
+                    (true, Lookup::Taken(receipt)) => Ok(Ok(receipt.clone())),
                     (false, Lookup::Taken(receipt)) => Err(format!(
                         "<{subject}> is not pending: <{}> took it at {} (read its receipt with \
                          state=taken)",
@@ -1667,10 +1691,10 @@ impl LayerEndpoint {
                 }
             };
             return match found {
-                Ok(Ok(receipt_id)) => {
+                Ok(Ok(receipt)) => {
                     let text = space
                         .store
-                        .receipt_text(&receipt_id)
+                        .receipt_answer(&receipt)
                         .map_err(|e| self.space_error(e))?;
                     answer(self.graph_face(text, as_ld).await?)
                 }
@@ -1715,10 +1739,23 @@ impl LayerEndpoint {
                 let listed: Vec<serde_json::Value> = receipts
                     .iter()
                     .map(|r| {
-                        serde_json::json!({
+                        let mut listed = serde_json::json!({
                             "seq": r.seq, "time": r.time, "subject": r.tuple.subject,
                             "taker": r.taker, "receipt": r.iri,
-                        })
+                        });
+                        if let Some(lease) = &r.lease {
+                            listed["attempt"] = r.attempt.into();
+                            listed["lease"] = serde_json::json!({
+                                "state": lease.state.word(), "until": lease.until,
+                            });
+                            if let LeaseState::Done {
+                                result: Some(result),
+                            } = &lease.state
+                            {
+                                listed["lease"]["result"] = result.clone().into();
+                            }
+                        }
+                        listed
                     })
                     .collect();
                 return answer(json_repr(serde_json::json!({
@@ -1732,14 +1769,30 @@ impl LayerEndpoint {
                     out.push_str(
                         &space
                             .store
-                            .receipt_text(&r.id)
+                            .receipt_answer(r)
                             .map_err(|e| self.space_error(e))?,
                     );
                 } else {
                     out.push_str(&format!(
-                        "{} {} {} {}\n",
+                        "{} {} {} {}",
                         r.seq, r.time, r.tuple.subject, r.taker
                     ));
+                    // A leased take's standing, as labeled fields, as a sweep's are.
+                    if let Some(lease) = &r.lease {
+                        out.push_str(&format!(
+                            " attempt={} lease={} until={}",
+                            r.attempt,
+                            lease.state.word(),
+                            lease.until
+                        ));
+                        if let LeaseState::Done {
+                            result: Some(result),
+                        } = &lease.state
+                        {
+                            out.push_str(&format!(" result={result}"));
+                        }
+                    }
+                    out.push('\n');
                 }
             }
             return answer(if graph_face {
@@ -1805,6 +1858,120 @@ impl LayerEndpoint {
         })
     }
 
+    /// `settle` (a Sink on a receipt): its taker settles a leased take as `done`, naming an
+    /// optional `result=` IRI, or `renew`s its lease for another `lease=` from now. A take
+    /// whose lease lapsed is refused either, as a Conflict: its tuple went back to the space,
+    /// and the next take's result is the one it keeps (ledger #2119).
+    async fn settle(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let as_json = face(inv, &[TEXT, JSON])? == JSON;
+        let (who, _) = self.attributed(inv, "settle")?;
+        let id = inv.bindings.get("id").unwrap_or_default().to_string();
+        let how = optional_str(inv, "settle")?
+            .map(str::trim)
+            .ok_or_else(|| Error::MissingArgument("settle".into()))?;
+        let result = optional_str(inv, "result")?
+            .map(str::trim)
+            .filter(|r| !r.is_empty());
+        if let Some(result) = result {
+            if oxrdf::NamedNode::new(result).is_err() {
+                return Err(Error::InvalidArgument {
+                    name: "result".into(),
+                    detail: format!(
+                        "`{result}` is not an IRI: a result is named by one, such as the \
+                         content address of a resource that holds it"
+                    ),
+                });
+            }
+        }
+        let space = self.state.tuplespace();
+        let _write = self.state.write.lock().await;
+        let receipt = space
+            .index
+            .read()
+            .expect("tuplespace lock")
+            .receipt(&id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::NotFound(format!("no receipt `{id}` in layer `{}`", self.layer()))
+            })?;
+        let iri = receipt.iri.clone();
+        if receipt.taker != who {
+            return Err(Error::Denied(format!(
+                "receipt <{iri}> is <{}>'s take: only its taker settles it",
+                receipt.taker
+            )));
+        }
+        let Some(lease) = receipt.lease.clone() else {
+            return Err(Error::Conflict(format!(
+                "receipt <{iri}> is a final take (taken with no lease=), so there is nothing \
+                 to settle"
+            )));
+        };
+        let now = self.now(inv)?;
+        let lapsed = || {
+            Error::Conflict(format!(
+                "receipt <{iri}>'s lease lapsed at {}, and <{}> went back to the space: a \
+                 settle after the lapse is refused, so the tuple keeps one result. Take it \
+                 again to work on it",
+                lease.until, receipt.tuple.subject
+            ))
+        };
+        let settled = match (how, &lease.state) {
+            ("done" | "renew", LeaseState::Lapsed { .. }) => return Err(lapsed()),
+            ("done" | "renew", LeaseState::Held)
+                if tuplespace::passed(&lease.until, &xsd_date_time(now)) =>
+            {
+                return Err(lapsed())
+            }
+            ("done", LeaseState::Done { result: done }) => {
+                if done.as_deref() == result {
+                    // The same settle again (a retry after a lost reply): the one record.
+                    return Ok(named(&iri, as_json));
+                }
+                return Err(Error::Conflict(format!(
+                    "receipt <{iri}> is already settled as done, with {}: a tuple keeps one \
+                     result",
+                    match done {
+                        Some(done) => format!("result <{done}>"),
+                        None => "no result".into(),
+                    }
+                )));
+            }
+            ("renew", LeaseState::Done { .. }) => {
+                return Err(Error::Conflict(format!(
+                    "receipt <{iri}> is already settled as done: the take is final, and there \
+                     is no lease to renew"
+                )))
+            }
+            ("done", LeaseState::Held) => Lease {
+                until: lease.until.clone(),
+                state: LeaseState::Done {
+                    result: result.map(str::to_string),
+                },
+            },
+            ("renew", LeaseState::Held) => {
+                let length = lease_of(self.def(), inv)?
+                    .ok_or_else(|| Error::MissingArgument("lease".into()))?;
+                Lease {
+                    until: lease_until(now, length)?,
+                    state: LeaseState::Held,
+                }
+            }
+            (other, _) => {
+                return Err(Error::InvalidArgument {
+                    name: "settle".into(),
+                    detail: format!("`{other}` is not one of done, renew"),
+                })
+            }
+        };
+        space
+            .store
+            .write_lease(&id, &settled)
+            .map_err(|e| self.space_error(e))?;
+        space.record_lease(&id, settled);
+        Ok(named(&iri, as_json))
+    }
+
     /// A NotFound that a later out or take can end: it hangs from the tuples thread.
     fn not_found_tuple(&self, inv: &Invocation<'_>, what: String) -> Error {
         inv.depends_on(self.tuples_thread());
@@ -1820,16 +1987,17 @@ impl LayerEndpoint {
             .read()
             .expect("tuplespace lock")
             .receipt(id)
-            .map(|r| r.id.clone());
+            .cloned();
         match found {
-            // A retained receipt never changes, but a configured window can remove it.
-            Some(id) => {
+            // A retained receipt never changes, but a configured window can remove it, and a
+            // leased take's standing changes until it is settled or lapses.
+            Some(receipt) => {
                 let text = space
                     .store
-                    .receipt_text(&id)
+                    .receipt_answer(&receipt)
                     .map_err(|e| self.space_error(e))?;
                 let repr = self.graph_face(text, as_ld).await?;
-                Ok(if self.def().retain.is_some() {
+                Ok(if self.def().retain.is_some() || receipt.lease.is_some() {
                     repr
                 } else {
                     repr.cacheable()
@@ -1960,6 +2128,12 @@ fn check_report(
             })
         }
     };
+    if receipt.lapsed() {
+        return Err(Error::Conflict(format!(
+            "ik:offer <{offer}>'s lease lapsed and it went back to the space: a report on a \
+             lapsed take is refused, so the offer keeps one result"
+        )));
+    }
     if receipt.taker != reporter {
         return Err(Error::Denied(format!(
             "ik:offer <{offer}> was taken by <{}>: only its taker reports on it",
@@ -1985,6 +2159,57 @@ fn already_taken(subject: &str, receipt: &Receipt) -> Error {
         "<{subject}> was already taken by <{}> at {} (receipt <{}>)",
         receipt.taker, receipt.time, receipt.iri
     ))
+}
+
+/// A take's or a renewal's `lease=`: `None` when not given. Refused when the layer sets no
+/// `lease_max`, when it is not a lease length ([`crate::config::parse_lease`]), and when it
+/// is longer than `lease_max`.
+fn lease_of(def: &LayerDef, inv: &Invocation<'_>) -> Result<Option<Duration>> {
+    let Some(value) = optional_str(inv, "lease")?.map(str::trim) else {
+        return Ok(None);
+    };
+    let invalid = |detail: String| Error::InvalidArgument {
+        name: "lease".into(),
+        detail,
+    };
+    let Some(max) = def.lease_max else {
+        return Err(invalid(format!(
+            "layer `{}` takes no lease: its definition sets no lease_max, so every take is \
+             final",
+            def.name
+        )));
+    };
+    let lease = crate::config::parse_lease(value).map_err(invalid)?;
+    if lease > max {
+        return Err(invalid(format!(
+            "lease={value} is longer than layer `{}` allows: a lease is at most {}",
+            def.name,
+            lease_words(max)
+        )));
+    }
+    Ok(Some(lease))
+}
+
+/// A lease length the way `lease_max` writes it, in its largest whole unit.
+fn lease_words(lease: Duration) -> String {
+    let secs = lease.as_secs();
+    match secs {
+        s if s % 86_400 == 0 => format!("{}d", s / 86_400),
+        s if s % 3_600 == 0 => format!("{}h", s / 3_600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
+    }
+}
+
+/// When a lease of `length` taken at `now` lapses, as `xsd:dateTime`.
+fn lease_until(now: ikigai_core::Time, length: Duration) -> Result<String> {
+    now.as_millis()
+        .checked_add(length.as_millis() as u64)
+        .map(|until| xsd_date_time(ikigai_core::Time::from_millis(until)))
+        .ok_or_else(|| Error::InvalidArgument {
+            name: "lease".into(),
+            detail: "the lease would end beyond the millisecond clock's range".into(),
+        })
 }
 
 /// The tuple a take names: `tuple=`, or the piped or trailing value, which the engine puts
@@ -2038,6 +2263,19 @@ impl Endpoint for LayerEndpoint {
         {
             self.host().notify().bump();
         }
+        // A lapsed lease returns its tuple before anything reads or writes the layer.
+        if self.def().model == Model::Tuplespace {
+            if let Some(now) = inv.now() {
+                if self
+                    .state
+                    .sweep_leases(now)
+                    .await
+                    .map_err(|e| self.space_error(e))?
+                {
+                    self.host().notify().bump();
+                }
+            }
+        }
         if self.def().is_feed() && self.action.is_shared_feed_read() {
             return if self.is_share() {
                 self.share_read(inv).await
@@ -2068,7 +2306,10 @@ impl Endpoint for LayerEndpoint {
                      {other:?}"
                 ))),
             },
-            Action::Receipt => self.receipt(inv).await,
+            Action::Receipt => match inv.request.verb {
+                Verb::Sink => self.settle(inv).await,
+                _ => self.receipt(inv).await,
+            },
             Action::Scheme => self.scheme(inv),
             Action::FeedGraph => unreachable!("a feed read, handled above"),
         }
@@ -2116,7 +2357,8 @@ impl Endpoint for LayerEndpoint {
                 .summary(format!(
                     "Layer `{layer}`'s events after a sequence number (gapless, from 1): one \
                      line per event, `seq time kind iri by`, waiting up to wait= seconds when \
-                     there is none yet; kind is the operation (say, out, taken, sweep), \
+                     there is none yet; kind is the operation (say, out, taken, returned, \
+                     sweep), \
                      and an entry's RDF types are read from the entry"
                 ))
                 .verb(Verb::Source)
@@ -2316,6 +2558,22 @@ impl Endpoint for LayerEndpoint {
                 } else {
                     ""
                 };
+                // `lease=` is declared only where the definition allows it (`lease_max`).
+                let (leasing, leased): (String, Box<dyn Fn(ActionSpec) -> ActionSpec>) =
+                    match self.def().lease_max {
+                        None => (String::new(), Box::new(|spec| spec)),
+                        Some(max) => (
+                            format!(
+                                ". With lease=, the take holds for at most {}: its taker \
+                                 settles the receipt (a Sink on it, settle=done) or renews it \
+                                 (settle=renew lease=) before it lapses, and a lapsed lease \
+                                 returns the tuple to the space, where the next take's receipt \
+                                 counts the attempt",
+                                lease_words(max)
+                            ),
+                            Box::new(move |spec| spec.input(lease_spec(max).optional())),
+                        ),
+                    };
                 base.title(format!("Layer {layer}: tuples"))
                     .summary(format!(
                         "Layer `{layer}`'s tuplespace: out (Sink) drops a tuple named by its one \
@@ -2395,13 +2653,12 @@ impl Endpoint for LayerEndpoint {
                             .requires(layer_cap("out", layer)),
                     )
                     .action(
-                        ActionSpec::new(Verb::Delete)
-                            .summary(
-                                "take: remove one pending tuple by its subject, atomically, and \
-                                 answer it; a tuple already taken is a Conflict naming its \
-                                 taker. The receipt is written before the reply, so a taker \
-                                 that lost it reads rd state=taken tuple=<subject>",
-                            )
+                        leased(ActionSpec::new(Verb::Delete).summary(format!(
+                            "take: remove one pending tuple by its subject, atomically, and \
+                             answer it; a tuple already taken is a Conflict naming its taker. \
+                             The receipt is written before the reply, so a taker that lost it \
+                             reads rd state=taken tuple=<subject>{leasing}"
+                        )))
                             .input(
                                 ArgSpec::new("tuple")
                                     .summary("the subject of the tuple to take")
@@ -2423,22 +2680,79 @@ impl Endpoint for LayerEndpoint {
                             .requires(layer_cap("take", layer)),
                     )
             }
-            Action::Receipt => base
-                .title(format!("Layer {layer}: receipt"))
-                .summary(format!(
-                    "One take in layer `{layer}`, by id: who took which tuple, when, and the \
-                     tuple as taken; a receipt never changes"
-                ))
-                .verb(Verb::Source)
-                .input(
+            Action::Receipt => {
+                let id = || {
                     ArgSpec::new("id")
                         .summary("the receipt's id, the last segment of its IRI")
                         .class(xsd("string"))
-                        .binding(),
-                )
-                .input(as_spec(&GRAPH_FACES))
-                .output(TURTLE)
-                .output(JSON_LD),
+                        .binding()
+                };
+                let Some(max) = self.def().lease_max else {
+                    return base
+                        .title(format!("Layer {layer}: receipt"))
+                        .summary(format!(
+                            "One take in layer `{layer}`, by id: who took which tuple, when, \
+                             and the tuple as taken; a receipt never changes"
+                        ))
+                        .verb(Verb::Source)
+                        .input(id())
+                        .input(as_spec(&GRAPH_FACES))
+                        .output(TURTLE)
+                        .output(JSON_LD);
+                };
+                base.title(format!("Layer {layer}: receipt"))
+                    .summary(format!(
+                        "One take in layer `{layer}`, by id: who took which tuple, when, and \
+                         the tuple as taken; a leased take also says its attempt and how its \
+                         lease stands (held, done or lapsed), which its taker settles with a \
+                         Sink"
+                    ))
+                    .action(
+                        ActionSpec::new(Verb::Source)
+                            .summary(
+                                "read the receipt: the take, the tuple as taken, and for a \
+                                 leased take layers:attempt, layers:leaseUntil, \
+                                 layers:leaseState and any layers:leaseResult",
+                            )
+                            .input(id())
+                            .input(as_spec(&GRAPH_FACES))
+                            .output(TURTLE)
+                            .output(JSON_LD)
+                            .requires(layer_cap("read", layer)),
+                    )
+                    .action(
+                        ActionSpec::new(Verb::Sink)
+                            .summary(
+                                "settle a leased take, its taker only: settle=done (with an \
+                                 optional result=) makes the take final; settle=renew lease= \
+                                 extends it from now. After the lease lapses either is a \
+                                 Conflict: the tuple went back to the space. Answers the \
+                                 receipt's IRI",
+                            )
+                            .input(id())
+                            .input(
+                                ArgSpec::new("settle")
+                                    .summary("done or renew")
+                                    .class(xsd("string"))
+                                    .one_of(["done", "renew"]),
+                            )
+                            .input(
+                                ArgSpec::new("result")
+                                    .summary(
+                                        "with settle=done: the IRI of the result, such as the \
+                                         content address of a resource that holds it (an \
+                                         entry is at most entry_max bytes)",
+                                    )
+                                    .class(xsd("anyURI"))
+                                    .optional(),
+                            )
+                            .input(lease_spec(max).optional())
+                            .input(as_spec(&[TEXT, JSON]))
+                            .output(TEXT)
+                            .output(JSON)
+                            .requires(layer_cap("take", layer)),
+                    )
+            }
         }
     }
 }

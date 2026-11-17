@@ -117,6 +117,9 @@ pub struct LayerDef {
     pub entry_max: usize,
     /// Taken receipts expire after this duration. None keeps them indefinitely.
     pub retain: Option<std::time::Duration>,
+    /// A tuplespace's only: the longest lease a `take lease=` may ask for. None takes no
+    /// lease: every take is final.
+    pub lease_max: Option<std::time::Duration>,
     /// The predicate `latest about=` reads (default `dcterms:subject`). A channel's only.
     pub about: String,
     /// A tuplespace's only: whether a tuple carrying `ik:addressedTo` may be taken only by a
@@ -211,6 +214,7 @@ struct LayerToml {
     label: Option<String>,
     entry_max: Option<toml::Value>,
     retain: Option<String>,
+    lease_max: Option<String>,
     about: Option<String>,
     addressed: Option<bool>,
     #[serde(rename = "match")]
@@ -336,6 +340,18 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
             "{at}: retain is a tuplespace option: it expires taken receipts"
         ));
     }
+    let lease_max = parsed
+        .lease_max
+        .as_deref()
+        .map(|value| {
+            parse_lease(value).map_err(|why| ConfigError(format!("{at}: lease_max {why}")))
+        })
+        .transpose()?;
+    if lease_max.is_some() && model != Model::Tuplespace {
+        return err(format!(
+            "{at}: lease_max is a tuplespace option: it bounds a take's lease"
+        ));
+    }
     let feed_options = parsed.feed.unwrap_or(false);
     if !feed_options {
         let stray = [
@@ -448,6 +464,7 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         context,
         entry_max,
         retain,
+        lease_max,
         about,
         addressed: parsed.addressed.unwrap_or(false),
         matching: parsed.matching.unwrap_or(false),
@@ -456,6 +473,47 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         join,
         feed,
     })
+}
+
+/// A lease's length, as `lease_max` and `take lease=` write it: a positive whole number of
+/// seconds, minutes, hours or days (`90s`, `15m`, `2h`, `1d`).
+///
+/// ```
+/// use std::time::Duration;
+/// use ikigai_layers::config::parse_lease;
+///
+/// assert_eq!(parse_lease("90s"), Ok(Duration::from_secs(90)));
+/// assert_eq!(parse_lease("2h"), Ok(Duration::from_secs(7200)));
+/// assert!(parse_lease("0m").is_err());
+/// assert!(parse_lease("10").is_err());
+/// ```
+pub fn parse_lease(value: &str) -> Result<std::time::Duration, String> {
+    let unit = match value.chars().last() {
+        Some('s') => 1_000,
+        Some('m') => 60_000,
+        Some('h') => 3_600_000,
+        Some('d') => 86_400_000,
+        _ => 0,
+    };
+    let digits = if unit > 0 {
+        &value[..value.len() - 1]
+    } else {
+        ""
+    };
+    let number = (unit > 0 && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| digits.parse::<u64>().ok())
+        .flatten();
+    match number {
+        Some(0) => Err(format!("`{value}` is not positive: a lease is at least 1s")),
+        Some(n) => n
+            .checked_mul(unit)
+            .map(std::time::Duration::from_millis)
+            .ok_or_else(|| format!("`{value}` is beyond the millisecond clock's range")),
+        None => Err(format!(
+            "`{value}` is not a lease length: write a whole number of seconds, minutes, hours \
+             or days, such as \"90s\", \"15m\", \"2h\" or \"1d\""
+        )),
+    }
 }
 
 /// A feed layer's own options: its publishers (required, at least one, by a manifest's names)

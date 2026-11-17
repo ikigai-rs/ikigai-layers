@@ -31,7 +31,8 @@
 //!
 //! Every node the host stamped carries the host's terms, whatever the layer's context
 //! names: `attributedTo` (who said or dropped it), `created` and `seq`; a receipt is an
-//! `Activity` with `used` (the tuple), `associatedWith` (the taker), `endedAt` and `seq`.
+//! `Activity` with `used` (the tuple), `associatedWith` (the taker), `endedAt` and `seq`, and a
+//! leased take's receipt adds `attempt`, `leaseUntil`, `leaseState` and any `leaseResult`.
 //! A layer context that defines one of these terms differently, or maps one of these IRIs
 //! under another name, is refused when the host opens ([`Egress::check`]).
 //!
@@ -67,7 +68,10 @@ use crate::rdf;
 /// let names: Vec<&str> = terms.keys().map(String::as_str).collect();
 /// assert_eq!(
 ///     names,
-///     ["Activity", "associatedWith", "attributedTo", "created", "endedAt", "seq", "used"]
+///     [
+///         "Activity", "associatedWith", "attempt", "attributedTo", "created", "endedAt",
+///         "leaseResult", "leaseState", "leaseUntil", "seq", "used"
+///     ]
 /// );
 /// assert_eq!(terms["seq"]["@id"], "https://ikigai-rs.dev/ns#seq");
 /// assert_eq!(terms["seq"]["@type"], "http://www.w3.org/2001/XMLSchema#integer");
@@ -75,9 +79,13 @@ use crate::rdf;
 pub const STAMP_CONTEXT: &str = r#"{ "@context": {
   "Activity": "http://www.w3.org/ns/prov#Activity",
   "associatedWith": { "@id": "http://www.w3.org/ns/prov#wasAssociatedWith", "@type": "@id" },
+  "attempt": { "@id": "https://ikigai-rs.dev/ns/layers#attempt", "@type": "http://www.w3.org/2001/XMLSchema#integer" },
   "attributedTo": { "@id": "http://www.w3.org/ns/prov#wasAttributedTo", "@type": "@id" },
   "created": { "@id": "http://purl.org/dc/terms/created", "@type": "http://www.w3.org/2001/XMLSchema#dateTime" },
   "endedAt": { "@id": "http://www.w3.org/ns/prov#endedAtTime", "@type": "http://www.w3.org/2001/XMLSchema#dateTime" },
+  "leaseResult": { "@id": "https://ikigai-rs.dev/ns/layers#leaseResult", "@type": "@id" },
+  "leaseState": "https://ikigai-rs.dev/ns/layers#leaseState",
+  "leaseUntil": { "@id": "https://ikigai-rs.dev/ns/layers#leaseUntil", "@type": "http://www.w3.org/2001/XMLSchema#dateTime" },
   "seq": { "@id": "https://ikigai-rs.dev/ns#seq", "@type": "http://www.w3.org/2001/XMLSchema#integer" },
   "used": { "@id": "http://www.w3.org/ns/prov#used", "@type": "@id" }
 } }"#;

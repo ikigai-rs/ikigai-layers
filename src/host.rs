@@ -14,7 +14,7 @@ use crate::feeds::FeedShare;
 use crate::json::{egress_context, Egress};
 use crate::onboard::apply::{LobbyRate, Onboard};
 use crate::onboard::join::{self, Join};
-use crate::tuplespace::Tuplespace;
+use crate::tuplespace::{Lease, LeaseState, Tuplespace};
 use ikigai_store::budget::EvaluationBudget;
 
 /// One layer's state.
@@ -107,6 +107,60 @@ impl LayerState {
         })?;
         space.expire(&before, seq)?;
         Ok(true)
+    }
+
+    /// Return to the space every tuple whose lease has lapsed by `now`, under the layer's
+    /// write lock (ledger #2119). Each lapse is stored first, with the number of its
+    /// `returned` event, then its tuple is dropped back, then the event is logged; a lapse
+    /// whose tuple could not be dropped back is retried by the next sweep, or the next open.
+    /// Answers whether anything changed.
+    pub(crate) async fn sweep_leases(&self, now: ikigai_core::Time) -> Result<bool, String> {
+        let ModelState::Tuplespace(space) = &self.model else {
+            return Ok(false);
+        };
+        let time = crate::time::xsd_date_time(now);
+        if space
+            .index
+            .read()
+            .expect("tuplespace lock")
+            .due(&time)
+            .is_empty()
+        {
+            return Ok(false);
+        }
+        let _write = self.write.lock().await;
+        let due = space.index.read().expect("tuplespace lock").due(&time);
+        let mut changed = false;
+        for mut receipt in due {
+            if let Some(lease) = receipt
+                .lease
+                .clone()
+                .filter(|l| l.state == LeaseState::Held)
+            {
+                let seq = {
+                    let mut feed = self.feed.lock().expect("feed lock");
+                    feed.settle()?;
+                    feed.next()
+                };
+                let lapsed = Lease {
+                    until: lease.until,
+                    state: LeaseState::Lapsed {
+                        seq,
+                        time: time.clone(),
+                    },
+                };
+                space.store.write_lease(&receipt.id, &lapsed)?;
+                space.record_lease(&receipt.id, lapsed.clone());
+                receipt.lease = Some(lapsed);
+                let event = crate::tuplespace::returned_event(&receipt).expect("a lapse");
+                // Stored, so its number is spent: owed when the feed cannot take it now.
+                let mut feed = self.feed.lock().expect("feed lock");
+                let _ = feed.append(event.clone()).inspect_err(|_| feed.owe(event));
+            }
+            space.return_tuple(&self.def.name, &receipt).await?;
+            changed = true;
+        }
+        Ok(changed)
     }
 
     /// The feed's events after `after`, at most [`feed::MAX_EVENTS`].
@@ -304,6 +358,22 @@ impl Host {
                 .sweep_retention(now)
                 .await
                 .map_err(|e| ConfigError(format!("layer `{name}` retention: {e}")))?
+            {
+                self.notify.bump();
+            }
+        }
+        Ok(())
+    }
+
+    /// Return to the space every tuple whose lease has lapsed by `now` (ledger #2119). Called
+    /// on layer requests; an idle deployment can also schedule this method, so a lapsed
+    /// tuple's `returned` event reaches the feed without waiting for the next request.
+    pub async fn sweep_leases(&self, now: ikigai_core::Time) -> Result<(), ConfigError> {
+        for (name, state) in &self.layers {
+            if state
+                .sweep_leases(now)
+                .await
+                .map_err(|e| ConfigError(format!("layer `{name}` leases: {e}")))?
             {
                 self.notify.bump();
             }
