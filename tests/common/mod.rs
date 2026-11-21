@@ -248,14 +248,14 @@ pub const TASK_CONTEXT: &str = r#"{ "@context": {
 "#;
 
 /// Write the fixture configuration into `dir`: layers `talk` (shared by both
-/// collaborations), `talk-bobby` (bobby's alone) and `notes` (chris's alone), and the
-/// addressed task layer `tasks-bobby` (bobby's alone).
+/// collaborations, kind `talk`), `talk-bobby` (bobby's alone) and `notes` (chris's alone),
+/// both with no kind, and the addressed task layer `tasks-bobby` (bobby's alone, kind `task`).
 pub fn write_config(dir: &Scratch) {
     dir.write("layers/msg.shapes.ttl", SHAPES);
     dir.write("layers/msg.context.jsonld", CONTEXT);
     dir.write(
         "layers/talk.toml",
-        "model = \"channel\"\nlabel = \"Talk\"\nshapes = \"msg.shapes.ttl\"\ncontext = \"msg.context.jsonld\"\nshared = [\"bobby\", \"chris\"]\n",
+        "model = \"channel\"\nlabel = \"Talk\"\nkind = \"talk\"\nshapes = \"msg.shapes.ttl\"\ncontext = \"msg.context.jsonld\"\nshared = [\"bobby\", \"chris\"]\n",
     );
     dir.write(
         "layers/talk-bobby.toml",
@@ -269,7 +269,7 @@ pub fn write_config(dir: &Scratch) {
     dir.write("layers/tasks.context.jsonld", TASK_CONTEXT);
     dir.write(
         "layers/tasks-bobby.toml",
-        "model = \"tuplespace\"\nlabel = \"Tasks for Bobby\"\nshapes = \"tasks.shapes.ttl\"\ncontext = \"tasks.context.jsonld\"\naddressed = true\n",
+        "model = \"tuplespace\"\nlabel = \"Tasks for Bobby\"\nkind = \"task\"\nshapes = \"tasks.shapes.ttl\"\ncontext = \"tasks.context.jsonld\"\naddressed = true\n",
     );
     dir.write("participants.ttl", &participants_ttl());
     dir.write("collabs/bobby.toml", BOBBY_TOML);

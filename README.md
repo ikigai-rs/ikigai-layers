@@ -98,6 +98,7 @@ A layer:
 ```toml
 # layers/talk.toml   ->  urn:layer:talk
 model   = "channel"
+kind    = "talk"                 # optional: what the layer is for (see below)
 shapes  = "msg.shapes.ttl"       # closed SHACL shapes: what may be written
 context = "msg.context.jsonld"   # the egress allowlist
 entry_max = "16KiB"              # optional; the default
@@ -109,6 +110,7 @@ A task layer:
 ```toml
 # layers/tasks-bobby.toml   ->  urn:layer:tasks-bobby
 model     = "tuplespace"
+kind      = "task"
 shapes    = "tasks.shapes.ttl"
 context   = "tasks.context.jsonld"
 addressed = true                 # a tuple with ik:addressedTo is taken only by an addressee
@@ -116,6 +118,23 @@ match     = false                # optional; the default: `rd match=` is refused
 # retain  = "30d"                # optional: expire taken receipts after 30 days
 # lease_max = "1h"               # optional: allow `take lease=` up to an hour
 ```
+
+**`kind` says what a layer is for**, so that a reader can group layers, for example into a
+UI's tabs (ledger #3882). It is optional: a layer without one has no kind. Its value is the
+`skos:notation` of one concept of ikigai-core's scheme `ik:LayerKinds`, and the layer's
+definition (`Source urn:layer:{layer}`) publishes the concept as an IRI,
+`<urn:layer:talk> ik:layerKind ik:TalkKind`, and its key as `"kind"` in the JSON face. A
+kind is declared, never inferred from the model, the shapes or the flags. Any other value
+stops the host at start, with a sentence naming the layer file, the value and the keys it
+accepts.
+
+| `kind` | Concept | What it is for |
+|---|---|---|
+| `talk` | `ik:TalkKind` | conversation |
+| `task` | `ik:TaskKind` | addressed work |
+| `feed` | `ik:FeedKind` | announcements |
+| `inquiry` | `ik:InquiryKind` | contact inquiries |
+| `join` | `ik:JoinKind` | join requests |
 
 `addressed`, `match`, `retain` and `lease_max` are a tuplespace's options and `about` a channel's; naming one on
 the other model is refused, like a misspelled key.
@@ -722,7 +741,7 @@ front, MCP and the action manifold all offer the same ones.
 | `receipt:{id}` | `application/ld+json` | the receipt, a graph |
 | `tuples` Source listing | `application/json` | `{"layer", "tuples": [{"seq", "created", "subject", "dropper"}]}`, the text face's lines as objects; with `state=taken`, `{"layer", "receipts": [{"seq", "time", "subject", "taker", "receipt"}]}` |
 | `say`, `tuples` Sink (out) | `application/json` | `{"@id": "<the IRI the write named>"}` |
-| `urn:layer:{layer}` | `application/json` | `{"layer", "label", "model", "entry_max": bytes, "types": [...], "feed": bool, "public": bool}`, with `types` as compact terms (`"Layer"`, `"Feed"`); a feed's names no collaboration |
+| `urn:layer:{layer}` | `application/json` | `{"layer", "label", "model", "kind": key or null, "entry_max": bytes, "types": [...], "feed": bool, "public": bool}`, with `types` as compact terms (`"Layer"`, `"Feed"`); a feed's names no collaboration |
 | `urn:layer:{layer}:scheme` (a feed) | `application/json` | `{"scheme": "<IRI>", "label", "concepts": [{"@id", "prefLabel", "notation", "broader": ["<IRI>"]}]}`, concepts by notation |
 | `urn:layer:{layer}:graph` (a feed) | `application/ld+json` | the graph under the host's feed context (`src/feeds/graph.context.jsonld`), not the layer's egress context |
 | `feed`, `urn:layers:feed`, `urn:layers:me`, `urn:collab:{name}` | `application/json` | as before |

@@ -569,6 +569,7 @@ impl LayerEndpoint {
                 "layer": def.name,
                 "label": def.label.as_deref().unwrap_or(&def.name),
                 "model": def.model.as_str(),
+                "kind": def.kind.map(|k| k.notation()),
                 "entry_max": def.entry_max,
                 "types": types,
                 "feed": def.is_feed(),
@@ -596,6 +597,9 @@ impl LayerEndpoint {
             node(&rdf::layers_entry_max()),
             Literal::new_typed_literal(def.entry_max.to_string(), node(rdf::XSD_INTEGER)),
         ));
+        if let Some(kind) = def.kind {
+            triples.push(kind.triple(&base));
+        }
         if def.is_feed() {
             triples.push(Triple::new(
                 s.clone(),

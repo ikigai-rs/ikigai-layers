@@ -82,6 +82,10 @@ presentation has not been evaluated here.
   joined identity's read fails; and one starting ``ikigai-layers: feed `<layer>`:`` when
   warming a feed's shared copy after a publish fails (the entry stands, and the first reader
   computes the answer).
+- **Definitions refused at start** (`src/config.rs`): a layer whose `kind` is not one of the
+  scheme's keys stops the host with a sentence naming the file, the value and every key it
+  accepts: ``<dir>/layers/notes.toml: unknown kind `chat`: a layer's kind is one of talk,
+  task, feed, inquiry, join``.
 - **The `ikigai-layers` binary** (`src/bin/ikigai-layers.rs`): usage text; `grants` prints one
   line per grant, client, unenrolled participant and idle certificate, and one
   ``count-reader <grant>: gains urn:cap:layers:read:join-count, …`` line per participant
