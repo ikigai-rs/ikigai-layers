@@ -448,7 +448,7 @@ fn the_definition_json_is_exactly_its_shape() {
     assert_eq!(
         got,
         serde_json::json!({
-            "layer": "releases", "label": "Releases", "model": "channel",
+            "layer": "releases", "label": "Releases", "model": "channel", "kind": null,
             "types": ["Layer", "Feed"], "feed": true, "public": true, "entry_max": 16384,
         })
     );
@@ -463,7 +463,7 @@ fn the_definition_json_is_exactly_its_shape() {
     assert_eq!(
         got,
         serde_json::json!({
-            "layer": "talk", "label": "Talk", "model": "channel",
+            "layer": "talk", "label": "Talk", "model": "channel", "kind": "talk",
             "types": ["Layer"], "feed": false, "public": false, "entry_max": 16384,
         })
     );

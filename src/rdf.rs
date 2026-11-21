@@ -128,6 +128,11 @@ pub fn ik_layer_model() -> String {
     format!("{IK}layerModel")
 }
 
+/// `ik:layerKind`: a layer to the concept of `ik:LayerKinds` that says what it is for.
+pub fn ik_layer_kind() -> String {
+    format!("{IK}layerKind")
+}
+
 /// `layers:entryMax`: the maximum submitted content size in bytes.
 pub fn layers_entry_max() -> String {
     format!("{LAYERS}entryMax")

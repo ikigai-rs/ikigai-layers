@@ -107,6 +107,20 @@ fn suite(
         .live("collab")
         .live("collab-participants")
         .live("layers-me");
+    // ⚠ A BRIDGE, to remove at the next ikigai-vocab release. The two fixture layers that
+    // declare a kind publish `ik:layerKind` (ledger #3882), merged in ikigai-core
+    // (ikigai-rs/ikigai-core#328, ledger #3881) but defined by no released ikigai-vocab yet
+    // (0.3.5 does not), and VOCABULARY reads ikigai-vocab as the only oracle for `ik:`. So
+    // VOCABULARY is waived on those two definitions alone; every other face, `notes`' and
+    // `talk-bobby`'s definitions included, is still held to it. Delete these waivers when the
+    // `ikigai-vocab` dev-dependency moves to the release that defines the kinds.
+    for id in ["layer-talk-definition", "layer-tasks-bobby-definition"] {
+        suite = suite.opt_out_check(
+            id,
+            Check::Vocabulary,
+            "ik:layerKind is merged in ikigai-core#328 and not yet in a released ikigai-vocab",
+        );
+    }
     for layer in LAYERS {
         let id = |action: &str| format!("layer-{layer}-{action}");
         let entry = &entry_ids

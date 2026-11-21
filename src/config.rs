@@ -97,6 +97,98 @@ impl Model {
     }
 }
 
+/// A layer's KIND: what it is for, one concept of ikigai-core's scheme `ik:LayerKinds`
+/// (ledger #3881), so that a reader can group layers, for example into a UI's tabs. A
+/// definition names it by the concept's `skos:notation` (`kind = "talk"`), and the
+/// layer's definition publishes it as `ik:layerKind <concept>`. Declared, never inferred
+/// from the model, the shapes or the flags: two layers of one model may serve different
+/// purposes.
+///
+/// ```
+/// use ikigai_layers::config::LayerKind;
+/// use ikigai_layers::rdf;
+///
+/// let kind = LayerKind::parse("task").unwrap();
+/// assert_eq!(kind.notation(), "task");
+/// assert_eq!(kind.iri(), "https://ikigai-rs.dev/ns#TaskKind");
+///
+/// // The triple a layer's definition carries: the concept is an IRI, never a literal.
+/// let turtle = rdf::to_turtle(&[kind.triple("urn:layer:tasks-bobby")]);
+/// assert_eq!(turtle.trim().lines().last(), Some("<urn:layer:tasks-bobby> ik:layerKind ik:TaskKind ."));
+///
+/// assert!(LayerKind::parse("tasks").unwrap_err().contains("talk, task, feed, inquiry, join"));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LayerKind {
+    /// `talk` (`ik:TalkKind`): conversation.
+    Talk,
+    /// `task` (`ik:TaskKind`): work addressed to someone.
+    Task,
+    /// `feed` (`ik:FeedKind`): announcements.
+    Feed,
+    /// `inquiry` (`ik:InquiryKind`): inquiries sent through a contact form.
+    Inquiry,
+    /// `join` (`ik:JoinKind`): requests to join.
+    Join,
+}
+
+impl LayerKind {
+    /// Every kind, in the order ikigai-core's `ik:LayerKindOrder` lists them.
+    pub const ALL: [LayerKind; 5] = [
+        LayerKind::Talk,
+        LayerKind::Task,
+        LayerKind::Feed,
+        LayerKind::Inquiry,
+        LayerKind::Join,
+    ];
+
+    /// The key a definition names it by: the concept's `skos:notation`.
+    pub fn notation(self) -> &'static str {
+        match self {
+            LayerKind::Talk => "talk",
+            LayerKind::Task => "task",
+            LayerKind::Feed => "feed",
+            LayerKind::Inquiry => "inquiry",
+            LayerKind::Join => "join",
+        }
+    }
+
+    /// The concept's IRI in `ik:LayerKinds`.
+    pub fn iri(self) -> String {
+        let local = match self {
+            LayerKind::Talk => "TalkKind",
+            LayerKind::Task => "TaskKind",
+            LayerKind::Feed => "FeedKind",
+            LayerKind::Inquiry => "InquiryKind",
+            LayerKind::Join => "JoinKind",
+        };
+        format!("{}{local}", crate::rdf::IK)
+    }
+
+    /// `<layer> ik:layerKind <concept>`, the triple a layer's definition carries.
+    pub fn triple(self, layer: &str) -> oxrdf::Triple {
+        oxrdf::Triple::new(
+            oxrdf::NamedNode::new_unchecked(layer),
+            oxrdf::NamedNode::new_unchecked(crate::rdf::ik_layer_kind()),
+            oxrdf::NamedNode::new_unchecked(self.iri()),
+        )
+    }
+
+    /// The kind a definition's key names, or a refusal that names the keys it accepts.
+    pub fn parse(key: &str) -> Result<LayerKind, String> {
+        LayerKind::ALL
+            .into_iter()
+            .find(|kind| kind.notation() == key)
+            .ok_or_else(|| {
+                let keys: Vec<&str> = LayerKind::ALL.iter().map(|k| k.notation()).collect();
+                format!(
+                    "unknown kind `{key}`: a layer's kind is one of {}",
+                    keys.join(", ")
+                )
+            })
+    }
+}
+
 /// One layer, as its definition file says.
 #[derive(Clone, Debug)]
 pub struct LayerDef {
@@ -106,6 +198,8 @@ pub struct LayerDef {
     pub model: Model,
     /// A human label, if the definition gives one.
     pub label: Option<String>,
+    /// What the layer is for (`kind = "<key>"`, ledger #3882), if the definition says.
+    pub kind: Option<LayerKind>,
     /// The closed SHACL shapes every write must conform to, as Turtle.
     pub shapes: String,
     /// The classes the shapes target (`sh:targetClass`): an entry must be typed with one,
@@ -212,6 +306,7 @@ struct LayerToml {
     shapes: String,
     context: String,
     label: Option<String>,
+    kind: Option<String>,
     entry_max: Option<toml::Value>,
     retain: Option<String>,
     lease_max: Option<String>,
@@ -283,6 +378,12 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
     let parsed: LayerToml =
         toml::from_str(&read(path)?).map_err(|e| ConfigError(format!("{at}: {e}")))?;
     let model = Model::parse(&parsed.model).map_err(|e| ConfigError(format!("{at}: {e}")))?;
+    let kind = parsed
+        .kind
+        .as_deref()
+        .map(LayerKind::parse)
+        .transpose()
+        .map_err(|e| ConfigError(format!("{at}: {e}")))?;
     // An option of another model is a definition saying something it does not mean, so it
     // is refused like a typo'd key rather than ignored.
     match model {
@@ -459,6 +560,7 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         name,
         model,
         label: parsed.label,
+        kind,
         shapes,
         target_classes,
         context,

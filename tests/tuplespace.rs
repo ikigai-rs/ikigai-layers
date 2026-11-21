@@ -1035,3 +1035,60 @@ fn a_tuple_that_does_not_open_refuses_a_match_naming_it() {
         "{refused:?}"
     );
 }
+
+/// A tuplespace that declares `kind = "task"` publishes it as `ik:layerKind ik:TaskKind`, an
+/// IRI and not a literal; one with no `kind` publishes none (ledger #3882).
+#[test]
+fn a_tuplespace_publishes_its_kind_and_one_without_publishes_none() {
+    let f = fixture();
+    let kind = format!("{IK}layerKind");
+    let def = source(&f.kernel, "urn:layer:tasks-bobby", &[], &Capability::root());
+    let kinds: Vec<String> = triples(&def)
+        .iter()
+        .filter(|t| t.predicate.as_str() == kind)
+        .map(|t| t.object.to_string())
+        .collect();
+    assert_eq!(kinds, [format!("<{IK}TaskKind>")], "{def}");
+
+    let config = Scratch::new("tuplespace-no-kind");
+    write_config(&config);
+    config.write(
+        "layers/tasks-bobby.toml",
+        "model = \"tuplespace\"\nshapes = \"tasks.shapes.ttl\"\ncontext = \"tasks.context.jsonld\"\naddressed = true\n",
+    );
+    let loaded = ikigai_layers::Config::load(config.path()).unwrap();
+    assert_eq!(loaded.layers["tasks-bobby"].kind, None);
+    let state = Scratch::new("tuplespace-no-kind-state");
+    let host = Arc::new(
+        ikigai_layers::Host::open(config.path(), state.path(), &common::key(config.path()))
+            .unwrap(),
+    );
+    let kernel = kernel_over(&host);
+    let none = source(&kernel, "urn:layer:tasks-bobby", &[], &Capability::root());
+    assert!(
+        triples(&none).iter().all(|t| t.predicate.as_str() != kind),
+        "{none}"
+    );
+}
+
+/// A tuplespace naming a kind outside `ik:LayerKinds` refuses the host at start, in a
+/// sentence naming the file, the value and the keys it accepts.
+#[test]
+fn a_tuplespace_with_an_unknown_kind_refuses_start() {
+    let config = Scratch::new("tuplespace-unknown-kind");
+    write_config(&config);
+    config.write(
+        "layers/tasks-bobby.toml",
+        "model = \"tuplespace\"\nkind = \"tasks\"\nshapes = \"tasks.shapes.ttl\"\ncontext = \"tasks.context.jsonld\"\naddressed = true\n",
+    );
+    let state = Scratch::new("tuplespace-unknown-kind-state");
+    let Err(e) =
+        ikigai_layers::Host::open(config.path(), state.path(), &common::key(config.path()))
+    else {
+        panic!("a layer with an unknown kind opened a host");
+    };
+    let e = e.to_string();
+    assert!(e.contains("tasks-bobby.toml"), "{e}");
+    assert!(e.contains("`tasks`"), "{e}");
+    assert!(e.contains("talk, task, feed, inquiry, join"), "{e}");
+}

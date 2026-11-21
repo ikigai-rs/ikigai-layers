@@ -498,3 +498,61 @@ fn the_definition_shapes_and_context_are_served() {
     let context = source(&f.kernel, "urn:layer:talk:context", &[], &reader);
     assert!(context.contains("\"body\""));
 }
+
+/// A channel that declares `kind = "talk"` publishes it as `ik:layerKind ik:TalkKind`, an IRI
+/// and not a literal; a channel with no `kind` publishes none (ledger #3882).
+#[test]
+fn a_channel_publishes_its_kind_and_one_without_publishes_none() {
+    let f = fixture();
+    let reader = member(&bobby());
+    let kind = format!("{IK}layerKind");
+    let def = source(&f.kernel, "urn:layer:talk", &[], &reader);
+    let kinds: Vec<String> = triples(&def)
+        .iter()
+        .filter(|t| t.predicate.as_str() == kind)
+        .map(|t| t.object.to_string())
+        .collect();
+    assert_eq!(kinds, [format!("<{IK}TalkKind>")], "{def}");
+    let json = source(
+        &f.kernel,
+        "urn:layer:talk",
+        &[("as", "application/json")],
+        &reader,
+    );
+    assert!(json.contains("\"kind\":\"talk\""), "{json}");
+
+    let none = source(&f.kernel, "urn:layer:talk-bobby", &[], &reader);
+    assert!(
+        triples(&none).iter().all(|t| t.predicate.as_str() != kind),
+        "{none}"
+    );
+    let json = source(
+        &f.kernel,
+        "urn:layer:talk-bobby",
+        &[("as", "application/json")],
+        &reader,
+    );
+    assert!(json.contains("\"kind\":null"), "{json}");
+}
+
+/// A channel naming a kind outside `ik:LayerKinds` refuses the host at start, in a sentence
+/// naming the file, the value and the keys it accepts.
+#[test]
+fn a_channel_with_an_unknown_kind_refuses_start() {
+    let config = Scratch::new("unknown-kind");
+    write_config(&config);
+    config.write(
+        "layers/notes.toml",
+        "model = \"channel\"\nkind = \"chat\"\nshapes = \"msg.shapes.ttl\"\ncontext = \"msg.context.jsonld\"\n",
+    );
+    let state = Scratch::new("unknown-kind-state");
+    let Err(e) =
+        ikigai_layers::Host::open(config.path(), state.path(), &common::key(config.path()))
+    else {
+        panic!("a layer with an unknown kind opened a host");
+    };
+    let e = e.to_string();
+    assert!(e.contains("notes.toml"), "{e}");
+    assert!(e.contains("`chat`"), "{e}");
+    assert!(e.contains("talk, task, feed, inquiry, join"), "{e}");
+}
