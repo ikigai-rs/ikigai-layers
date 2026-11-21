@@ -8,7 +8,7 @@
 //! urn:layer:{layer}:feed           Source  layer-{layer}-feed        urn:cap:layer:feed:{layer}
 //! urn:layer:{layer}:say            Sink    layer-{layer}-say         urn:cap:layer:say:{layer}
 //! urn:layer:{layer}:entries        Source  layer-{layer}-entries     urn:cap:layer:read:{layer}
-//! urn:layer:{layer}:entries-metadata Source layer-{layer}-entries-metadata urn:cap:layer:read-metadata:{layer}
+//! urn:layer:{layer}:entry-metadata Source layer-{layer}-entry-metadata urn:cap:layer:read-metadata:{layer}
 //! urn:layer:{layer}:entry:{id}     Source  layer-{layer}-entry       urn:cap:layer:read:{layer}
 //! urn:layer:{layer}:graph:{slug}   Source  layer-{layer}-graph       urn:cap:layer:read:{layer}
 //! urn:layer:{layer}:latest         Source  layer-{layer}-latest      urn:cap:layer:read:{layer}
@@ -27,7 +27,7 @@
 //! urn:collab:{name}:participants   Source  collab-participants       urn:cap:collab:read:* (+ exact per manifest)
 //! ```
 //!
-//! A channel layer binds `say`, `entries`, `entries-metadata`, `entry`, `graph` and `latest`; a tuplespace layer
+//! A channel layer binds `say`, `entries`, `entry-metadata`, `entry`, `graph` and `latest`; a tuplespace layer
 //! binds `tuples` and `receipt`; every layer binds its definition, shapes, context and feed.
 //! Each declares its JSON face in its `as` argument ([`crate::json`]): `application/ld+json`
 //! for a graph, `application/json` for a list or a write's answer.
@@ -112,7 +112,7 @@ pub const CAP_FEED_FAMILY: &str = "urn:cap:layer:feed:*";
 /// The family `urn:collab:{name}` declares (and then checks exactly, per manifest).
 pub const CAP_COLLAB_FAMILY: &str = "urn:cap:collab:read:*";
 
-/// The most entries one `entries`, `entries-metadata` or `graph:{slug}` read answers by default, and the most
+/// The most entries one `entries`, `entry-metadata` or `graph:{slug}` read answers by default, and the most
 /// it may ask for. A reader pages with `after=` (the last `ik:seq` it received).
 pub const DEFAULT_LIMIT: u64 = 100;
 /// See [`DEFAULT_LIMIT`]: a larger `limit=` is refused, never quietly lowered.
@@ -335,7 +335,7 @@ enum Action {
     Feed,
     Say,
     Entries,
-    EntriesMetadata,
+    EntryMetadata,
     Entry,
     Graph,
     Latest,
@@ -360,7 +360,7 @@ impl Action {
             Model::Channel => &[
                 Action::Say,
                 Action::Entries,
-                Action::EntriesMetadata,
+                Action::EntryMetadata,
                 Action::Entry,
                 Action::Graph,
                 Action::Latest,
@@ -389,7 +389,7 @@ impl Action {
             Action::Feed => "feed",
             Action::Say => "say",
             Action::Entries => "entries",
-            Action::EntriesMetadata => "entries-metadata",
+            Action::EntryMetadata => "entry-metadata",
             Action::Entry => "entry",
             Action::Graph => "graph",
             Action::Latest => "latest",
@@ -427,7 +427,7 @@ impl Action {
         match self {
             Action::Feed => "feed",
             Action::Say => "say",
-            Action::EntriesMetadata => "read-metadata",
+            Action::EntryMetadata => "read-metadata",
             _ => "read",
         }
     }
@@ -1329,7 +1329,7 @@ impl LayerEndpoint {
     }
 
     /// Project only the documented metadata predicates from the in-memory index.
-    fn entries_metadata(&self, inv: &Invocation<'_>) -> Result<Representation> {
+    fn entry_metadata(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let as_ld = face(inv, &GRAPH_FACES)? == JSON_LD;
         let (after, limit) = self.page(inv)?;
         let seq = node(&rdf::ik_seq());
@@ -2349,7 +2349,7 @@ impl Endpoint for LayerEndpoint {
             Action::Feed => self.read_feed(inv).await,
             Action::Say => self.say(inv).await,
             Action::Entries => self.entries(inv).await,
-            Action::EntriesMetadata => self.entries_metadata(inv),
+            Action::EntryMetadata => self.entry_metadata(inv),
             Action::Entry => self.entry(inv).await,
             Action::Graph => self.graph(inv).await,
             Action::Latest => self.latest(inv).await,
@@ -2534,7 +2534,7 @@ impl Endpoint for LayerEndpoint {
                 .input(as_spec(&GRAPH_FACES))
                 .output(TURTLE)
                 .output(JSON_LD),
-            Action::EntriesMetadata => base
+            Action::EntryMetadata => base
                 .title(format!("Layer {layer}: entry metadata"))
                 .summary(format!(
                     "Layer `{layer}`'s entry IRIs, sequence numbers, authors, creation times +                     and reply links, in feed order"

@@ -7,7 +7,7 @@
 //!   everything the context does not define is removed, and what is left is compacted with
 //!   that context. ikigai-jsonld's `urn:jsonld:prune` does it, in a kernel this module owns
 //!   and binds nowhere else (see [`Egress`]): no participant can call the pruner itself.
-//! - **Entry metadata** (`entries-metadata`) answers with expanded JSON-LD in an `@graph`
+//! - **Entry metadata** (`entry-metadata`) answers with expanded JSON-LD in an `@graph`
 //!   array using the endpoint's fixed predicates, independent of the layer's egress context.
 //! - **A list** (`rd`'s pending tuples and receipts) and **a write's answer** (`say`, `out`)
 //!   answer `as=application/json` with plain JSON.

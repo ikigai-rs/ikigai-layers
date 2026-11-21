@@ -30,7 +30,7 @@
 //! urn:layer:{layer}:feed            Source  events after= (wait= ≤ 60 s)      feed:{layer}
 //! urn:layer:{layer}:say             Sink    append one entry, answer its IRI  say:{layer}
 //! urn:layer:{layer}:entries         Source  entries after= from= type=        read:{layer}
-//! urn:layer:{layer}:entries-metadata Source  entry metadata after= limit=      read-metadata:{layer}
+//! urn:layer:{layer}:entry-metadata Source  entry metadata after= limit=      read-metadata:{layer}
 //! urn:layer:{layer}:entry:{id}      Source  one entry (never changes)         read:{layer}
 //! urn:layer:{layer}:graph:{slug}    Source  one author's entries              read:{layer}
 //! urn:layer:{layer}:latest          Source  newest entry about= not superseded read:{layer}

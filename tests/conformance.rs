@@ -143,7 +143,7 @@ fn suite(
             .pure(id("context"))
             .pure(id("entry"))
             .cacheable(id("entries"))
-            .cacheable(id("entries-metadata"))
+            .cacheable(id("entry-metadata"))
             .cacheable(id("graph"))
             .cacheable(id("latest"))
             .live(id("feed"));
@@ -271,7 +271,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "context",
             "definition",
             "entries",
-            "entries-metadata",
+            "entry-metadata",
             "entry",
             "feed",
             "graph",

@@ -39,7 +39,7 @@ fn a_manifest_can_grant_entry_metadata_by_itself() {
         ]
     );
     let tools = manifold(&f.kernel, &Capability::scoped(held));
-    assert!(tools.contains("layer-talk-entries-metadata__source"));
+    assert!(tools.contains("layer-talk-entry-metadata__source"));
     assert!(!tools.contains("layer-talk-entries__source"));
 }
 

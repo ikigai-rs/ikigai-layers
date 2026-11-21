@@ -562,7 +562,7 @@ fn metadata_reader_gets_entry_metadata_without_content() {
     use ikigai_layers::rdf;
 
     let mut f = fixture();
-    let resource = "urn:layer:talk:entries-metadata";
+    let resource = "urn:layer:talk:entry-metadata";
     let reader = cap(&bobby(), &["urn:cap:layer:read-metadata:talk"]);
     assert!(triples(&source(&f.kernel, resource, &[], &reader)).is_empty());
 
