@@ -21,7 +21,7 @@
     [ sh:path onb:request ; sh:maxCount 1 ; sh:nodeKind sh:IRI ;
       sh:pattern "^urn:layer:[a-z0-9-]{1,24}:entry:[0-9a-z]{23}$" ] ,
     [ sh:path onb:layerGrant ; sh:maxCount 64 ; sh:nodeKind sh:IRI ;
-      sh:pattern "^urn:cap:layer:(read|feed|say|out|take):[a-z0-9-]{1,24}$" ] ,
+      sh:pattern "^urn:cap:layer:(read|read-metadata|feed|say|out|take):[a-z0-9-]{1,24}$" ] ,
     [ sh:path onb:gonkGrant ; sh:maxCount 16 ; sh:datatype xsd:string ; sh:maxLength 200 ] ,
     [ sh:path onb:router ; sh:maxCount 16 ; sh:datatype xsd:string ; sh:maxLength 200 ] ,
     [ sh:path onb:gonkDoor ; sh:maxCount 1 ; sh:datatype xsd:string ; sh:maxLength 255 ] ,

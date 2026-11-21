@@ -18,9 +18,10 @@
 //! or a typed error), and an event channel per resource owner carries invalidations.
 //!
 //! Every answer a participant reads also has a JSON face ([`json`]), so a participant with
-//! only an HTTP client and a JSON parser can take part: a graph as the layer's egress context,
-//! pruned and compacted, always one top-level `@graph` array (`as=application/ld+json`), and a
-//! list or a write's answer as plain JSON (`as=application/json`).
+//! only an HTTP client and a JSON parser can take part. Entry and tuple graphs are pruned and
+//! compacted with the layer's egress context. Entry metadata uses expanded JSON-LD. Both use
+//! a top-level `@graph` array (`as=application/ld+json`). Lists and write answers use plain
+//! JSON (`as=application/json`).
 //!
 //! ```text
 //! urn:layer:{layer}                 Source  the definition (ik:Layer)         read:{layer}
@@ -29,6 +30,7 @@
 //! urn:layer:{layer}:feed            Source  events after= (wait= ≤ 60 s)      feed:{layer}
 //! urn:layer:{layer}:say             Sink    append one entry, answer its IRI  say:{layer}
 //! urn:layer:{layer}:entries         Source  entries after= from= type=        read:{layer}
+//! urn:layer:{layer}:entries-metadata Source  entry metadata after= limit=      read-metadata:{layer}
 //! urn:layer:{layer}:entry:{id}      Source  one entry (never changes)         read:{layer}
 //! urn:layer:{layer}:graph:{slug}    Source  one author's entries              read:{layer}
 //! urn:layer:{layer}:latest          Source  newest entry about= not superseded read:{layer}

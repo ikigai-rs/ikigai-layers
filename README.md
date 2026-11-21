@@ -47,6 +47,7 @@ Layers are inspired by Daniel Suarez's novel *Daemon*
 | `urn:layer:{layer}:context` | Source | the egress context (JSON-LD, no `@vocab`) | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:say` | Sink | append one entry; answers its IRI | `urn:cap:layer:say:{layer}` |
 | `urn:layer:{layer}:entries` | Source | entries `after=` a sequence, `from=` a participant, `type=` a class | `urn:cap:layer:read:{layer}` |
+| `urn:layer:{layer}:entries-metadata` | Source | entry IRIs, sequence numbers, authors, creation times and reply links | `urn:cap:layer:read-metadata:{layer}` |
 | `urn:layer:{layer}:entry:{id}` | Source | one entry (never changes) | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:graph:{slug}` | Source | one author's entries | `urn:cap:layer:read:{layer}` |
 | `urn:layer:{layer}:latest` | Source | the newest entry `about=` an IRI that nothing supersedes | `urn:cap:layer:read:{layer}` |
@@ -63,7 +64,7 @@ Layers are inspired by Daniel Suarez's novel *Daemon*
 | `urn:collab:{name}` | Source | a collaboration's manifest | `urn:cap:collab:read:{name}` |
 | `urn:collab:{name}:participants` | Source | who takes part in that collaboration: each participant its manifest grants anything, as the participants graph describes it | `urn:cap:collab:read:{name}` |
 
-A channel layer binds `say`, `entries`, `entry`, `graph` and `latest`; a tuplespace layer
+A channel layer binds `say`, `entries`, `entries-metadata`, `entry`, `graph` and `latest`; a tuplespace layer
 binds `tuples` and `receipt`; every layer binds its definition, shapes, context and feed.
 Every answer a participant reads also comes as JSON: see [JSON faces](#json-faces).
 
@@ -77,6 +78,18 @@ This version builds two access models: **channel** (append-only entries, one gra
 author) and **tuplespace** (offers taken atomically, reports addressed to their offerer,
 with receipts). The **graph** model (each author replaces their own graph) is not built; a
 definition naming it is refused, never served as something it is not.
+
+### Entry metadata for views
+
+Grant `read-metadata` on a channel layer in a collaboration manifest to let a participant
+list or count its entries. Read `urn:layer:{layer}:entries-metadata` in pages with `after=`
+(the last `ik:seq` seen, initially 0) and `limit=` (default 100, maximum 1000). Each entry IRI
+is a subject with `ik:seq`, `prov:wasAttributedTo`, `dcterms:created` and any `ik:inReplyTo`
+IRI links. The graph uses only these predicates. An empty page ends a scan.
+
+A view can keep this metadata for navigation and counts. When a viewer opens an entry,
+read its IRI directly from the layer door under the viewer's `read` grant. Keep entry text
+out of the view's cache and saved data. The door checks `read-metadata` and `read` independently.
 
 ## Configuration
 
@@ -736,6 +749,7 @@ front, MCP and the action manifold all offer the same ones.
 | answer | `as=` | body |
 | --- | --- | --- |
 | `entries`, `entry:{id}`, `graph:{slug}`, `latest` | `application/ld+json` | the entries, a graph (below) |
+| `entries-metadata` | `application/ld+json` | an expanded `@graph` array in sequence order, with full predicate IRIs and typed values |
 | `tuples` Source with `tuple=` or listing, `state=taken` too | `application/ld+json` | the tuples or receipts, a graph |
 | `tuples` Delete (take) | `application/ld+json` | the tuple as taken, a graph |
 | `receipt:{id}` | `application/ld+json` | the receipt, a graph |
