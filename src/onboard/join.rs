@@ -352,9 +352,12 @@ pub(crate) fn read_deny(config_dir: &Path) -> (BTreeSet<String>, Option<String>)
 
 /// The sentence a denied certificate is refused with.
 pub(crate) fn denied(fingerprint: &str) -> Error {
-    Error::Denied(format!(
-        "certificate {fingerprint} is on this host's deny list, so it may not join or connect"
-    ))
+    Error::Denied(
+        format!(
+            "certificate {fingerprint} is on this host's deny list, so it may not join or connect"
+        )
+        .into(),
+    )
 }
 
 /// Check a request beyond its shapes: the poster holds the certificate it states (the name the
@@ -372,10 +375,13 @@ pub(crate) fn check_request(
         .ok()
         .and_then(|p| p.fingerprint().map(str::to_string))
         .ok_or_else(|| {
-            Error::Denied(format!(
-                "a join request is said by the certificate it joins, named by its fingerprint \
+            Error::Denied(
+                format!(
+                    "a join request is said by the certificate it joins, named by its fingerprint \
                  ({HOST_CLIENT_PREFIX}{{host}}:client:<fingerprint>); {author} carries none"
-            ))
+                )
+                .into(),
+            )
         })?;
     let stated = one_literal(triples, FINGERPRINT)
         .ok_or_else(|| invalid("a join request states exactly one onb:fingerprint"))?;
@@ -387,10 +393,13 @@ pub(crate) fn check_request(
         }
     }
     if stated != poster {
-        return Err(Error::Denied(format!(
-            "onb:fingerprint {stated} is not the certificate that said it ({poster}): a \
+        return Err(Error::Denied(
+            format!(
+                "onb:fingerprint {stated} is not the certificate that said it ({poster}): a \
              certificate asks to join for itself only"
-        )));
+            )
+            .into(),
+        ));
     }
     let pem = one_literal(triples, CERTIFICATE)
         .ok_or_else(|| invalid("a join request carries exactly one onb:certificate"))?;
@@ -421,10 +430,13 @@ pub(crate) fn check_request(
             .and_then(|s| s.def.feed.as_ref())
             .is_some_and(|f| f.public);
         if !public {
-            return Err(Error::Denied(format!(
+            return Err(Error::Denied(
+                format!(
                 "layer `{name}` is not a public layer of this host: a join grants read and feed \
                  on public layers only, so nothing in this request was granted"
-            )));
+            )
+                .into(),
+            ));
         }
     }
     Ok(names.into_iter().collect())
@@ -677,10 +689,13 @@ impl Join {
             let idle = self.config.idle_days;
             self.lapse_one(&mut state, fingerprint)
                 .map_err(|e| Error::Endpoint(format!("lapsing certificate {fingerprint}: {e}")))?;
-            return Err(Error::Denied(format!(
+            return Err(Error::Denied(
+                format!(
                 "certificate {fingerprint} read nothing here for {idle} days, so it has lapsed \
                  and holds nothing now: it may join again"
-            )));
+            )
+                .into(),
+            ));
         }
         let today = day_of(now.as_millis());
         if today > identity.last_read {
@@ -783,10 +798,13 @@ impl Join {
         self.reconcile(&mut state, now.as_millis())
             .map_err(Error::Endpoint)?;
         if state.identities.contains_key(fingerprint) {
-            return Err(Error::Denied(format!(
+            return Err(Error::Denied(
+                format!(
                 "certificate {fingerprint} has already joined this host, and a joined identity \
                  only reads"
-            )));
+            )
+                .into(),
+            ));
         }
         if state.identities.len() >= self.config.max_joined {
             return Err(Error::Unavailable(format!(

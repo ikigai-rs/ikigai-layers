@@ -334,10 +334,13 @@ impl Channel {
             match mine {
                 Some(true) => {}
                 Some(false) => {
-                    return Err(Error::Denied(format!(
-                        "{target} is another participant's entry: an entry supersedes only \
+                    return Err(Error::Denied(
+                        format!(
+                            "{target} is another participant's entry: an entry supersedes only \
                          its own author's"
-                    )))
+                        )
+                        .into(),
+                    ))
                 }
                 None => {
                     return Err(invalid(format!(
