@@ -21,14 +21,16 @@ in examples are `alice` and `bob`; the person running the host is "the operator"
 
 ## Summary
 
-- **Every file the host reads becomes one keyed resource**, named in the singular, under
-  `urn:layers:`: `urn:layers:layer:{layer}`, `urn:layers:shapes:{name}`,
-  `urn:layers:context:{name}`, `urn:layers:scheme:{name}`, `urn:layers:collab:{collab}`,
-  `urn:layers:participant:{name}` and `urn:layers:enrollment:{fingerprint}`. Each has a set
-  that lists it (`urn:layers:layers`, and so on). The mapping from file to resource is one to
-  one, so migration is a reading of the existing directory, not a conversion.
-- **The grants are a composition, not a resource anyone writes.** `urn:layers:grants` and
-  `urn:layers:clients` answer what `grants::generate` derives (`src/grants.rs:142`), and the
+- **Every file the host reads becomes one keyed resource**, named in the singular, the type
+  first and every partition by a named key, under `urn:layers:`:
+  `urn:layers:layer:name:{layer}`, `urn:layers:shape:name:{name}`,
+  `urn:layers:context:name:{name}`, `urn:layers:scheme:name:{name}`,
+  `urn:layers:collab:name:{collab}`, `urn:layers:participant:name:{name}` and
+  `urn:layers:enrollment:fingerprint:{fingerprint}`. The set that lists each is its singular
+  type (`urn:layers:layer` lists every layer, and so on). The mapping from file to resource is
+  one to one, so migration is a reading of the existing directory, not a conversion.
+- **The grants are a composition, not a resource anyone writes.** `urn:layers:grant` and
+  `urn:layers:client` answer what `grants::generate` derives (`src/grants.rs:142`), and the
   host writes `grants.json` and `clients.json` after every accepted change, as onboarding
   already does (`src/onboard/apply.rs:405-445`).
 - **A write is checked as the host's open checks it, before anything is written.** The
@@ -88,27 +90,27 @@ follows the short-name rule the files already follow (lowercase `[a-z0-9-]`; a l
 
 | resource | verb | what it is |
 | --- | --- | --- |
-| `urn:layers:layers` | Source | every layer definition's IRI, with its model, kind and the collaborations mounting it |
-| `urn:layers:layers` | Sink | create a layer: the definition, named by its `name` (refused when it exists) |
-| `urn:layers:shapes` | Source | every shapes document, with the layers that name it |
-| `urn:layers:contexts` | Source | every context document, with the layers that name it |
-| `urn:layers:schemes` | Source | every concept scheme, with the feeds that name it |
-| `urn:layers:collabs` | Source | every collaboration (the operator's view; a participant keeps `urn:collab:{name}`) |
-| `urn:layers:participants` | Source | exists today (README.md:59), unchanged |
-| `urn:layers:enrollments` | Source | every enrolled fingerprint and the participant it names |
+| `urn:layers:layer` | Source | every layer definition's IRI, with its model, kind and the collaborations mounting it |
+| `urn:layers:layer` | Sink | create a layer: the definition, named by its `name` (refused when it exists) |
+| `urn:layers:shape` | Source | every shapes document, with the layers that name it |
+| `urn:layers:context` | Source | every context document, with the layers that name it |
+| `urn:layers:scheme` | Source | every concept scheme, with the feeds that name it |
+| `urn:layers:collab` | Source | every collaboration (the operator's view; a participant keeps `urn:collab:{name}`) |
+| `urn:layers:participant` | Source | every participant; the same answer as today's `urn:layers:participants` (README.md:60), which stays |
+| `urn:layers:enrollment` | Source | every enrolled fingerprint and the participant it names |
 
 ### Atoms
 
 | resource | verbs | what it holds | file it is stored as |
 | --- | --- | --- | --- |
-| `urn:layers:layer:{layer}` | Source, Sink, Delete | the definition: every key the TOML takes today | `layers/{layer}.toml` |
-| `urn:layers:shapes:{name}` | Source, Sink, Delete | a closed shapes document | `layers/{name}.shapes.ttl` |
-| `urn:layers:context:{name}` | Source, Sink, Delete | an egress context | `layers/{name}.context.jsonld` |
-| `urn:layers:scheme:{name}` | Source, Sink, Delete | a feed's concept scheme | `layers/{name}.scheme.ttl` |
-| `urn:layers:collab:{collab}` | Source, Sink, Delete | a manifest: its label and its mounts | `collabs/{collab}.toml` |
-| `urn:layers:collab:{collab}:mount:{layer}` | Source, Sink, Delete | one mount: the verbs each participant holds on one layer | one `[[mount]]` table of that file |
-| `urn:layers:participant:{name}` | Source, Sink, Delete | one participant: its class, label and `prov:actedOnBehalfOf` | its statements in `participants.ttl` |
-| `urn:layers:enrollment:{fingerprint}` | Source, Sink, Delete | one certificate and the participant it names | one line of `enrollment.toml` |
+| `urn:layers:layer:name:{layer}` | Source, Sink, Delete | the definition: every key the TOML takes today | `layers/{layer}.toml` |
+| `urn:layers:shape:name:{name}` | Source, Sink, Delete | a closed shapes document | `layers/{name}.shapes.ttl` |
+| `urn:layers:context:name:{name}` | Source, Sink, Delete | an egress context | `layers/{name}.context.jsonld` |
+| `urn:layers:scheme:name:{name}` | Source, Sink, Delete | a feed's concept scheme | `layers/{name}.scheme.ttl` |
+| `urn:layers:collab:name:{collab}` | Source, Sink, Delete | a manifest: its label and its mounts | `collabs/{collab}.toml` |
+| `urn:layers:collab:name:{collab}:mount:layer:{layer}` | Source, Sink, Delete | one mount: the verbs each participant holds on one layer | one `[[mount]]` table of that file |
+| `urn:layers:participant:name:{name}` | Source, Sink, Delete | one participant: its class, label and `prov:actedOnBehalfOf` | its statements in `participants.ttl` |
+| `urn:layers:enrollment:fingerprint:{fingerprint}` | Source, Sink, Delete | one certificate and the participant it names | one line of `enrollment.toml` |
 
 Notes on the choices:
 
@@ -122,16 +124,22 @@ Notes on the choices:
   different layers do not race on one document. Finer atoms (one per participant per mount)
   were considered and rejected: verbs on one mount are checked together (a feed refuses `say`
   to a non-publisher, README.md:251-253), so the mount is the smallest unit a check covers.
-- **`urn:layers:layer:{layer}` is not `urn:layer:{layer}`.** The second is the participant's
-  view of the definition, under `urn:cap:layer:read:{layer}`, in Turtle and JSON
+- **`urn:layers:layer:name:{layer}` is not `urn:layer:{layer}`.** The second is the
+  participant's view of the definition, under `urn:cap:layer:read:{layer}`, in Turtle and JSON
   (README.md:43). The administrator's resource carries the same definition plus what a
   participant has no business reading: which collaborations mount it, its file names, its
   revision. Two names keep two capabilities from ever meeting on one endpoint.
-- **`urn:layers:participant:{name}` beside `urn:layers:participant:name:{name}`.** The
-  existing `Exists` resource (README.md:321-345) is a template whose last segment is a name;
-  since a name never holds `:`, the two never capture each other's IRIs, but the bind order
-  must put the longer template first, as `urn:collab:{name}:participants` is today
-  (`src/endpoints.rs:187-198`).
+- **One participant name, `urn:layers:participant:name:{name}`.** It is the name the
+  existing `Exists` resource already answers at (README.md:62, README.md:321-345); the atom
+  adds Source, Sink and Delete to it, each under its own capability (`Exists` stays the
+  controller's, the other verbs need `admin:roster`).
+- **A mount is keyed inside its collaboration.** Since a name never holds `:`,
+  `urn:layers:collab:name:{collab}` and `urn:layers:collab:name:{collab}:mount:layer:{layer}`
+  never capture each other's IRIs, but the bind order must put the longer template first, as
+  `urn:collab:{name}:participants` is today (`src/endpoints.rs:187-198`).
+- **Existing public names stay as they are.** `urn:layer:{layer}:…`, `urn:collab:{name}`,
+  `urn:layers:participants` and their capabilities keep their names; moving them to this form
+  would be a separate migration, with the old names kept as aliases.
 - **`layers.toml` stays a file.** The host's own options (`[match]`, `[onboard]`, `[join]`)
   hold keys and budgets that size the host; they change rarely, and a change already needs
   `onboard setup` or an open. They are out of scope for a first version.
@@ -140,8 +148,8 @@ Notes on the choices:
 
 | resource | verb | what it is |
 | --- | --- | --- |
-| `urn:layers:grants` | Source | what `grants.json` holds, derived; never written |
-| `urn:layers:clients` | Source | what `clients.json` holds, derived; never written |
+| `urn:layers:grant` | Source | what `grants.json` holds, derived; never written |
+| `urn:layers:client` | Source | what `clients.json` holds, derived; never written |
 | `urn:layers:revision` | Source | the configuration's current revision (section 3) |
 | `urn:layers:change` | Sink | several atom writes applied together or not at all (section 3) |
 
@@ -235,31 +243,33 @@ Not every key may change on a layer that already holds state:
 
 ## 4. Capabilities: administering is not taking part
 
-The family is `urn:cap:layers:admin:*`. Each is checked exactly, as the layer verbs are.
+The family is `urn:cap:layers:admin:*`. Each is checked exactly, as the layer verbs are. Each
+follows the resource names' form, with its one parameter last, since core matches a wildcard
+only at the end (`urn:cap:layers:admin:layer:name:*` covers every layer).
 
 | capability | lets its holder |
 | --- | --- |
 | `urn:cap:layers:admin:read` | read every set and atom above and the compositions (not the entries of any layer) |
 | `urn:cap:layers:admin:create` | create a layer, a shapes document, a context or a scheme, under a name nobody holds |
-| `urn:cap:layers:admin:layer:{layer}` | change or delete that layer's definition |
-| `urn:cap:layers:admin:document:{name}` | change or delete that shapes document, context or scheme |
-| `urn:cap:layers:admin:collab:{collab}` | change that collaboration's manifest and mounts: the `grant` command |
+| `urn:cap:layers:admin:layer:name:{layer}` | change or delete that layer's definition |
+| `urn:cap:layers:admin:document:name:{name}` | change or delete that shapes document, context or scheme |
+| `urn:cap:layers:admin:collab:name:{collab}` | change that collaboration's manifest and mounts: the `grant` command |
 | `urn:cap:layers:admin:roster` | change participants and enrollment, host-wide |
 
 The rules:
 
-- **Administering grants no part in a layer.** `admin:layer:talk` does not include
+- **Administering grants no part in a layer.** `admin:layer:name:talk` does not include
   `urn:cap:layer:read:talk` or any verb; an administrator who should read the layer is granted
   `read` in a manifest like anyone else.
 - **No manifest grants an administrative capability.** The operator names administrators in
   `layers.toml`, the way `join.count_readers` names who may read the join count
   (README.md:522-545), and the generator adds the capabilities to exactly those grants. A
-  creator of a layer is given `admin:layer:{layer}` for it in the same change, recorded in
+  creator of a layer is given `admin:layer:name:{layer}` for it in the same change, recorded in
   the definition (`administrators = [...]`) so that it is derived, not remembered.
-- **This is a separation of duties, not of trust.** Whoever holds `admin:collab:{collab}` can
-  write a mount granting itself `read`; whoever holds `admin:roster` can enroll a certificate
-  for any participant. The design makes those acts explicit, checked and recorded, not
-  impossible. What it does guarantee is that taking part never confers administration: a
+- **This is a separation of duties, not of trust.** Whoever holds
+  `admin:collab:name:{collab}` can write a mount granting itself `read`; whoever holds
+  `admin:roster` can enroll a certificate for any participant. The design makes those acts
+  explicit, checked and recorded, not impossible. What it does guarantee is that taking part never confers administration: a
   participant's grant, however wide, holds no `admin:` capability unless the operator named it.
 - **Every accepted change is recorded.** The host appends one entry per change to a channel
   of its own (an administration log, mounted for the administrators), naming the resources,
@@ -399,7 +409,7 @@ in README.md:96-108, so a host opening over today's directory serves every resou
    (`rewrote <file>: its comments are not kept`) and keeps a backup beside it, as `onboard
    setup` backs up `layers.toml` (README.md:366-368).
 5. **Shared documents.** A shapes or context file named by several layers maps to one
-   `urn:layers:shapes:{name}` named by all of them, as today; nothing has to be split.
+   `urn:layers:shape:name:{name}` named by all of them, as today; nothing has to be split.
 
 A host without the feature, or a participant build (the `no default features` build in CI),
 is unchanged: the feature lives behind the `host` feature, and no default behavior changes
@@ -424,9 +434,9 @@ until the endpoints are bound.
    runs the open's checks and the derivation, and commits through a journal replayed or
    discarded at open; tests that an isolation breach, an uncompilable shape and a stale
    revision each write nothing.
-3. **Mounts and grants written live.** `urn:layers:collab:{collab}` and its mount atoms as
-   Sink and Delete under `admin:collab:{collab}`, with `grants.json` and `clients.json` written
-   at each change; the `mount`, `grant` and `revoke` commands.
+3. **Mounts and grants written live.** `urn:layers:collab:name:{collab}` and its mount atoms as
+   Sink and Delete under `admin:collab:name:{collab}`, with `grants.json` and `clients.json`
+   written at each change; the `mount`, `grant` and `revoke` commands.
 4. **Participants and enrollment written live.** The roster atoms under `admin:roster`, refusing
    a participant an entitlement holds, in the apply's words; the `enroll` command; the trust
    directory updated under `trust_reload`.
