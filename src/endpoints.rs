@@ -2341,7 +2341,9 @@ impl Endpoint for LayerEndpoint {
         {
             self.host().notify().bump();
         }
-        // A lapsed lease returns its tuple before anything reads or writes the layer.
+        // A lapsed lease returns its tuple before anything reads or writes the layer. This runs
+        // for every action, a Source of the definition included, so a read at a lapse appends
+        // the `returned` event (README, "lease"; ledger #3985). Retention above does the same.
         if self.def().model == Model::Tuplespace {
             if let Some(now) = inv.now() {
                 if self

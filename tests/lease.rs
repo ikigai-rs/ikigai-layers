@@ -355,3 +355,38 @@ fn a_lapse_whose_tuple_never_went_back_is_repaired_on_open() {
         "\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>"
     );
 }
+
+/// The host returns a lapsed tuple before every request on the layer, a read included
+/// (ledger #3985): a Source of the layer's definition at the lapse appends the `returned`
+/// event to the feed. The log file is read directly, so no second request can be what swept.
+#[test]
+fn a_definition_read_at_the_lapse_returns_the_tuple() {
+    let (mut f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    let log = f.state.path().join("tasks-bobby/feed.log");
+    let before = std::fs::read(&log).unwrap();
+    // Before the lapse a definition read leaves the feed as it was.
+    at(&mut f, &clock, 9);
+    source(
+        &f.kernel,
+        "urn:layer:tasks-bobby",
+        &[],
+        &tasker(&bobby_gonk()),
+    );
+    assert_eq!(std::fs::read(&log).unwrap(), before);
+    // At the lapse the same read returns the tuple, and the feed logs it.
+    at(&mut f, &clock, 10);
+    source(
+        &f.kernel,
+        "urn:layer:tasks-bobby",
+        &[],
+        &tasker(&bobby_gonk()),
+    );
+    let after = std::fs::read(&log).unwrap();
+    assert!(
+        after.len() > before.len(),
+        "the definition read did not sweep"
+    );
+    assert_eq!(kinds(&f), ["out", "taken", "returned"]);
+}
