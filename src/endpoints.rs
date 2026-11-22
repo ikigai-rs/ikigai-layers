@@ -729,10 +729,9 @@ impl LayerEndpoint {
     async fn front_feed_read(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let token = layer_cap("read", self.layer());
         if !inv.capability.allows(&token) {
-            return Err(Error::Denied(format!(
-                "reading layer `{}` needs {token}",
-                self.layer()
-            )));
+            return Err(Error::Denied(
+                format!("reading layer `{}` needs {token}", self.layer()).into(),
+            ));
         }
         let request = self.normalized(inv)?;
         inv.depends_on(self.say_thread());
@@ -999,12 +998,15 @@ impl LayerEndpoint {
             .capability
             .principal()
             .ok_or_else(|| {
-                Error::Denied(format!(
-                    "`{verb}` on layer `{}` needs a principal, minted by the door that \
+                Error::Denied(
+                    format!(
+                        "`{verb}` on layer `{}` needs a principal, minted by the door that \
                      authenticated the caller: every write is attributed, and this request \
                      names nobody (root names nobody either)",
-                    self.layer()
-                ))
+                        self.layer()
+                    )
+                    .into(),
+                )
             })?
             .to_string();
         let participants = self.host().participants().map_err(host_error)?;
@@ -1013,10 +1015,13 @@ impl LayerEndpoint {
         let lobby_author = self.def().lobby
             && Participant::parse(&principal).is_ok_and(|p| p.fingerprint().is_some());
         if !participants.names(&principal) && !lobby_author {
-            return Err(Error::Denied(format!(
+            return Err(Error::Denied(
+                format!(
                 "{principal} is not a participant of this host (participants.ttl does not name \
                  it)"
-            )));
+            )
+                .into(),
+            ));
         }
         Ok((principal, participants))
     }
@@ -1076,19 +1081,25 @@ impl LayerEndpoint {
             .onboard_config()
             .filter(|c| c.grants == self.layer() && c.controller != author)
         {
-            return Err(Error::Denied(format!(
-                "only the onboarding controller ({}) says on layer `{}`",
-                c.controller,
-                self.layer()
-            )));
+            return Err(Error::Denied(
+                format!(
+                    "only the onboarding controller ({}) says on layer `{}`",
+                    c.controller,
+                    self.layer()
+                )
+                .into(),
+            ));
         }
         if let Some(feed) = &self.def().feed {
             if !feed.publishers.contains(&author) {
-                return Err(Error::Denied(format!(
+                return Err(Error::Denied(
+                    format!(
                     "layer `{}` is a feed, written only by its publishers, and {author} is not \
                      one of them: ask in a Talk channel instead",
                     self.layer()
-                )));
+                )
+                    .into(),
+                ));
             }
         }
         if self.def().join {
@@ -1210,10 +1221,13 @@ impl LayerEndpoint {
             .ok()
             .and_then(|p| p.fingerprint().map(str::to_string))
             .ok_or_else(|| {
-                Error::Denied(format!(
-                    "a join request is said by the certificate it joins; {author} carries no \
+                Error::Denied(
+                    format!(
+                        "a join request is said by the certificate it joins; {author} carries no \
                      fingerprint"
-                ))
+                    )
+                    .into(),
+                )
             })?;
         join.check_deny(&fingerprint)?;
         // Counted before anything is parsed: the rate bounds the work a stranger causes.
@@ -1553,15 +1567,18 @@ impl LayerEndpoint {
             && !meta.addressed_to.is_empty()
             && !meta.addressed_to.contains(&taker)
         {
-            return Err(Error::Denied(format!(
-                "<{subject}> is addressed to {}: in layer `{}` only an addressee takes it",
-                meta.addressed_to
-                    .iter()
-                    .map(|p| format!("<{p}>"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                self.layer()
-            )));
+            return Err(Error::Denied(
+                format!(
+                    "<{subject}> is addressed to {}: in layer `{}` only an addressee takes it",
+                    meta.addressed_to
+                        .iter()
+                        .map(|p| format!("<{p}>"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    self.layer()
+                )
+                .into(),
+            ));
         }
         let seq = self.settle_feed()?;
         // Read the tuple first: its receipt is staged, holding it, before the take.
@@ -1951,10 +1968,13 @@ impl LayerEndpoint {
             })?;
         let iri = receipt.iri.clone();
         if receipt.taker != who {
-            return Err(Error::Denied(format!(
-                "receipt <{iri}> is <{}>'s take: only its taker settles it",
-                receipt.taker
-            )));
+            return Err(Error::Denied(
+                format!(
+                    "receipt <{iri}> is <{}>'s take: only its taker settles it",
+                    receipt.taker
+                )
+                .into(),
+            ));
         }
         let Some(lease) = receipt.lease.clone() else {
             return Err(Error::Conflict(format!(
@@ -2190,10 +2210,13 @@ fn check_report(
         )));
     }
     if receipt.taker != reporter {
-        return Err(Error::Denied(format!(
-            "ik:offer <{offer}> was taken by <{}>: only its taker reports on it",
-            receipt.taker
-        )));
+        return Err(Error::Denied(
+            format!(
+                "ik:offer <{offer}> was taken by <{}>: only its taker reports on it",
+                receipt.taker
+            )
+            .into(),
+        ));
     }
     let offerer = &receipt.tuple.dropper;
     if def.addressed && (addressed_to.len() != 1 || !addressed_to.contains(offerer)) {
@@ -2854,10 +2877,13 @@ impl Endpoint for MultiFeed {
                 .layer(name)
                 .filter(|_| inv.capability.allows(&layer_cap("feed", name)))
                 .ok_or_else(|| {
-                    Error::Denied(format!(
-                        "no feed grant on layer `{name}` (needs {})",
-                        layer_cap("feed", name)
-                    ))
+                    Error::Denied(
+                        format!(
+                            "no feed grant on layer `{name}` (needs {})",
+                            layer_cap("feed", name)
+                        )
+                        .into(),
+                    )
                 })?;
             let last = state.last_seq();
             if *after > last {
@@ -3057,10 +3083,13 @@ impl Endpoint for ParticipantName {
             .controller;
         if let Some(principal) = inv.capability.principal() {
             if principal != controller {
-                return Err(Error::Denied(format!(
+                return Err(Error::Denied(
+                    format!(
                     "only onboard.controller ({controller}) asks whether a participant name is \
                      in use, and this request is {principal}'s"
-                )));
+                )
+                    .into(),
+                ));
             }
         }
         let name = inv.bindings.get("name").unwrap_or_default();
@@ -3351,10 +3380,13 @@ impl Endpoint for CollabParticipants {
         // As `urn:collab:{name}`: the token is checked before anything is read, so an
         // absent collaboration is refused like an unheld one and the refusal names nothing.
         if !inv.capability.allows(&collab_cap(name)) {
-            return Err(Error::Denied(format!(
-                "reading collaboration `{name}`'s participants needs {}",
-                collab_cap(name)
-            )));
+            return Err(Error::Denied(
+                format!(
+                    "reading collaboration `{name}`'s participants needs {}",
+                    collab_cap(name)
+                )
+                .into(),
+            ));
         }
         let participants = self.host.participants().map_err(host_error)?;
         let collabs = self.host.collabs_with(&participants).map_err(host_error)?;
@@ -3484,10 +3516,9 @@ impl Endpoint for CollabEndpoint {
         // The family is declared; the manifest's own token is checked here, and an absent
         // manifest is refused like an unheld one, so the refusal names nothing.
         if !inv.capability.allows(&collab_cap(name)) {
-            return Err(Error::Denied(format!(
-                "reading collaboration `{name}` needs {}",
-                collab_cap(name)
-            )));
+            return Err(Error::Denied(
+                format!("reading collaboration `{name}` needs {}", collab_cap(name)).into(),
+            ));
         }
         let collabs = self.host.collabs().map_err(host_error)?;
         let manifest = collabs

@@ -386,11 +386,14 @@ pub fn check_request(
         .ok()
         .and_then(|p| p.fingerprint().map(str::to_string))
         .ok_or_else(|| {
-            ikigai_core::Error::Denied(format!(
-                "an enrollment request is said by the certificate it enrolls, named by its \
+            ikigai_core::Error::Denied(
+                format!(
+                    "an enrollment request is said by the certificate it enrolls, named by its \
                  fingerprint ({HOST_CLIENT_PREFIX}{{host}}:client:<fingerprint>); {author} \
                  carries none"
-            ))
+                )
+                .into(),
+            )
         })?;
     let stated = one_literal(triples, FINGERPRINT)
         .ok_or_else(|| invalid("an enrollment request states exactly one onb:fingerprint"))?;
@@ -402,10 +405,13 @@ pub fn check_request(
         }
     }
     if stated != poster {
-        return Err(ikigai_core::Error::Denied(format!(
-            "onb:fingerprint {stated} is not the certificate that said it ({poster}): a node \
+        return Err(ikigai_core::Error::Denied(
+            format!(
+                "onb:fingerprint {stated} is not the certificate that said it ({poster}): a node \
              requests enrollment for its own certificate only"
-        )));
+            )
+            .into(),
+        ));
     }
     let pem = one_literal(triples, CERTIFICATE)
         .ok_or_else(|| invalid("an enrollment request carries exactly one onb:certificate"))?;

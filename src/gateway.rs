@@ -587,8 +587,8 @@ fn parts(error: &Error) -> Parts<'_> {
         Error::InvalidArgument { name, detail } => {
             (Some(detail.clone()), Some(name.clone()), None, None)
         }
+        Error::Denied(d) => (Some(d.message().to_string()), None, None, None),
         Error::Endpoint(m)
-        | Error::Denied(m)
         | Error::NotFound(m)
         | Error::Conflict(m)
         | Error::Timeout(m)
@@ -659,7 +659,7 @@ pub fn parse_reply(
             detail: message,
         },
         "endpoint" => Error::Endpoint(message),
-        "denied" => Error::Denied(message),
+        "denied" => Error::Denied(message.into()),
         "not-found" => Error::NotFound(message),
         "conflict" => Error::Conflict(message),
         "timeout" => Error::Timeout(message),
@@ -1076,22 +1076,28 @@ impl<D: Door> Resolver<D> {
     pub async fn resolve(&self, asked: &Asked) -> Result<Representation> {
         let ask = &asked.ask;
         if !self.verbs.contains(&ask.verb) {
-            return Err(Error::Denied(format!(
-                "this gateway's resolver does not answer {}: it answers {}",
-                verb_word(ask.verb),
-                self.verbs
-                    .iter()
-                    .map(|v| verb_word(*v))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
+            return Err(Error::Denied(
+                format!(
+                    "this gateway's resolver does not answer {}: it answers {}",
+                    verb_word(ask.verb),
+                    self.verbs
+                        .iter()
+                        .map(|v| verb_word(*v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into(),
+            ));
         }
         let name = ask.resource.as_str();
         if !self.prefixes.is_empty() && !self.prefixes.iter().any(|p| name.starts_with(p)) {
-            return Err(Error::Denied(format!(
-                "this gateway's resolver does not answer <{name}>: it answers names under {}",
-                self.prefixes.join(", ")
-            )));
+            return Err(Error::Denied(
+                format!(
+                    "this gateway's resolver does not answer <{name}>: it answers names under {}",
+                    self.prefixes.join(", ")
+                )
+                .into(),
+            ));
         }
         let mut request = Request::new(ask.verb, ask.resource.clone());
         for (arg, value) in &ask.arguments {
@@ -1139,7 +1145,7 @@ pub async fn serve<L: Door + ?Sized, R: Door>(
     let text = match taken {
         Ok(repr) => utf8(&repr)?,
         Err(Error::Conflict(m)) => return Ok(Served::Lost(m)),
-        Err(Error::Denied(m)) => return Ok(Served::NotOurs(m)),
+        Err(Error::Denied(m)) => return Ok(Served::NotOurs(m.into_message())),
         Err(e) => return Err(e),
     };
     let asked = parse_request(layer, &text)
