@@ -556,3 +556,115 @@ fn a_channel_with_an_unknown_kind_refuses_start() {
     assert!(e.contains("`chat`"), "{e}");
     assert!(e.contains("talk, task, feed, inquiry, join"), "{e}");
 }
+
+#[test]
+fn metadata_reader_gets_entry_metadata_without_content() {
+    use ikigai_layers::rdf;
+
+    let mut f = fixture();
+    let resource = "urn:layer:talk:entry-metadata";
+    let reader = cap(&bobby(), &["urn:cap:layer:read-metadata:talk"]);
+    assert!(triples(&source(&f.kernel, resource, &[], &reader)).is_empty());
+
+    let iri = say(&f.kernel, "talk", &bobby(), &message("private body")).unwrap();
+    let reply = say(
+        &f.kernel,
+        "talk",
+        &participant("brian"),
+        &format!(
+            "{}<urn:layer:new> ik:inReplyTo <{iri}> ; <{}> <urn:private:topic> .",
+            message("private reply"),
+            rdf::DCT_SUBJECT,
+        ),
+    )
+    .unwrap();
+    let as_graph = |answer: &str| {
+        triples(answer)
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let allowed = |triple: &oxrdf::Triple| {
+        [
+            rdf::PROV_ATTRIBUTED,
+            rdf::DCT_CREATED,
+            &rdf::ik_seq(),
+            &rdf::ik_in_reply_to(),
+        ]
+        .contains(&triple.predicate.as_str())
+    };
+    let entries = source(&f.kernel, "urn:layer:talk:entries", &[], &member(&bobby()));
+    assert!(entries.contains("private body") && entries.contains("private reply"));
+    let expected: std::collections::HashSet<_> =
+        triples(&entries).into_iter().filter(allowed).collect();
+    assert_eq!(expected.len(), 7);
+    assert_eq!(
+        as_graph(&source(&f.kernel, resource, &[], &reader)),
+        expected
+    );
+
+    for name in [
+        &iri,
+        &reply,
+        "urn:layer:talk:entries",
+        "urn:layer:talk:graph:bobby",
+    ] {
+        assert!(
+            matches!(
+                issue(&f.kernel, Verb::Source, name, &[], &reader),
+                Err(Error::Denied(_))
+            ),
+            "{name}"
+        );
+    }
+    for wrong_grant in [
+        "urn:cap:layer:read:talk",
+        "urn:cap:layer:feed:talk",
+        "urn:cap:layer:read-metadata:talk-bobby",
+    ] {
+        assert!(
+            matches!(
+                issue(
+                    &f.kernel,
+                    Verb::Source,
+                    resource,
+                    &[],
+                    &cap(&bobby(), &[wrong_grant])
+                ),
+                Err(Error::Denied(_))
+            ),
+            "{wrong_grant}"
+        );
+    }
+
+    f.reopen();
+    // Once the index is rebuilt, metadata reads need neither entry file.
+    std::fs::remove_dir_all(f.state.path().join("talk/graphs")).unwrap();
+    assert_eq!(
+        as_graph(&source(&f.kernel, resource, &[], &reader)),
+        expected
+    );
+    let first_page = source(&f.kernel, resource, &[("limit", "1")], &reader);
+    assert!(triples(&first_page)
+        .iter()
+        .all(|t| t.subject.to_string() == format!("<{iri}>")));
+    assert_eq!(triples(&first_page).len(), 3);
+    let next_page = source(
+        &f.kernel,
+        resource,
+        &[
+            ("after", "1"),
+            ("limit", "1"),
+            ("as", "application/ld+json"),
+        ],
+        &reader,
+    );
+    let doc: serde_json::Value = serde_json::from_str(&next_page).unwrap();
+    assert_eq!(doc["@graph"].as_array().unwrap().len(), 1);
+    let entry = &doc["@graph"][0];
+    assert_eq!(entry.as_object().unwrap().len(), 5);
+    assert_eq!(entry["@id"], reply);
+    assert_eq!(entry[rdf::ik_in_reply_to()][0]["@id"], iri);
+    assert_eq!(entry[rdf::PROV_ATTRIBUTED][0]["@id"], participant("brian"));
+    assert_eq!(entry[rdf::ik_seq()][0]["@value"], "2");
+    assert_eq!(entry[rdf::DCT_CREATED][0]["@type"], rdf::XSD_DATE_TIME);
+}

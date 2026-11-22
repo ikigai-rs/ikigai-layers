@@ -76,7 +76,7 @@ impl Model {
     /// `urn:cap:layer:{verb}:{layer}`.
     pub fn verbs(self) -> &'static [&'static str] {
         match self {
-            Model::Channel => &["read", "feed", "say"],
+            Model::Channel => &["read", "read-metadata", "feed", "say"],
             Model::Tuplespace => &["read", "feed", "out", "take"],
         }
     }
@@ -1786,7 +1786,10 @@ struct EntitledToml {
 pub fn parse_layer_cap(cap: &str) -> Option<(&str, &str)> {
     let rest = cap.strip_prefix("urn:cap:layer:")?;
     let (verb, layer) = rest.split_once(':')?;
-    let known = matches!(verb, "read" | "feed" | "say" | "out" | "take");
+    let known = matches!(
+        verb,
+        "read" | "read-metadata" | "feed" | "say" | "out" | "take"
+    );
     (known && is_layer_name(layer)).then_some((layer, verb))
 }
 

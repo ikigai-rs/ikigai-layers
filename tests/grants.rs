@@ -24,6 +24,26 @@ fn scopes(e: &Enrollment, grant: &str) -> Vec<String> {
 }
 
 #[test]
+fn a_manifest_can_grant_entry_metadata_by_itself() {
+    let f = fixture();
+    f.config.write(
+        "collabs/bobby.toml",
+        "[[mount]]\nlayer = \"talk\"\nbobby = [\"read-metadata\"]\n",
+    );
+    let held = scopes(&enrollment(&f.config), "bobby");
+    assert_eq!(
+        held,
+        [
+            "urn:cap:collab:read:bobby",
+            "urn:cap:layer:read-metadata:talk"
+        ]
+    );
+    let tools = manifold(&f.kernel, &Capability::scoped(held));
+    assert!(tools.contains("layer-talk-entry-metadata__source"));
+    assert!(!tools.contains("layer-talk-entries__source"));
+}
+
+#[test]
 fn each_participant_gets_the_union_of_its_manifests() {
     let config = Scratch::new("cfg");
     write_config(&config);

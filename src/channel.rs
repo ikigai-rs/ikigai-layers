@@ -52,6 +52,8 @@ pub struct EntryMeta {
     pub slug: String,
     /// When, as `xsd:dateTime`.
     pub created: String,
+    /// The entry IRIs it replies to.
+    pub in_reply_to: BTreeSet<String>,
     /// Its `rdf:type`s.
     pub types: BTreeSet<String>,
     /// The objects of the layer's `about` predicate.
@@ -173,8 +175,10 @@ impl Channel {
         let (mut author, mut created, mut seq) = (None, None, None);
         let (mut types, mut about, mut supersedes) =
             (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+        let mut in_reply_to = BTreeSet::new();
         let seq_p = rdf::ik_seq();
         let supersedes_p = rdf::ik_supersedes();
+        let in_reply_to_p = rdf::ik_in_reply_to();
         for t in triples {
             let p = t.predicate.as_str();
             if p == rdf::PROV_ATTRIBUTED {
@@ -191,6 +195,8 @@ impl Channel {
                 types.extend(object_iri(&t.object).map(str::to_string));
             } else if p == supersedes_p {
                 supersedes.extend(object_iri(&t.object).map(str::to_string));
+            } else if p == in_reply_to_p {
+                in_reply_to.extend(object_iri(&t.object).map(str::to_string));
             }
             if p == self.about {
                 about.extend(object_iri(&t.object).map(str::to_string));
@@ -209,6 +215,7 @@ impl Channel {
             author,
             slug,
             created: created.ok_or("no dcterms:created")?,
+            in_reply_to,
             types,
             about,
             supersedes,

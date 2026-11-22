@@ -26,8 +26,9 @@ presentation has not been evaluated here.
   fields and includes the same aggregate in the event's JSON `sweep` object; a leased receipt
   appends labeled `attempt=N lease=<held, done or lapsed> until=<UTC time>` fields, and
   `result=<iri>` once done, with the same in its JSON); entries,
-  definitions and shapes are Turtle; and every answer a participant
-  reads also comes as JSON or JSON-LD (README, "JSON faces").
+  definitions and shapes are Turtle. The entry metadata graph (`urn:layer:{layer}:entry-metadata`)
+  is Turtle or expanded JSON-LD with entry IRIs, sequence numbers, authors, creation times and
+  reply links. Every answer a participant reads also comes as JSON or JSON-LD (README, "JSON faces").
 - **Feed answers** (`src/feeds/`): a feed layer's entries also come as Atom 1.0 XML
   (`as=application/atom+xml`), written from the SELECT's rows by a stylesheet (a missing title
   is written `(untitled)`), and its graph and scheme as JSON-LD and JSON.

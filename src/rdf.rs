@@ -75,6 +75,11 @@ pub fn ik_seq() -> String {
     format!("{IK}seq")
 }
 
+/// `ik:inReplyTo`: an entry to the entry it replies to.
+pub fn ik_in_reply_to() -> String {
+    format!("{IK}inReplyTo")
+}
+
 /// `ik:supersedes`.
 pub fn ik_supersedes() -> String {
     format!("{IK}supersedes")
