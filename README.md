@@ -636,7 +636,8 @@ receipts stay indefinitely. A sweep deletes receipts whose take time is strictly
 unchanged inside the window; after expiration, retries and reports cannot use that receipt.
 The tuple's subject stays reserved, so an expired tuple cannot be submitted again.
 
-The host sweeps when it opens and before requests on a layer with retention configured.
+The host sweeps when it opens and before every request, reads included, on a layer with
+retention configured.
 For expiration while idle, the deployment schedules `Host::sweep_retention(now)` with its
 clock. The feed keeps its existing events and adds one `sweep` event per nonempty batch,
 with the layer IRI, `by = urn:layers:retention` and aggregate fields only. Plain lines append
@@ -678,7 +679,10 @@ with its subject, `by = urn:layers:lease`. The next take's receipt counts the at
 the lapse, `done`, `renew` and a report on the offer from the late taker are each refused as
 a Conflict, so a tuple keeps one result. The lapsed receipt stays (retention keeps it while
 its tuple is pending again). The host returns lapsed tuples before every request on the
-layer; for an idle host, the deployment schedules `Host::sweep_leases(now)` with its clock.
+layer, reads included: a Source of the definition, shapes, context, feed, tuples or a receipt
+at or after a lapse writes the `returned` event, as a take would. A read on a leased layer can
+therefore grow the feed. For an idle host, the deployment schedules `Host::sweep_leases(now)`
+with its clock.
 A lapse is stored before its tuple goes back, so a host that stops between the two drops the
 tuple back when it next opens.
 
