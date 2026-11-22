@@ -665,7 +665,8 @@ $ ikigai -c 'sink urn:layer:tasks-bobby:receipt:<id> settle=done result=urn:blak
 $ ikigai -c 'sink urn:layer:tasks-bobby:receipt:<id> settle=renew lease=10m'
 ```
 
-`settle=done` makes the take final, with an optional `result=` IRI; the same `done` again is
+`settle=done` makes the take final, with an optional `result=` IRI (at most the layer's
+`entry_max` bytes, as every write is); the same `done` again is
 answered as the one settle, and another result is a Conflict. `settle=renew lease=` extends
 the lease from now, within `lease_max`. Reading the receipt then says `layers:leaseState`
 (`held`, `done` or `lapsed`), the current `layers:leaseUntil` and any `layers:leaseResult`;
