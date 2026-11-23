@@ -110,7 +110,10 @@ impl LayerState {
     }
 
     /// Return to the space every tuple whose lease has lapsed by `now`, under the layer's
-    /// write lock (ledger #2119). Each lapse is stored first, with the number of its
+    /// write lock (ledger #2119), in the order the leases lapsed. Each lapse is recorded at its
+    /// lease's `until`, not at `now` (ledger #4075): the lease file's lapse time and the
+    /// `returned` event's time are the instant a read already computed it lapsed, whenever the
+    /// sweep noticed. Each lapse is stored first, with the number of its
     /// `returned` event, then its tuple is dropped back, then the event is logged; a lapse
     /// whose tuple could not be dropped back is retried by the next sweep, or the next open.
     /// Answers whether anything changed.
@@ -143,11 +146,11 @@ impl LayerState {
                     feed.next()
                 };
                 let lapsed = Lease {
-                    until: lease.until,
                     state: LeaseState::Lapsed {
                         seq,
-                        time: time.clone(),
+                        time: lease.until.clone(),
                     },
+                    until: lease.until,
                 };
                 space.store.write_lease(&receipt.id, &lapsed)?;
                 space.record_lease(&receipt.id, lapsed.clone());
@@ -365,9 +368,10 @@ impl Host {
         Ok(())
     }
 
-    /// Return to the space every tuple whose lease has lapsed by `now` (ledger #2119). Called
-    /// on layer requests; an idle deployment can also schedule this method, so a lapsed
-    /// tuple's `returned` event reaches the feed without waiting for the next request.
+    /// Return to the space every tuple whose lease has lapsed by `now` (ledger #2119), each
+    /// recorded at its lease's `until`. Called before every write on a layer, never before a
+    /// read (ledger #4075); a deployment schedules this method too, so a lapsed tuple's
+    /// `returned` event reaches the feed without waiting for the next write.
     pub async fn sweep_leases(&self, now: ikigai_core::Time) -> Result<(), ConfigError> {
         for (name, state) in &self.layers {
             if state

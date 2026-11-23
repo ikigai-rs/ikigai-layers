@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use common::*;
-use ikigai_core::{Error, Time, Verb};
+use ikigai_core::{Clock, Error, Time, Verb};
 
 const MINUTE: u64 = 60_000;
 const START: u64 = 1_791_590_400_000;
@@ -90,6 +90,29 @@ fn kinds(f: &Fixture) -> Vec<String> {
     .collect()
 }
 
+/// The host's lease sweep, at the clock's instant, as a deployment schedules it.
+fn sweep_leases(f: &Fixture, clock: &Arc<ManualClock>) {
+    futures::executor::block_on(f.host.sweep_leases(clock.now())).unwrap();
+}
+
+/// A state file opened with the test's key (see [`common::sealed`]).
+fn unsealed(f: &Fixture, bytes: &[u8]) -> Vec<u8> {
+    let text = std::fs::read_to_string(f.config.path().join("state.key")).unwrap();
+    let identity: age::x25519::Identity = text
+        .lines()
+        .find(|l| l.starts_with("AGE-SECRET-KEY-"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    age::decrypt(&identity, bytes).unwrap()
+}
+
+/// A read a test issues: its name, the resource and the arguments.
+type Read<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
+
+/// The first lease's lapse instant in these tests: a 10m lease taken at the start.
+const LAPSE: &str = "2026-10-10T00:10:00.000Z";
+
 fn attempt_of(receipt_turtle: &str) -> String {
     triples(receipt_turtle)
         .iter()
@@ -109,10 +132,11 @@ fn a_lapsed_lease_returns_the_tuple_to_the_space() {
     assert!(!pending(&f).contains(&offer_iri("a")));
     let refused = take(&f.kernel, &participant("bobby"), &offer_iri("a"));
     assert!(matches!(refused, Err(Error::Conflict(_))), "{refused:?}");
-    // After, the same tuple is pending again, with its own subject, and the feed says so.
+    // After, the same tuple reads as pending again, with its own subject. A read records
+    // nothing (ledger #4075): the feed says so once the sweep runs.
     at(&mut f, &clock, 10);
     assert!(pending(&f).contains(&offer_iri("a")), "{}", pending(&f));
-    assert_eq!(kinds(&f), ["out", "taken", "returned"]);
+    assert_eq!(kinds(&f), ["out", "taken"]);
     let tuple = source(
         &f.kernel,
         TUPLES,
@@ -120,6 +144,9 @@ fn a_lapsed_lease_returns_the_tuple_to_the_space() {
         &tasker(&bobby_gonk()),
     );
     assert!(tuple.contains("Do a."));
+    sweep_leases(&f, &clock);
+    assert_eq!(kinds(&f), ["out", "taken", "returned"]);
+    assert!(pending(&f).contains(&offer_iri("a")), "{}", pending(&f));
     // Anyone may take it again; the new receipt counts the attempt.
     take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
     let second = receipt_of(&f, &offer_iri("a"));
@@ -260,11 +287,17 @@ fn the_receipt_records_attempts_across_a_restart() {
     f.reopen();
     at(&mut f, &clock, 12);
     assert!(pending(&f).contains(&offer_iri("a")));
-    assert_eq!(kinds(&f), ["out", "taken", "returned", "taken", "returned"]);
+    // Read as pending, the second lapse is not recorded until a write: open does not sweep
+    // leases yet (lease sweep item 3), and a read never does (ledger #4075).
+    assert_eq!(kinds(&f), ["out", "taken", "returned", "taken"]);
     // The lapsed receipts stay, each with its attempt and state.
     let turtle = source(&f.kernel, &first, &[], &tasker(&bobby_gonk()));
     assert!(turtle.contains("\"lapsed\""), "{turtle}");
     take(&f.kernel, &bobby_gonk(), &offer_iri("a")).unwrap();
+    assert_eq!(
+        kinds(&f),
+        ["out", "taken", "returned", "taken", "returned", "taken"]
+    );
     let third = receipt_of(&f, &offer_iri("a"));
     let turtle = source(&f.kernel, &third, &[], &tasker(&bobby_gonk()));
     assert_eq!(
@@ -356,37 +389,164 @@ fn a_lapse_whose_tuple_never_went_back_is_repaired_on_open() {
     );
 }
 
-/// The host returns a lapsed tuple before every request on the layer, a read included
-/// (ledger #3985): a Source of the layer's definition at the lapse appends the `returned`
-/// event to the feed. The log file is read directly, so no second request can be what swept.
+/// A read never writes (ledger #4075): at the lapse, a definition read, an `rd` in each face, a
+/// receipt read and a feed read each leave `feed.log` and the lease files byte-identical. The
+/// reads compute the lapse instead: the tuple reads as pending and the receipt as `lapsed`, not
+/// yet recorded. The files are read directly, so no request can be what changed them.
 #[test]
-fn a_definition_read_at_the_lapse_returns_the_tuple() {
+fn a_read_at_the_lapse_writes_nothing() {
     let (mut f, clock) = leased();
     out(&f.kernel, &gonk(), &offer("a")).unwrap();
     take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
-    let log = f.state.path().join("tasks-bobby/feed.log");
-    let before = std::fs::read(&log).unwrap();
-    // Before the lapse a definition read leaves the feed as it was.
-    at(&mut f, &clock, 9);
-    source(
-        &f.kernel,
-        "urn:layer:tasks-bobby",
-        &[],
-        &tasker(&bobby_gonk()),
-    );
-    assert_eq!(std::fs::read(&log).unwrap(), before);
-    // At the lapse the same read returns the tuple, and the feed logs it.
+    let receipt = receipt_of(&f, &offer_iri("a"));
+    let files = |f: &Fixture| {
+        let dir = f.state.path().join(TASKS);
+        let mut leases: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir.join("leases"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .map(|p| (p.display().to_string(), std::fs::read(&p).unwrap()))
+            .collect();
+        leases.sort();
+        (std::fs::read(dir.join("feed.log")).unwrap(), leases)
+    };
+    let before = files(&f);
     at(&mut f, &clock, 10);
-    source(
+    let who = tasker(&bobby_gonk());
+    let a = offer_iri("a");
+    let reads: [Read; 10] = [
+        ("definition", "urn:layer:tasks-bobby", &[]),
+        ("shapes", "urn:layer:tasks-bobby:shapes", &[]),
+        ("rd", TUPLES, &[]),
+        ("rd as JSON", TUPLES, &[("as", "application/json")]),
+        ("rd as Turtle", TUPLES, &[("as", "text/turtle")]),
+        ("rd tuple=", TUPLES, &[("tuple", &a)]),
+        ("rd state=taken", TUPLES, &[("state", "taken")]),
+        (
+            "rd state=taken as JSON",
+            TUPLES,
+            &[("state", "taken"), ("as", "application/json")],
+        ),
+        ("receipt", &receipt, &[]),
+        ("feed", "urn:layer:tasks-bobby:feed", &[("after", "0")]),
+    ];
+    let mut answers = std::collections::HashMap::new();
+    for (name, iri, args) in reads {
+        answers.insert(name, source(&f.kernel, iri, args, &who));
+        assert_eq!(files(&f), before, "the {name} read wrote");
+    }
+    // The reads computed the lapse: the tuple pending, the receipt lapsed and unrecorded.
+    assert!(answers["rd"].contains(&offer_iri("a")), "{}", answers["rd"]);
+    assert!(answers["rd as JSON"].contains(&offer_iri("a")));
+    assert!(
+        answers["rd as Turtle"].contains("Do a."),
+        "{}",
+        answers["rd as Turtle"]
+    );
+    assert!(
+        answers["rd tuple="].contains("Do a."),
+        "{}",
+        answers["rd tuple="]
+    );
+    assert!(
+        answers["receipt"].contains("\"lapsed\""),
+        "{}",
+        answers["receipt"]
+    );
+    let line = &answers["rd state=taken"];
+    assert!(
+        line.contains("lease=lapsed until=2026-10-10T00:10:00.000Z recorded=no"),
+        "{line}"
+    );
+    let listed: serde_json::Value =
+        serde_json::from_str(&answers["rd state=taken as JSON"]).unwrap();
+    let lease = &listed["receipts"][0]["lease"];
+    assert_eq!(lease["state"], "lapsed", "{listed}");
+    assert_eq!(lease["recorded"], false, "{listed}");
+    assert_eq!(kinds(&f), ["out", "taken"]);
+    // Recorded, the receipt says so, and the plain line drops `recorded=no`.
+    sweep_leases(&f, &clock);
+    assert_ne!(files(&f), before);
+    let listed: serde_json::Value = serde_json::from_str(&source(
         &f.kernel,
-        "urn:layer:tasks-bobby",
-        &[],
+        TUPLES,
+        &[("state", "taken"), ("as", "application/json")],
+        &who,
+    ))
+    .unwrap();
+    assert_eq!(listed["receipts"][0]["lease"]["recorded"], true, "{listed}");
+    let line = source(&f.kernel, TUPLES, &[("state", "taken")], &who);
+    assert!(line.contains("lease=lapsed"), "{line}");
+    assert!(!line.contains("recorded="), "{line}");
+    assert!(pending(&f).contains(&offer_iri("a")));
+}
+
+/// A lapse is recorded at the lease's `until`, not when the sweep noticed (ledger #4075): the
+/// `returned` event's time and the lease file's lapse time are both the lapse instant.
+#[test]
+fn the_returned_time_is_the_lapse_instant() {
+    let (mut f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    let receipt = receipt_of(&f, &offer_iri("a"));
+    at(&mut f, &clock, 25);
+    sweep_leases(&f, &clock);
+    let feed = source(
+        &f.kernel,
+        "urn:layer:tasks-bobby:feed",
+        &[("after", "0")],
         &tasker(&bobby_gonk()),
     );
-    let after = std::fs::read(&log).unwrap();
-    assert!(
-        after.len() > before.len(),
-        "the definition read did not sweep"
+    let returned = feed
+        .lines()
+        .find(|l| l.split(' ').nth(2) == Some("returned"))
+        .unwrap_or_else(|| panic!("no returned event: {feed}"));
+    assert_eq!(returned.split(' ').nth(1), Some(LAPSE), "{feed}");
+    let id = receipt.rsplit(':').next().unwrap();
+    let file = std::fs::read(
+        f.state
+            .path()
+            .join(TASKS)
+            .join("leases")
+            .join(format!("{id}.json")),
+    )
+    .unwrap();
+    let lease: serde_json::Value = serde_json::from_slice(&unsealed(&f, &file)).unwrap();
+    assert_eq!(lease["state"], "lapsed", "{lease}");
+    assert_eq!(lease["time"], LAPSE, "{lease}");
+    assert_eq!(lease["until"], LAPSE, "{lease}");
+}
+
+/// Two lapses are recorded in the order the leases lapsed, not the order of the takes, so the
+/// `returned` times in the feed never go backward.
+#[test]
+fn lapses_are_recorded_in_until_order() {
+    let (mut f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    out(&f.kernel, &gonk(), &offer("b")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "20m").unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("b"), "10m").unwrap();
+    at(&mut f, &clock, 30);
+    sweep_leases(&f, &clock);
+    let feed = source(
+        &f.kernel,
+        "urn:layer:tasks-bobby:feed",
+        &[("after", "0")],
+        &tasker(&bobby_gonk()),
     );
-    assert_eq!(kinds(&f), ["out", "taken", "returned"]);
+    let returned: Vec<(&str, &str)> = feed
+        .lines()
+        .map(|l| l.split(' ').collect::<Vec<_>>())
+        .filter(|l| l[2] == "returned")
+        .map(|l| (l[1], l[3]))
+        .collect();
+    let b = offer_iri("b");
+    let a = offer_iri("a");
+    assert_eq!(
+        returned,
+        [
+            ("2026-10-10T00:10:00.000Z", b.as_str()),
+            ("2026-10-10T00:20:00.000Z", a.as_str())
+        ],
+        "{feed}"
+    );
 }

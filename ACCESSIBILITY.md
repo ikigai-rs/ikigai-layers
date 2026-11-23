@@ -24,8 +24,9 @@ presentation has not been evaluated here.
   one line per item as `text/plain`, space-separated (`<seq> <time> <kind> <iri> <participant>`
   for a feed event; a retention `sweep` appends labeled `count=N before=<UTC cutoff>`
   fields and includes the same aggregate in the event's JSON `sweep` object; a leased receipt
-  appends labeled `attempt=N lease=<held, done or lapsed> until=<UTC time>` fields, and
-  `result=<iri>` once done, with the same in its JSON); entries,
+  appends labeled `attempt=N lease=<held, done or lapsed> until=<UTC time>` fields,
+  `result=<iri>` once done, and `recorded=no` while a lapse is computed but not yet recorded,
+  with the same in its JSON, there as `"recorded": false` or `true`); entries,
   definitions and shapes are Turtle. The entry metadata graph (`urn:layer:{layer}:entry-metadata`)
   is Turtle or expanded JSON-LD with entry IRIs, sequence numbers, authors, creation times and
   reply links. Every answer a participant reads also comes as JSON or JSON-LD (README, "JSON faces").
