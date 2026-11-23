@@ -2019,6 +2019,20 @@ impl LayerEndpoint {
             .map(str::trim)
             .filter(|r| !r.is_empty());
         if let Some(result) = result {
+            // Stored with the lease and answered with every read of the receipt: bounded as
+            // every other write to the layer is.
+            if result.len() > self.def().entry_max {
+                return Err(Error::InvalidArgument {
+                    name: "result".into(),
+                    detail: format!(
+                        "{} bytes, over layer `{}`'s bound of {}: a result is named by an IRI, \
+                         such as the content address of a resource that holds it",
+                        result.len(),
+                        self.layer(),
+                        self.def().entry_max
+                    ),
+                });
+            }
             if oxrdf::NamedNode::new(result).is_err() {
                 return Err(Error::InvalidArgument {
                     name: "result".into(),

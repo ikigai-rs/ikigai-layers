@@ -389,6 +389,42 @@ fn a_lapse_whose_tuple_never_went_back_is_repaired_on_open() {
     );
 }
 
+/// A settle's `result=` is stored with the lease and answered with every read of the
+/// receipt, so it is bounded as every other write is: at most the layer's `entry_max`
+/// bytes. One over is refused, and the take stays held.
+#[test]
+fn a_settle_result_is_bounded_by_the_layer() {
+    let (f, _clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    let receipt = receipt_of(&f, &offer_iri("a"));
+    // The task layer sets no entry_max, so it has the default.
+    let entry_max = ikigai_layers::config::DEFAULT_ENTRY_MAX;
+    let result = format!("urn:blake3:{}", "0".repeat(entry_max));
+    let refused = settle(
+        &f,
+        &bobby_gonk(),
+        &receipt,
+        &[("settle", "done"), ("result", &result)],
+    );
+    assert!(
+        matches!(refused, Err(Error::InvalidArgument { ref name, .. }) if name == "result"),
+        "{:?}",
+        refused.as_ref().map(|r| r.len())
+    );
+    let turtle = source(&f.kernel, &receipt, &[], &tasker(&bobby_gonk()));
+    assert!(turtle.contains("\"held\""), "{turtle}");
+    // One within the bound settles.
+    let result = format!("urn:blake3:{}", "0".repeat(64));
+    settle(
+        &f,
+        &bobby_gonk(),
+        &receipt,
+        &[("settle", "done"), ("result", &result)],
+    )
+    .unwrap();
+}
+
 /// A read never writes (ledger #4075): at the lapse, a definition read, an `rd` in each face, a
 /// receipt read and a feed read each leave `feed.log` and the lease files byte-identical. The
 /// reads compute the lapse instead: the tuple reads as pending and the receipt as `lapsed`, not
