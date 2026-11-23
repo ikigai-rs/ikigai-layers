@@ -597,6 +597,26 @@ entry's `rdf:type`. Both the plain and JSON faces omit entry types. A client sho
 new entry's types must read that entry's IRI, costing one entry read per uncached event.
 A `sweep` event describes a retention batch and names the layer, rather than an entry.
 
+**A feed has an epoch**: the door's name for its feed's incarnation (ledger #4114). A
+sequence number says where a follower is in a feed, not in which one: a door restored from a
+backup numbers again the events written after the backup, and a host over a fresh state
+directory numbers its own from 1, so a cursor at or below the head would be answered events
+the follower never saw at numbers it already had. Both feeds' JSON faces carry `"epoch"` beside
+`last` (or `cursor`), and a follower names it back:
+
+```text
+source urn:layer:talk:feed after=12 epoch=5f0c9e3a1b2d4c6e8f0a1b2c3d4e5f60 wait=50
+```
+
+A cursor from another epoch is refused as `conflict`, as one past the head is: ``the cursor on
+layer `talk` is from feed epoch …, and this host's feed is epoch …: this host's feed is not the
+one the cursor came from (restored, or another host); resynchronize from 0 with epoch=…``. A
+read that names no `epoch=` is checked against the head alone, as before. The epoch is one for
+the whole host, minted the first time a host opens its state directory, kept at
+`<state>/feed.epoch` and across restarts. `{epoch}:{seq}` is stable to carry outside: a
+CloudEvent's `ikepoch` and `ikseq`, or a server-sent event's `id`. A restore names a new one
+([Hosting it](#hosting-it)).
+
 ## Offering and taking work
 
 A tuple is one subject that its dropper names, under the layer's own IRI and never used
@@ -771,7 +791,9 @@ front, MCP and the action manifold all offer the same ones.
 | `urn:layer:{layer}` | `application/json` | `{"layer", "label", "model", "kind": key or null, "entry_max": bytes, "types": [...], "feed": bool, "public": bool}`, with `types` as compact terms (`"Layer"`, `"Feed"`); a feed's names no collaboration |
 | `urn:layer:{layer}:scheme` (a feed) | `application/json` | `{"scheme": "<IRI>", "label", "concepts": [{"@id", "prefLabel", "notation", "broader": ["<IRI>"]}]}`, concepts by notation |
 | `urn:layer:{layer}:graph` (a feed) | `application/ld+json` | the graph under the host's feed context (`src/feeds/graph.context.jsonld`), not the layer's egress context |
-| `feed`, `urn:layers:feed`, `urn:layers:me`, `urn:collab:{name}` | `application/json` | as before |
+| `feed` | `application/json` | `{"layer", "epoch", "last", "events": [...]}`, the events as above |
+| `urn:layers:feed` | `application/json` | `{"cursor", "epoch", "events": [...]}`, each event with its `layer` |
+| `urn:layers:me`, `urn:collab:{name}` | `application/json` | as before |
 | `urn:layers:join:count` | `application/json` | `{"joined", "readIn7Days", "readIn30Days"}`, each a number or, under 5, `"fewer than 5"` |
 
 A face a resource does not offer is refused (`invalid-argument` on `as`), never answered in
@@ -1083,6 +1105,14 @@ kernel with a clock. State is files, sealed at rest (see below): each entry is w
   lives; a second host over the same directory, in this process or another, is refused with
   the holder's pid. The operating system releases the lock when the holder exits, however it
   exits.
+- **A restore names a new feed epoch.** A backup carries `<state>/feed.epoch` with every other
+  byte of state, so a restored directory is the same incarnation until it is told otherwise.
+  After restoring it, and before its host first opens, run `ikigai-layers epoch <state dir>
+  --renew` (or call `Host::renew_epoch`): every follower's cursor from before is then refused and
+  it resynchronizes from 0, instead of silently skipping the events the restored feed numbers
+  again. It is refused while a host holds the directory, and for a directory no host has opened.
+  `ikigai-layers epoch <state dir>` prints the current one. The epoch is not a secret (every feed
+  reader is given it), so it is the one state file that is not sealed, besides the lock.
 - **Admission is the host's own call.** The host links
   [ikigai-shacl](https://crates.io/crates/ikigai-shacl) and validates every write itself,
   so a door binds no `urn:shacl:validate`: that endpoint declares no capability, and bound

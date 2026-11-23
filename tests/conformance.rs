@@ -98,7 +98,13 @@ fn suite(
         .required_on_mutating()
         .fixture(Probe::new("collab", Verb::Source).binding("name", "bobby"))
         .fixture(Probe::new("collab-participants", Verb::Source).binding("name", "bobby"))
-        .fixture(Probe::new("layers-feed", Verb::Source).arg("after", "talk:0"))
+        // A probe fills an argument it is not given with a sample, and a sample epoch is
+        // another feed's (ledger #4114), refused as Conflict: so the host's own is given.
+        .fixture(
+            Probe::new("layers-feed", Verb::Source)
+                .arg("after", "talk:0")
+                .arg("epoch", f.host.epoch()),
+        )
         // Answered about its caller, so probed AS one: brian, through the grant his door
         // mints (two collaborations), and every check judges what it served.
         .fixture(Probe::new("layers-me", Verb::Source).capability(minted(f, &participant("brian"))))
@@ -134,7 +140,11 @@ fn suite(
                     .arg("content", message("probe"))
                     .capability(minted(f, &sayer(layer))),
             )
-            .fixture(Probe::new(id("feed"), Verb::Source).arg("after", "0"))
+            .fixture(
+                Probe::new(id("feed"), Verb::Source)
+                    .arg("after", "0")
+                    .arg("epoch", f.host.epoch()),
+            )
             .fixture(Probe::new(id("entry"), Verb::Source).binding("id", entry))
             .fixture(Probe::new(id("graph"), Verb::Source).binding("slug", "bobby"))
             .fixture(Probe::new(id("latest"), Verb::Source).arg("about", "urn:example:topic"))
@@ -155,7 +165,11 @@ fn suite(
                 .arg("content", offer("probe"))
                 .capability(minted(f, &gonk())),
         )
-        .fixture(Probe::new(id("feed"), Verb::Source).arg("after", "0"))
+        .fixture(
+            Probe::new(id("feed"), Verb::Source)
+                .arg("after", "0")
+                .arg("epoch", f.host.epoch()),
+        )
         .fixture(Probe::new(id("receipt"), Verb::Source).binding("id", receipt))
         .opt_out(
             id("tuples"),

@@ -270,6 +270,40 @@ fn after_spec(summary: &str) -> ArgSpec {
         .class(xsd("nonNegativeInteger"))
 }
 
+fn epoch_spec() -> ArgSpec {
+    ArgSpec::new("epoch")
+        .summary(
+            "the feed epoch the cursor came from, as a JSON face named it: a cursor from another \
+             epoch (a restored door, or another host) is refused as Conflict, so resynchronize \
+             from 0; without it only the head is checked",
+        )
+        .class(xsd("string"))
+        .optional()
+}
+
+/// The reader's `epoch=`, when it names one, checked against the host's (ledger #4114). A
+/// cursor from another epoch is refused as `Conflict` before anything else about it, since
+/// none of its numbers mean anything here.
+fn check_epoch(inv: &Invocation<'_>, host: &Host, about: &str) -> Result<()> {
+    let Some(epoch) = optional_str(inv, "epoch")? else {
+        return Ok(());
+    };
+    feed::check_epoch(epoch).map_err(|detail| Error::InvalidArgument {
+        name: "epoch".into(),
+        detail: format!("`{epoch}`: {detail}"),
+    })?;
+    if epoch == host.epoch() {
+        return Ok(());
+    }
+    Err(Error::Conflict(format!(
+        "the cursor on {about} is from feed epoch {epoch}, and this host's feed is epoch {}: this \
+         host's feed is not the one the cursor came from (restored, or another host); \
+         resynchronize from 0 with epoch={}",
+        host.epoch(),
+        host.epoch()
+    )))
+}
+
 fn wait_spec() -> ArgSpec {
     ArgSpec::new("wait")
         .summary(format!(
@@ -963,6 +997,7 @@ impl LayerEndpoint {
         if as_json {
             let body = serde_json::json!({
                 "layer": self.layer(),
+                "epoch": self.host().epoch(),
                 "last": events.last().map_or(after, |event| event.seq),
                 "events": events,
             });
@@ -978,6 +1013,7 @@ impl LayerEndpoint {
             optional_u64(inv, "after")?.ok_or_else(|| Error::MissingArgument("after".into()))?;
         let wait = wait_of(inv)?;
         let as_json = face(inv, &[TEXT, JSON])? == JSON;
+        check_epoch(inv, &self.host(), &format!("layer `{}`", self.layer()))?;
         let last = self.state.last_seq();
         if after > last {
             return Err(Error::Conflict(format!(
@@ -2536,12 +2572,14 @@ impl Endpoint for LayerEndpoint {
                      line per event, `seq time kind iri by`, waiting up to wait= seconds when \
                      there is none yet; kind is the operation (say, out, taken, returned, \
                      sweep), \
-                     and an entry's RDF types are read from the entry"
+                     and an entry's RDF types are read from the entry. The JSON face carries \
+                     the last sequence and the feed's epoch, which epoch= names back"
                 ))
                 .verb(Verb::Source)
                 .input(after_spec(
                     "the last sequence number already seen (0 for everything)",
                 ))
+                .input(epoch_spec())
                 .input(wait_spec())
                 .input(as_spec(&[TEXT, JSON]))
                 .output(TEXT)
@@ -2983,6 +3021,17 @@ impl Endpoint for MultiFeed {
                         .into(),
                     )
                 })?;
+            layers.insert(name.as_str(), (state, *after));
+        }
+        // After the grants, so an epoch refusal never tells an unheld layer exists, and before
+        // the heads, since no number from another epoch means anything here.
+        let named: Vec<String> = cursor.keys().map(|name| format!("`{name}`")).collect();
+        let about = match named.as_slice() {
+            [one] => format!("layer {one}"),
+            many => format!("layers {}", many.join(", ")),
+        };
+        check_epoch(inv, &self.host, &about)?;
+        for (name, (state, after)) in &layers {
             let last = state.last_seq();
             if *after > last {
                 return Err(Error::Conflict(format!(
@@ -2990,7 +3039,6 @@ impl Endpoint for MultiFeed {
                      resynchronize that layer from 0"
                 )));
             }
-            layers.insert(name.as_str(), (state, *after));
         }
         feed::wait_until(self.host.notify(), wait, || {
             layers
@@ -3017,6 +3065,7 @@ impl Endpoint for MultiFeed {
                 .collect();
             let body = serde_json::json!({
                 "cursor": feed::format_cursor(&next),
+                "epoch": self.host.epoch(),
                 "events": events,
             });
             Representation::new(ReprType::new(JSON), body.to_string().into_bytes())
@@ -3041,7 +3090,8 @@ impl Endpoint for MultiFeed {
                 "One wait over several layers' feeds: events after a cursor vector \
                  (after=talk:12,tasks:40), one line per event prefixed with its layer, waiting \
                  up to wait= seconds on any of them. Each layer named needs its own exact \
-                 urn:cap:layer:feed:{layer}; the JSON face carries the next cursor",
+                 urn:cap:layer:feed:{layer}; the JSON face carries the next cursor and the feed's \
+                 epoch, which epoch= names back",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
@@ -3051,6 +3101,7 @@ impl Endpoint for MultiFeed {
                     .summary("the cursor: layer:seq pairs, comma-separated")
                     .class(xsd("string")),
             )
+            .input(epoch_spec())
             .input(wait_spec())
             .input(as_spec(&[TEXT, JSON]))
             .output(TEXT)

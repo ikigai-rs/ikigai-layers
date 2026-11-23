@@ -744,47 +744,68 @@ fn utf8(repr: &Representation) -> Result<String> {
         .map_err(|_| Error::Endpoint("the layer answered a non-UTF-8 representation".into()))
 }
 
-/// The JSON feed of `layer` after `after`, waiting up to `wait`: the new cursor (its `last`).
+/// Where a follower is in a layer's feed: the last sequence number it saw, and the feed's
+/// epoch (ledger #4114) once an answer has named it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Cursor {
+    after: u64,
+    epoch: Option<String>,
+}
+
+/// The JSON feed of `layer` after `cursor`, waiting up to `wait`: the new cursor (its `last`,
+/// and its `epoch` when the host names one). A cursor from another epoch is refused by the host
+/// as `Conflict`, as one past the head is.
 async fn wait_feed<D: Door + ?Sized>(
     door: &D,
     layer: &str,
-    after: u64,
+    cursor: &Cursor,
     wait: Duration,
-) -> Result<u64> {
+) -> Result<Cursor> {
     // The feed waits in whole seconds, at most 60; a shorter deadline races it below.
     let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
     let secs = secs.min(crate::time::MAX_WAIT_SECS).to_string();
-    let after = after.to_string();
+    let after = cursor.after.to_string();
+    let mut args: Vec<(&str, &[u8])> = vec![
+        ("after", after.as_bytes()),
+        ("wait", secs.as_bytes()),
+        ("as", b"application/json"),
+    ];
+    if let Some(epoch) = &cursor.epoch {
+        args.push(("epoch", epoch.as_bytes()));
+    }
     let repr = door
         .call(layer_request(
             Verb::Source,
             &format!("urn:layer:{layer}:feed"),
-            &[
-                ("after", after.as_bytes()),
-                ("wait", secs.as_bytes()),
-                ("as", b"application/json"),
-            ],
+            &args,
         ))
         .await?;
     let json: serde_json::Value = serde_json::from_slice(&repr.bytes)
         .map_err(|e| Error::Endpoint(format!("layer `{layer}`'s feed is not JSON: {e}")))?;
-    json.get("last")
+    let after = json
+        .get("last")
         .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| Error::Endpoint(format!("layer `{layer}`'s feed names no `last`")))
+        .ok_or_else(|| Error::Endpoint(format!("layer `{layer}`'s feed names no `last`")))?;
+    // A host from before the epoch names none; the follower then checks the head alone.
+    let epoch = json
+        .get("epoch")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Ok(Cursor { after, epoch })
 }
 
 /// [`wait_feed`], cut short by `timer` after `remaining`: `None` when the timer came first.
 async fn wait_feed_until<D: Door + ?Sized>(
     door: &D,
     layer: &str,
-    after: u64,
+    cursor: &Cursor,
     remaining: Duration,
     timer: &dyn Timer,
-) -> Result<Option<u64>> {
+) -> Result<Option<Cursor>> {
     if remaining.is_zero() {
         return Ok(None);
     }
-    let feed = Box::pin(wait_feed(door, layer, after, remaining));
+    let feed = Box::pin(wait_feed(door, layer, cursor, remaining));
     let timer = timer.sleep(remaining);
     match select(feed, timer).await {
         Either::Left((last, _)) => last.map(Some),
@@ -803,7 +824,7 @@ async fn wait_feed_until<D: Door + ?Sized>(
 pub struct Asker<D: Door> {
     door: D,
     layer: String,
-    cursor: Mutex<u64>,
+    cursor: Mutex<Cursor>,
     minted: AtomicU64,
     clock: Option<Arc<dyn Clock>>,
     timer: Option<Arc<dyn Timer>>,
@@ -817,7 +838,7 @@ impl<D: Door> Asker<D> {
         Asker {
             door,
             layer: layer.to_string(),
-            cursor: Mutex::new(0),
+            cursor: Mutex::new(Cursor::default()),
             minted: AtomicU64::new(0),
             clock: timer::default_clock(),
             timer: timer::default_timer(),
@@ -953,14 +974,17 @@ impl<D: Door> Asker<D> {
             if let Some(answer) = self.take_reply(correlation, &reply).await? {
                 return answer;
             }
-            let after = *self.cursor.lock().expect("cursor lock");
+            let cursor = self.cursor.lock().expect("cursor lock").clone();
             let remaining = deadline.saturating_sub(elapsed());
-            match wait_feed_until(&self.door, &self.layer, after, remaining, timer).await {
-                Ok(Some(last)) => *self.cursor.lock().expect("cursor lock") = last,
+            match wait_feed_until(&self.door, &self.layer, &cursor, remaining, timer).await {
+                Ok(Some(next)) => *self.cursor.lock().expect("cursor lock") = next,
                 Ok(None) => break,
-                // A cursor past the feed's end: this host's feed is not the one it came
-                // from (restored, or another host). Start over from its beginning.
-                Err(Error::Conflict(_)) => *self.cursor.lock().expect("cursor lock") = 0,
+                // A cursor past the feed's end, or from another epoch: this host's feed is not
+                // the one it came from (restored, or another host). Start over from its
+                // beginning, learning its epoch from the next answer.
+                Err(Error::Conflict(_)) => {
+                    *self.cursor.lock().expect("cursor lock") = Cursor::default();
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -1233,15 +1257,20 @@ pub async fn follow<L: Door + ?Sized, R: Door>(
     after: u64,
     wait: Duration,
 ) -> Result<u64> {
-    let last = match wait_feed(layer_door, layer, after, wait).await {
+    // The cursor names no epoch: a resolver serves every pending request at each step, so a
+    // restored feed delays it by one wait at most and loses it nothing.
+    let cursor = Cursor { after, epoch: None };
+    let last = match wait_feed(layer_door, layer, &cursor, wait).await {
         Ok(last) => last,
         // A cursor past the feed's end: start over (serving is idempotent: what was served
         // is no longer pending).
-        Err(Error::Conflict(_)) => wait_feed(layer_door, layer, 0, Duration::ZERO).await?,
+        Err(Error::Conflict(_)) => {
+            wait_feed(layer_door, layer, &Cursor::default(), Duration::ZERO).await?
+        }
         Err(e) => return Err(e),
     };
     serve_pending(layer_door, layer, resolver).await?;
-    Ok(last)
+    Ok(last.after)
 }
 
 #[cfg(test)]

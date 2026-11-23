@@ -304,6 +304,85 @@ impl FeedLog {
     }
 }
 
+/// The file in a state directory that names its feeds' EPOCH (ledger #4114): one line, the
+/// epoch, minted the first time a host opens the directory and kept from then on.
+pub const EPOCH_FILE: &str = "feed.epoch";
+
+/// The longest epoch a reader may name; a minted one is 32 characters.
+const MAX_EPOCH: usize = 64;
+
+/// A feed's EPOCH is the door's name for its feed's incarnation (ledger #4114, the restored-door
+/// case LF-5 of ledger #3559). A sequence number alone says where a follower is in A feed, not
+/// in WHICH one: a door restored from a backup, or a host over a fresh state directory, numbers
+/// its events from where its state says, and a follower whose cursor is at or below that head
+/// would otherwise be answered events it never saw at numbers it already had, and miss the
+/// events it is past. So the feed's JSON faces carry the epoch, a reader names it back with
+/// `epoch=`, and a cursor from another epoch is refused as `Conflict`, as one past the head is.
+///
+/// One epoch for the whole host, every layer's feed (a backup copies the state directory as
+/// one). It is not a secret, since every follower reads it, so the file is plaintext, `0600`
+/// like every other state file. A restart keeps it. **A backup carries it too**, with every
+/// other byte of state, so a restore names a new one ([`renew_epoch`], the binary's `epoch
+/// <state dir> --renew`) before its host first opens.
+///
+/// Answers the epoch the directory names, minting and writing one when it names none.
+pub(crate) fn load_or_mint_epoch(state_dir: &Path) -> Result<String, String> {
+    match read_epoch(state_dir)? {
+        Some(epoch) => Ok(epoch),
+        None => renew_epoch(state_dir),
+    }
+}
+
+/// The epoch `state_dir` names, or `None` when no host has opened it since the epoch was
+/// introduced (the next open mints one). A file that names no epoch is refused, naming it.
+pub fn read_epoch(state_dir: &Path) -> Result<Option<String>, String> {
+    let path = state_dir.join(EPOCH_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let epoch = text.strip_suffix('\n').unwrap_or(&text);
+            check_epoch(epoch).map_err(|why| format!("{}: {why}", path.display()))?;
+            Ok(Some(epoch.to_string()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read {}: {e}", path.display())),
+    }
+}
+
+/// Mint a new epoch for the state directory and write it whole, over the old one. The caller
+/// holds the directory's lock. Answers the new epoch.
+pub(crate) fn renew_epoch(state_dir: &Path) -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|e| format!("a feed epoch cannot be drawn: {e}"))?;
+    let epoch: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    at_rest::replace(&state_dir.join(EPOCH_FILE), format!("{epoch}\n").as_bytes())?;
+    Ok(epoch)
+}
+
+/// Whether `epoch` is one a feed could name: 1 to 64 lowercase letters, digits and hyphens.
+///
+/// ```
+/// use ikigai_layers::feed::check_epoch;
+///
+/// assert!(check_epoch("5f0c9e3a1b2d4c6e8f0a1b2c3d4e5f60").is_ok());
+/// assert!(check_epoch("").is_err());
+/// assert!(check_epoch("a b").is_err());
+/// ```
+pub fn check_epoch(epoch: &str) -> Result<(), String> {
+    let ok = !epoch.is_empty()
+        && epoch.len() <= MAX_EPOCH
+        && epoch
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "an epoch is 1 to {MAX_EPOCH} lowercase letters, digits and hyphens, as a feed's \
+             JSON face names it"
+        ))
+    }
+}
+
 /// Make sure a feed file exists (so a layer's directory says it is a layer).
 pub(crate) fn touch(path: &Path) -> Result<(), String> {
     at_rest::private_file()

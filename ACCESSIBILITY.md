@@ -35,7 +35,8 @@ presentation has not been evaluated here.
   is written `(untitled)`), and its graph and scheme as JSON-LD and JSON.
 - **Refusals** (`src/endpoints.rs`, `src/channel.rs`, `src/tuplespace.rs`, `src/onboard/`):
   sentences that name the layer and the argument, such as ``cursor 9 is past layer `talk`'s last
-  event, 4: … resynchronize from 0`` or ``tuple= names one tuple and match= selects by a
+  event, 4: … resynchronize from 0``, ``the cursor on layer `talk` is from feed epoch <epoch>,
+  and this host's feed is epoch <epoch>: … resynchronize from 0 with epoch=<epoch>`` or ``tuple= names one tuple and match= selects by a
   template: give one``. An entitlement naming a participant another certificate holds answers
   ``onb:principal <participant> is already held by certificate <fingerprint>, …`` and says how
   to free it, on the onboarding status and the stderr line below. One naming a participant a
@@ -97,7 +98,10 @@ presentation has not been evaluated here.
   participant or is a joined identity, naming the entry, saying what to do instead and that
   nothing was written;
   `onboard setup` prints what it did and a `stuck: …` line for each way a node would be left in
-  the lobby; `descriptor` prints `wrote <path> and <path>`. Failures go to stderr.
+  the lobby; `descriptor` prints `wrote <path> and <path>`; `epoch` prints ``epoch <epoch>``,
+  and with `--renew` ``epoch <epoch>: renewed; every follower starts again from 0``, and
+  refuses a state directory a host holds (naming its pid) or that no host has opened. Failures
+  go to stderr.
 
 Not this repository's: the text participants write into entries and tuples, which is stored and
 answered as written; and how a door, a client or a terminal presents any of this.
@@ -142,7 +146,7 @@ above; they describe code inspection, not a user evaluation.
 | Enrollment binary refusals and no-write behavior | Pass | `tests/grants.rs`: `the_binary_writes_both_files_or_nothing` and `a_missing_or_empty_config_directory_is_refused_and_nothing_is_written` check stderr naming the layer or directory and that refusal writes nothing. Does not evaluate terminal presentation. |
 | Setup diagnostics and exit codes | Pass | `tests/setup.rs`: `setup_refuses_without_writing_anything`, the `check_finds_…` tests and `check_on_a_bare_config_names_every_missing_piece` check the named argument, exit codes 2 or 1, `stuck` reasons and no-write text. Does not test comprehension. |
 | Admission and host refusals | Pass | `tests/channel.rs`, `tests/tuplespace.rs` and `tests/door.rs` check `does not conform`; the door suite also checks `a_second_host_over_one_state_directory_is_refused_naming_the_first`. Wording assertions do not establish that long SHACL messages are usable. |
-| Feed cursor refusal | Pass | `tests/feed.rs`: `after_is_required_and_a_cursor_from_the_future_is_refused` checks the required argument and future cursor refusal; no assistive technology used. |
+| Feed cursor refusal | Pass | `tests/feed.rs`: `after_is_required_and_a_cursor_from_the_future_is_refused` checks the required argument and future cursor refusal; `tests/feed_epoch.rs`: `a_cursor_from_another_hosts_feed_is_refused_even_below_the_head` checks that the epoch refusal names the layer, both epochs and the resynchronization, and `the_binary_prints_and_renews_the_epoch` checks the binary's lines and refusals; no assistive technology used. |
 | Onboarding identity refusals | Pass | `tests/onboard.rs`: the four `an_entitlement_naming_…_is_refused` tests cover a hand-enrolled participant, another certificate's participant, a manifest-granted participant and the uncertified controller. Checks refusal content, not how a door presents it. |
 | Participant identity refusals | Pass | `tests/me.rs`: `no_principal_is_a_refusal` and `an_unknown_face_is_refused` check refusal text, not client presentation. |
 | Feed publisher and concept refusals; Atom and JSON faces | Pass | `tests/feed_layers.rs`: `a_non_publisher_with_a_say_grant_is_refused_naming_the_feed`, `an_entry_subject_outside_the_scheme_is_refused_naming_it`, `an_unknown_concept_is_refused_naming_it`, and the suite's representation tests. Checks content and formats, not a rendered feed reader. |
@@ -212,3 +216,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-13 | `grants`' `count-reader` line and its refusals of a `join.count_readers` entry. |
 | 2026-11-15 | Fix natural plurals, name invalid grants arguments, and use sentence case for the restart notice; add wording regression tests. |
 | 2026-11-15 | Whether a name is in use: a one-word answer, a JSON face, and its three refusals. |
+| 2026-11-23 | The feed epoch: its refusal of a cursor from another epoch, its JSON fields and the `epoch` command. |
