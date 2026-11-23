@@ -550,3 +550,151 @@ fn lapses_are_recorded_in_until_order() {
         "{feed}"
     );
 }
+
+/// A feed line's fields: its number, time, kind and IRI.
+fn feed_lines(f: &Fixture) -> Vec<(String, String, String, String)> {
+    source(
+        &f.kernel,
+        "urn:layer:tasks-bobby:feed",
+        &[("after", "0")],
+        &tasker(&bobby_gonk()),
+    )
+    .lines()
+    .map(|l| {
+        let w: Vec<&str> = l.split(' ').collect();
+        (w[0].into(), w[1].into(), w[2].into(), w[3].into())
+    })
+    .collect()
+}
+
+/// A take at the lapse, with no sweep, records the lapse first and then takes the tuple
+/// (ledger #4076): the feed reads out, taken, returned, taken, and `returned` is at the
+/// lapse instant. Before the lapse the same take is refused, as today.
+#[test]
+fn a_take_at_the_lapse_records_it_first() {
+    let (mut f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    at(&mut f, &clock, 9);
+    let refused = take(&f.kernel, &participant("bobby"), &offer_iri("a"));
+    assert!(matches!(refused, Err(Error::Conflict(_))), "{refused:?}");
+    assert_eq!(kinds(&f), ["out", "taken"]);
+    at(&mut f, &clock, 12);
+    take(&f.kernel, &participant("bobby"), &offer_iri("a")).unwrap();
+    let feed = feed_lines(&f);
+    let kinds: Vec<&str> = feed.iter().map(|l| l.2.as_str()).collect();
+    assert_eq!(kinds, ["out", "taken", "returned", "taken"], "{feed:?}");
+    assert_eq!(feed[2].1, LAPSE, "{feed:?}");
+    assert_eq!(feed[3].1, "2026-10-10T00:12:00.000Z", "{feed:?}");
+    assert!(feed.iter().all(|l| l.3 == offer_iri("a")), "{feed:?}");
+    // The sweep, after, finds nothing left to record.
+    sweep_leases(&f, &clock);
+    assert_eq!(feed_lines(&f).len(), 4);
+}
+
+/// A take and the host's sweep started together on separate threads record the lapse once:
+/// whichever holds the write lock first records it, and the other finds it recorded. Many
+/// rounds, so both orders run.
+#[test]
+fn a_take_racing_the_sweep_returns_once() {
+    for _ in 0..16 {
+        let (mut f, clock) = leased();
+        out(&f.kernel, &gonk(), &offer("a")).unwrap();
+        take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+        at(&mut f, &clock, 10);
+        let start = std::sync::Barrier::new(2);
+        let (taken, swept) = std::thread::scope(|scope| {
+            let taker = scope.spawn(|| {
+                start.wait();
+                take(&f.kernel, &participant("bobby"), &offer_iri("a"))
+            });
+            let sweeper = scope.spawn(|| {
+                start.wait();
+                futures::executor::block_on(f.host.sweep_leases(clock.now()))
+            });
+            (taker.join().unwrap(), sweeper.join().unwrap())
+        });
+        taken.unwrap();
+        swept.unwrap();
+        let feed = feed_lines(&f);
+        let kinds: Vec<&str> = feed.iter().map(|l| l.2.as_str()).collect();
+        assert_eq!(kinds, ["out", "taken", "returned", "taken"], "{feed:?}");
+        assert_eq!(feed[2].1, LAPSE, "{feed:?}");
+    }
+}
+
+/// Reads `before` for its first `reads` reads, then `after`: a clock that moves on while one
+/// request runs, as a live clock does.
+struct SteppingClock {
+    read: AtomicU64,
+    reads: u64,
+    before: u64,
+    after: u64,
+}
+impl ikigai_core::Clock for SteppingClock {
+    fn now(&self) -> Time {
+        let n = self.read.fetch_add(1, Ordering::SeqCst);
+        Time::from_millis(if n < self.reads {
+            self.before
+        } else {
+            self.after
+        })
+    }
+}
+
+/// A write records the lapses due at the instant it is stamped with, inside its own write
+/// lock, not those due at some earlier reading of the clock (ledger #4076). The clock here
+/// reads 1ms before the lapse for the first few reads of one request, then five minutes
+/// after it: wherever in the request the clock moves on, a take of the lapsed tuple at the
+/// later instant succeeds after recording the lapse, and an `out` stamped at the later
+/// instant comes after the `returned`, so the feed's times never go backward.
+#[test]
+fn a_write_records_the_lapses_due_at_its_own_instant() {
+    let lapse = START + 10 * MINUTE;
+    for reads in 0..8 {
+        for write in ["take", "out"] {
+            let (mut f, _) = leased();
+            out(&f.kernel, &gonk(), &offer("a")).unwrap();
+            take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+            let clock = Arc::new(SteppingClock {
+                read: AtomicU64::new(0),
+                reads,
+                before: lapse - 1,
+                after: lapse + 5 * MINUTE,
+            });
+            f.kernel = kernel_over(&f.host).with_clock(clock.clone());
+            let result = match write {
+                "take" => take(&f.kernel, &participant("bobby"), &offer_iri("a")),
+                _ => out(&f.kernel, &gonk(), &offer("b")).map(|_| String::new()),
+            };
+            let during = clock.read.load(Ordering::SeqCst);
+            futures::executor::block_on(f.host.sweep_leases(clock.now())).unwrap();
+            let feed = feed_lines(&f);
+            let times: Vec<&str> = feed.iter().map(|l| l.1.as_str()).collect();
+            assert!(
+                times.windows(2).all(|w| w[0] <= w[1]),
+                "{write}, clock moved after {reads} reads: feed times go backward: {feed:#?}"
+            );
+            if write == "take" {
+                // Refused only if every clock read of the take's request was before the lapse.
+                match result {
+                    Ok(_) => assert_eq!(
+                        feed.iter().map(|l| l.2.as_str()).collect::<Vec<_>>(),
+                        ["out", "taken", "returned", "taken"],
+                        "{feed:#?}"
+                    ),
+                    Err(e) => {
+                        assert!(matches!(e, Error::Conflict(_)), "{e:?}");
+                        assert!(
+                            during <= reads,
+                            "{write}, clock moved after {reads} reads: refused a take at an \
+                             instant past the lapse: {e:?}"
+                        );
+                    }
+                }
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+}
