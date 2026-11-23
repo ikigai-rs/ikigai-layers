@@ -110,7 +110,8 @@ impl LayerState {
     }
 
     /// Return to the space every tuple whose lease has lapsed by `now`, under the layer's
-    /// write lock (ledger #2119), in the order the leases lapsed. Each lapse is recorded at its
+    /// write lock (ledger #2119), in the order the leases lapsed ([`Self::record_lapses`]).
+    /// Each lapse is recorded at its
     /// lease's `until`, not at `now` (ledger #4075): the lease file's lapse time and the
     /// `returned` event's time are the instant a read already computed it lapsed, whenever the
     /// sweep noticed. Each lapse is stored first, with the number of its
@@ -132,6 +133,21 @@ impl LayerState {
             return Ok(false);
         }
         let _write = self.write.lock().await;
+        self.record_lapses(now).await
+    }
+
+    /// Record every lapse due by `now`, in the order the leases lapsed, exactly as
+    /// [`Self::sweep_leases`] does, for a caller that ALREADY holds the layer's write lock: a
+    /// write on the layer (`out`, `take`, a settle) calls it first, with the instant it stamps
+    /// its own event with, so every `returned` (at its `until`, no later than that instant)
+    /// precedes the write's event and the feed's times never go backward (ledger #4076). The
+    /// lock is what keeps a write and the sweep from both recording one lapse: whichever runs
+    /// second finds the receipt no longer due. Answers whether anything changed.
+    pub(crate) async fn record_lapses(&self, now: ikigai_core::Time) -> Result<bool, String> {
+        let ModelState::Tuplespace(space) = &self.model else {
+            return Ok(false);
+        };
+        let time = crate::time::xsd_date_time(now);
         let due = space.index.read().expect("tuplespace lock").due(&time);
         let mut changed = false;
         for mut receipt in due {

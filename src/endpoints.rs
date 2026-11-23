@@ -1035,6 +1035,24 @@ impl LayerEndpoint {
         })
     }
 
+    /// Under the layer's write lock, first thing in a tuplespace write (`out`, `take`, a
+    /// settle): read the instant the write is stamped with, and record every lease lapse due
+    /// by it, in `until` order, before the write does anything else (ledger #4076). So a take
+    /// of a tuple whose lease has passed finds it pending, every `returned` precedes the
+    /// write's own event, and the feed's times never go backward. Answers that instant.
+    async fn record_lapses(&self, inv: &Invocation<'_>) -> Result<ikigai_core::Time> {
+        let now = self.now(inv)?;
+        if self
+            .state
+            .record_lapses(now)
+            .await
+            .map_err(|e| self.space_error(e))?
+        {
+            self.host().notify().bump();
+        }
+        Ok(now)
+    }
+
     /// Under the layer's write lock, before a write takes its sequence number: log what an
     /// earlier write stored but could not log (ledger #1218), and answer the number this
     /// write carries. When the feed still cannot be written the write is refused here,
@@ -1471,6 +1489,7 @@ impl LayerEndpoint {
         let answer = |subject: &str| named(subject, as_json);
         // From here to the feed append is one step per layer, as for `say`.
         let _write = self.state.write.lock().await;
+        let now = self.record_lapses(inv).await?;
         {
             let index = space.index.read().expect("tuplespace lock");
             match index.lookup(&draft.subject) {
@@ -1497,7 +1516,6 @@ impl LayerEndpoint {
             }
         }
         let seq = self.settle_feed()?;
-        let now = self.now(inv)?;
         let created = xsd_date_time(now);
         let stamped = draft.stamp(&dropper, &created, seq);
         admit(self.def(), &stamped)?;
@@ -1549,6 +1567,9 @@ impl LayerEndpoint {
         let lease = lease_of(self.def(), inv)?;
         let space = self.state.tuplespace();
         let _write = self.state.write.lock().await;
+        // A lease that has passed is recorded first, so its tuple is pending below; one that
+        // has not is still a take, refused as already taken.
+        let now = self.record_lapses(inv).await?;
         let meta: TupleMeta = {
             let index = space.index.read().expect("tuplespace lock");
             match index.lookup(&subject) {
@@ -1594,7 +1615,6 @@ impl LayerEndpoint {
         let text = String::from_utf8(bytes)
             .map_err(|_| self.space_error(format!("tuple {} is not UTF-8", meta.cid)))?;
         let tuple = rdf::parse_turtle(&text).map_err(|e| self.space_error(e))?;
-        let now = self.now(inv)?;
         let time = xsd_date_time(now);
         let id = id::mint(now.as_millis(), seq);
         let until = lease.map(|lease| lease_until(now, lease)).transpose()?;
@@ -2011,6 +2031,7 @@ impl LayerEndpoint {
         }
         let space = self.state.tuplespace();
         let _write = self.state.write.lock().await;
+        let now = self.record_lapses(inv).await?;
         let receipt = space
             .index
             .read()
@@ -2036,7 +2057,6 @@ impl LayerEndpoint {
                  to settle"
             )));
         };
-        let now = self.now(inv)?;
         let lapsed = || {
             Error::Conflict(format!(
                 "receipt <{iri}>'s lease lapsed at {}, and <{}> went back to the space: a \
@@ -2381,13 +2401,15 @@ impl Endpoint for LayerEndpoint {
         if let (false, Some(principal)) = (self.is_share(), inv.capability.principal()) {
             self.host().gate(principal, inv.now())?;
         }
-        // A write records every due lapse before it does anything else; a read never does
-        // (ledger #4075). A read (Source, Exists, Meta) COMPUTES a held lease past its `until`
-        // as lapsed instead: its tuple reads as pending and its receipt as `lapsed`, with
-        // `recorded` false, and nothing is stored (README, "lease"). The lease sweep runs before
-        // the retention sweep below, so a write's `returned` events come before its `sweep`.
+        // A write records every due lapse before it does anything else, inside its own write
+        // lock (`record_lapses`, ledger #4076); a read never does (ledger #4075). A read
+        // (Source, Exists, Meta) COMPUTES a held lease past its `until` as lapsed instead: its
+        // tuple reads as pending and its receipt as `lapsed`, with `recorded` false, and
+        // nothing is stored (README, "lease"). On a layer that also retains, the lease sweep
+        // runs here too, before the retention sweep below, so a write's `returned` events come
+        // before its `sweep`.
         let writes = matches!(inv.request.verb, Verb::Sink | Verb::Delete);
-        if writes && self.def().model == Model::Tuplespace {
+        if writes && self.def().model == Model::Tuplespace && self.def().retain.is_some() {
             if let Some(now) = inv.now() {
                 if self
                     .state

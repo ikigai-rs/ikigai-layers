@@ -683,8 +683,11 @@ its tuple is pending again). A read never writes: from the lease's `until` on, e
 reads as pending and the receipt as `lapsed`, and nothing is stored. Until the lapse is
 recorded, `rd state=taken` appends `recorded=no` to the receipt's line and its JSON `lease`
 says `"recorded": false` (`true` once recorded). The lapse is recorded, with its `returned`
-event, by `Host::sweep_leases(now)` or by the next write on the layer, whichever runs first;
-the event's time and the lapse's are the lease's `until`, not the moment the host noticed.
+event, by `Host::sweep_leases(now)` or by the next write on the layer (`out`, `take`, a
+settle), whichever runs first. A write records every due lapse first, under the layer's write
+lock and in `until` order, so a take of a tuple whose lease has passed succeeds, and every
+`returned` comes before the write's own event. The event's time and the lapse's are the lease's
+`until`, not the moment the host noticed.
 For an idle host, the deployment schedules `Host::sweep_leases(now)` with its clock. For now
 `rd match=` omits a lapsed tuple until its lapse is recorded (an interim, until the template
 can be evaluated against the receipt's copy).
