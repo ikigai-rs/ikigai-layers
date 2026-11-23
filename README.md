@@ -678,11 +678,16 @@ subject and `ik:seq`, pending again for anyone to take, and the feed logs a `ret
 with its subject, `by = urn:layers:lease`. The next take's receipt counts the attempt. After
 the lapse, `done`, `renew` and a report on the offer from the late taker are each refused as
 a Conflict, so a tuple keeps one result. The lapsed receipt stays (retention keeps it while
-its tuple is pending again). The host returns lapsed tuples before every request on the
-layer, reads included: a Source of the definition, shapes, context, feed, tuples or a receipt
-at or after a lapse writes the `returned` event, as a take would. A read on a leased layer can
-therefore grow the feed. For an idle host, the deployment schedules `Host::sweep_leases(now)`
-with its clock.
+its tuple is pending again). A read never writes: from the lease's `until` on, every read
+(the tuples, a receipt, the feed, the definition) computes the lease as lapsed, so the tuple
+reads as pending and the receipt as `lapsed`, and nothing is stored. Until the lapse is
+recorded, `rd state=taken` appends `recorded=no` to the receipt's line and its JSON `lease`
+says `"recorded": false` (`true` once recorded). The lapse is recorded, with its `returned`
+event, by `Host::sweep_leases(now)` or by the next write on the layer, whichever runs first;
+the event's time and the lapse's are the lease's `until`, not the moment the host noticed.
+For an idle host, the deployment schedules `Host::sweep_leases(now)` with its clock. For now
+`rd match=` omits a lapsed tuple until its lapse is recorded (an interim, until the template
+can be evaluated against the receipt's copy).
 A lapse is stored before its tuple goes back, so a host that stops between the two drops the
 tuple back when it next opens.
 

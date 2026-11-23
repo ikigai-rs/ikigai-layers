@@ -171,6 +171,35 @@ pub struct Lease {
     pub state: LeaseState,
 }
 
+impl Lease {
+    /// Whether a read at `now` computes this lease as lapsed while no lapse is recorded yet:
+    /// it is held and its `until` has passed. A read never records it (ledger #4075); the
+    /// lease sweep, or the next write on the layer, does.
+    pub fn lapsed_unrecorded(&self, now: Option<&str>) -> bool {
+        self.state == LeaseState::Held && now.is_some_and(|now| passed(&self.until, now))
+    }
+
+    /// Its standing's word as a read at `now` sees it: `lapsed` for a held lease past its
+    /// `until`, whether or not the lapse is recorded yet.
+    pub fn word_at(&self, now: Option<&str>) -> &'static str {
+        if self.lapsed_unrecorded(now) {
+            "lapsed"
+        } else {
+            self.state.word()
+        }
+    }
+
+    /// For a lease that reads as lapsed at `now`, whether its lapse is recorded (its lease file
+    /// and the `returned` event written); `None` for one that does not read as lapsed.
+    pub fn recorded_at(&self, now: Option<&str>) -> Option<bool> {
+        match self.state {
+            LeaseState::Lapsed { .. } => Some(true),
+            _ if self.lapsed_unrecorded(now) => Some(false),
+            _ => None,
+        }
+    }
+}
+
 /// A lease's standing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LeaseState {
@@ -181,8 +210,8 @@ pub enum LeaseState {
         /// The result reference (an IRI) its taker named.
         result: Option<String>,
     },
-    /// It lapsed at `time`, and the tuple went back to the space with the `returned` event
-    /// numbered `seq`.
+    /// It lapsed at `time`, its lease's `until` (ledger #4075), and the tuple went back to the
+    /// space with the `returned` event numbered `seq`.
     Lapsed {
         /// The `returned` event's sequence number.
         seq: u64,
@@ -257,6 +286,19 @@ pub fn passed(until: &str, now: &str) -> bool {
     ) {
         (Ok(until), Ok(now)) => until <= now,
         _ => true,
+    }
+}
+
+/// The order two leases lapse in, by their `until` instants. One that does not parse sorts
+/// first, as [`passed`] counts it passed.
+fn lapse_order(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::str::FromStr;
+    let at = |t: &str| oxsdatatypes::DateTime::from_str(t).ok();
+    match (at(a), at(b)) {
+        (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
     }
 }
 
@@ -402,8 +444,10 @@ impl Index {
             .expect("a subject just removed from the index");
     }
 
-    /// The receipts a lease sweep at `now` acts on, in take order: a held lease that has
-    /// lapsed, and a lapse whose tuple is not back in the space yet.
+    /// The receipts a lease sweep at `now` acts on, in lapse order (`until`, then take order):
+    /// a held lease that has lapsed, and a lapse whose tuple is not back in the space yet. The
+    /// sweep records each at its `until`, so in this order the `returned` times it logs never
+    /// go backward.
     pub fn due(&self, now: &str) -> Vec<Receipt> {
         let mut due: Vec<Receipt> = self
             .live
@@ -419,8 +463,26 @@ impl Index {
             })
             .cloned()
             .collect();
-        due.sort_by_key(|r| r.seq);
+        let until = |r: &Receipt| {
+            r.lease
+                .as_ref()
+                .map(|l| l.until.clone())
+                .unwrap_or_default()
+        };
+        due.sort_by(|a, b| lapse_order(&until(a), &until(b)).then(a.seq.cmp(&b.seq)));
         due
+    }
+
+    /// The receipts whose lease a read at `now` computes as lapsed though no lapse is recorded
+    /// yet ([`Lease::lapsed_unrecorded`]): their tuples read as pending (ledger #4075).
+    pub fn lapsed_unrecorded<'a>(
+        &'a self,
+        now: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a Receipt> {
+        self.live
+            .iter()
+            .filter_map(|id| self.receipt(id))
+            .filter(move |r| r.lease.as_ref().is_some_and(|l| l.lapsed_unrecorded(now)))
     }
 
     /// The receipt `subject` is taken under now, if it is taken.
@@ -721,8 +783,13 @@ impl Store {
 
     /// A receipt as it is answered: its document, with a leased take's standing as it is
     /// now (`layers:leaseUntil`, `layers:leaseState` and any `layers:leaseResult`) in place of
-    /// the lease the document was written with.
-    pub fn receipt_answer(&self, receipt: &Receipt) -> std::result::Result<String, String> {
+    /// the lease the document was written with. A held lease past its `until` at `now` reads
+    /// as `lapsed`, recorded or not (ledger #4075).
+    pub fn receipt_answer(
+        &self,
+        receipt: &Receipt,
+        now: Option<&str>,
+    ) -> std::result::Result<String, String> {
         let text = self.receipt_text(&receipt.id)?;
         let Some(lease) = &receipt.lease else {
             return Ok(text);
@@ -741,7 +808,7 @@ impl Store {
         triples.push(Triple::new(
             s.clone(),
             node(&rdf::layers_lease_state()),
-            Literal::new_simple_literal(lease.state.word()),
+            Literal::new_simple_literal(lease.word_at(now)),
         ));
         if let LeaseState::Done {
             result: Some(result),
@@ -757,7 +824,10 @@ impl Store {
     }
 
     /// The tuple a receipt holds, as it was taken.
-    fn taken_tuple(&self, receipt: &Receipt) -> std::result::Result<Vec<Triple>, String> {
+    pub(crate) fn taken_tuple(
+        &self,
+        receipt: &Receipt,
+    ) -> std::result::Result<Vec<Triple>, String> {
         let text = self.receipt_text(&receipt.id)?;
         Ok(rdf::parse_turtle(&text)?
             .into_iter()
