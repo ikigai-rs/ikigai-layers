@@ -222,6 +222,8 @@ pub struct Host {
     config_dir: PathBuf,
     layers: BTreeMap<String, Arc<LayerState>>,
     notify: Arc<Notify>,
+    /// The feeds' epoch, the incarnation of this state (ledger #4114, [`feed::EPOCH_FILE`]).
+    epoch: String,
     /// The ONE time budget every tuplespace layer's `match=` runs within (ledger #1362).
     match_budget: EvaluationBudget,
     /// The host's own JSON-LD processor, bound into no space (ledger #1371).
@@ -303,6 +305,8 @@ impl Host {
         if migration == Migration::None {
             refuse_plaintext(state_dir, config.layers.keys()).map_err(ConfigError)?;
         }
+        let epoch = feed::load_or_mint_epoch(state_dir)
+            .map_err(|e| ConfigError(format!("the feed epoch: {e}")))?;
         let sealer = Sealer::new(key);
         let opened_at = ikigai_core::Time::from_millis(system_millis());
         let join = join_config
@@ -353,6 +357,7 @@ impl Host {
                 config_dir: config.dir,
                 layers,
                 notify: Arc::new(Notify::default()),
+                epoch,
                 match_budget,
                 json,
                 feeds,
@@ -399,6 +404,37 @@ impl Host {
             }
         }
         Ok(())
+    }
+
+    /// The feeds' epoch: this host's name for the incarnation of its state, which every feed's
+    /// JSON face carries and a reader's `epoch=` is checked against (ledger #4114). Minted the
+    /// first time a host opens its state directory, and kept across restarts.
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    /// Name a new feed epoch for `state_dir`, as the step a RESTORE takes before its host first
+    /// opens (ledger #4114): a backup carries the epoch with the rest of the state, so without
+    /// this a follower whose cursor came from after the backup cannot be told that the restored
+    /// feed numbers those events again. Every follower then resynchronizes from 0, which an
+    /// at-least-once follower already handles. Answers the new epoch.
+    ///
+    /// # Errors
+    ///
+    /// When a host holds the directory (an epoch changes only while no host reads it, naming
+    /// the holder's pid as [`Host::open`] does), or when the epoch cannot be drawn or written.
+    pub fn renew_epoch(state_dir: impl AsRef<Path>) -> Result<String, ConfigError> {
+        let state_dir = state_dir.as_ref();
+        if !state_dir.join(at_rest::KEY_CHECK).is_file() {
+            return Err(ConfigError(format!(
+                "{} is not a state directory a layer host has opened (it holds no {}), so it \
+                 has no feed epoch to renew",
+                state_dir.display(),
+                at_rest::KEY_CHECK
+            )));
+        }
+        let _lock = lock_state(state_dir).map_err(ConfigError)?;
+        feed::renew_epoch(state_dir).map_err(|e| ConfigError(format!("the feed epoch: {e}")))
     }
 
     /// The configuration directory the host was opened over: where its door's enrollment

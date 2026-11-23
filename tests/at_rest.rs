@@ -45,9 +45,12 @@ fn files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The host's own lock file holds its pid, not layer state.
+/// The host's own lock file holds its pid, and its epoch file the feeds' epoch, which every
+/// feed's JSON face gives its readers (ledger #4114): neither is layer state, and neither is
+/// sealed.
 fn is_lock(path: &Path) -> bool {
-    path.file_name().is_some_and(|n| n == "host.lock")
+    path.file_name()
+        .is_some_and(|n| n == "host.lock" || n == ikigai_layers::feed::EPOCH_FILE)
 }
 
 /// No state file holds plaintext: each non-empty one is age (a feed, line by line), none

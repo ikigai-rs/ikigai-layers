@@ -1,6 +1,9 @@
 //! `ikigai-layers grants <config dir> [--out <dir>] [--check]`: derive a layer door's
 //! `grants.json` and `clients.json` from the manifests.
 //!
+//! `ikigai-layers epoch <state dir> [--renew]`: print a state directory's feed epoch, or name a
+//! new one after a restore (ledger #4114).
+//!
 //! `ikigai-layers onboard setup <config dir> --door-dir <dir> --door-name <name> …`: the layer
 //! host's half of onboarding in one command (ledger #2125), and `--check`, its read-only half.
 
@@ -16,6 +19,7 @@ const USAGE: &str = "usage: ikigai-layers grants <config dir> [--out <dir>] [--c
        ikigai-layers onboard setup <config dir> --door-dir <dir> --door-name <name>
                      [--controller <participant>] [--controller-key <file>|-] [--check]
        ikigai-layers descriptor <config dir> --door <quic://host:port> --door-dir <dir> --out <dir>
+       ikigai-layers epoch <state dir> [--renew]
 
 grants derives the layer door's enrollment from <config dir>'s manifests (collabs/*.toml),
 participants (participants.ttl) and certificate fingerprints (enrollment.toml), and writes
@@ -41,7 +45,14 @@ rewritten), the controller key beside it, and grants.json and clients.json.
 
 descriptor writes layers.json and server.crt into --out, for a host to publish at
 https://<host>/.well-known/ikigai/layers.json: the door's address, the certificate in --door-dir
-and its sha256, the join lobby, and the public layers.";
+and its sha256, the join lobby, and the public layers.
+
+epoch prints the feed epoch of a layer host's <state dir>: the name of its feeds' incarnation,
+which every feed's JSON face carries and a follower names back with epoch=. A restart keeps it,
+and so does a backup. After restoring <state dir> from a backup, and before its host first
+opens, run it with --renew: it names a new epoch, so a follower whose cursor came from the lost
+events is refused and starts again from 0 instead of skipping events. --renew is refused while
+a host holds <state dir>.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -67,12 +78,56 @@ fn run(args: &[String]) -> Outcome {
             onboard_setup(&args[2..])
         }
         Some("descriptor") => write_descriptor(&args[1..]),
+        Some("epoch") => epoch(&args[1..]),
         Some("-h" | "--help") => {
             println!("{USAGE}");
             Ok(())
         }
         _ => Err(usage()),
     }
+}
+
+fn epoch(args: &[String]) -> Outcome {
+    let mut dir = None;
+    let mut renew = false;
+    for arg in args {
+        match arg.as_str() {
+            "--renew" => renew = true,
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
+            flag if flag.starts_with('-') => {
+                return Err((2, format!("unknown flag {flag}\n\n{USAGE}")))
+            }
+            path if dir.is_none() => dir = Some(PathBuf::from(path)),
+            argument => {
+                let message = format!(
+                    "unexpected argument {argument}: epoch takes one state directory\n\n{USAGE}"
+                );
+                return Err((2, message));
+            }
+        }
+    }
+    let dir = dir.ok_or_else(usage)?;
+    if renew {
+        let epoch = ikigai_layers::Host::renew_epoch(&dir).map_err(|e| (1, e.to_string()))?;
+        println!("epoch {epoch}: renewed; every follower starts again from 0");
+        return Ok(());
+    }
+    match ikigai_layers::feed::read_epoch(&dir).map_err(|e| (1, e))? {
+        Some(epoch) => println!("epoch {epoch}"),
+        None => {
+            return Err((
+                1,
+                format!(
+                    "{} names no feed epoch yet: a layer host mints one when it next opens it",
+                    dir.display()
+                ),
+            ))
+        }
+    }
+    Ok(())
 }
 
 fn grants(args: &[String]) -> Outcome {
