@@ -1035,6 +1035,24 @@ impl LayerEndpoint {
         })
     }
 
+    /// Under the layer's write lock, first thing in a tuplespace write (`out`, `take`, a
+    /// settle): read the instant the write is stamped with, and record every lease lapse due
+    /// by it, in `until` order, before the write does anything else (ledger #4076). So a take
+    /// of a tuple whose lease has passed finds it pending, every `returned` precedes the
+    /// write's own event, and the feed's times never go backward. Answers that instant.
+    async fn record_lapses(&self, inv: &Invocation<'_>) -> Result<ikigai_core::Time> {
+        let now = self.now(inv)?;
+        if self
+            .state
+            .record_lapses(now)
+            .await
+            .map_err(|e| self.space_error(e))?
+        {
+            self.host().notify().bump();
+        }
+        Ok(now)
+    }
+
     /// Under the layer's write lock, before a write takes its sequence number: log what an
     /// earlier write stored but could not log (ledger #1218), and answer the number this
     /// write carries. When the feed still cannot be written the write is refused here,
@@ -1471,6 +1489,7 @@ impl LayerEndpoint {
         let answer = |subject: &str| named(subject, as_json);
         // From here to the feed append is one step per layer, as for `say`.
         let _write = self.state.write.lock().await;
+        let now = self.record_lapses(inv).await?;
         {
             let index = space.index.read().expect("tuplespace lock");
             match index.lookup(&draft.subject) {
@@ -1497,7 +1516,6 @@ impl LayerEndpoint {
             }
         }
         let seq = self.settle_feed()?;
-        let now = self.now(inv)?;
         let created = xsd_date_time(now);
         let stamped = draft.stamp(&dropper, &created, seq);
         admit(self.def(), &stamped)?;
@@ -1549,6 +1567,9 @@ impl LayerEndpoint {
         let lease = lease_of(self.def(), inv)?;
         let space = self.state.tuplespace();
         let _write = self.state.write.lock().await;
+        // A lease that has passed is recorded first, so its tuple is pending below; one that
+        // has not is still a take, refused as already taken.
+        let now = self.record_lapses(inv).await?;
         let meta: TupleMeta = {
             let index = space.index.read().expect("tuplespace lock");
             match index.lookup(&subject) {
@@ -1594,7 +1615,6 @@ impl LayerEndpoint {
         let text = String::from_utf8(bytes)
             .map_err(|_| self.space_error(format!("tuple {} is not UTF-8", meta.cid)))?;
         let tuple = rdf::parse_turtle(&text).map_err(|e| self.space_error(e))?;
-        let now = self.now(inv)?;
         let time = xsd_date_time(now);
         let id = id::mint(now.as_millis(), seq);
         let until = lease.map(|lease| lease_until(now, lease)).transpose()?;
@@ -1713,6 +1733,10 @@ impl LayerEndpoint {
             return Err(self.no_match());
         }
         let space = self.state.tuplespace();
+        // A held lease past its `until` reads as lapsed, and its tuple as pending, though no
+        // lapse is recorded yet: a read computes it and never writes (ledger #4075).
+        let now = inv.now().map(xsd_date_time);
+        let now = now.as_deref();
         // Expiration and a lapsed lease advance without a Sink or Delete to cut the kernel's
         // cache.
         let answer = |r: Representation| {
@@ -1743,8 +1767,16 @@ impl LayerEndpoint {
             let as_ld = asked == JSON_LD;
             let found = {
                 let index = space.index.read().expect("tuplespace lock");
+                let lapsed =
+                    |r: &Receipt| r.lease.as_ref().is_some_and(|l| l.lapsed_unrecorded(now));
                 match (taken, index.lookup(subject)) {
-                    (false, Lookup::Pending(meta)) => Ok(Err(meta.cid.clone())),
+                    (false, Lookup::Pending(meta)) => Ok(Err(Ok(meta.cid.clone()))),
+                    (false, Lookup::Taken(receipt)) if lapsed(receipt) => {
+                        Ok(Err(Err(receipt.clone())))
+                    }
+                    (true, Lookup::Taken(receipt)) if lapsed(receipt) => {
+                        Err(format!("<{subject}> is pending: nobody has taken it"))
+                    }
                     (true, Lookup::Taken(receipt)) => Ok(Ok(receipt.clone())),
                     (false, Lookup::Taken(receipt)) => Err(format!(
                         "<{subject}> is not pending: <{}> took it at {} (read its receipt with \
@@ -1766,11 +1798,16 @@ impl LayerEndpoint {
                 Ok(Ok(receipt)) => {
                     let text = space
                         .store
-                        .receipt_answer(&receipt)
+                        .receipt_answer(&receipt, now)
                         .map_err(|e| self.space_error(e))?;
                     answer(self.graph_face(text, as_ld).await?)
                 }
-                Ok(Err(cid)) => match space
+                // Lapsed, unrecorded: the tuple as its receipt holds it, as it goes back.
+                Ok(Err(Err(receipt))) => {
+                    let text = self.lapsed_tuple(&receipt)?;
+                    answer(self.graph_face(text, as_ld).await?)
+                }
+                Ok(Err(Ok(cid))) => match space
                     .store
                     .read(&cid)
                     .await
@@ -1818,8 +1855,12 @@ impl LayerEndpoint {
                         if let Some(lease) = &r.lease {
                             listed["attempt"] = r.attempt.into();
                             listed["lease"] = serde_json::json!({
-                                "state": lease.state.word(), "until": lease.until,
+                                "state": lease.word_at(now), "until": lease.until,
                             });
+                            // Whether a lapse is recorded yet: its lease file and `returned`.
+                            if let Some(recorded) = lease.recorded_at(now) {
+                                listed["lease"]["recorded"] = recorded.into();
+                            }
                             if let LeaseState::Done {
                                 result: Some(result),
                             } = &lease.state
@@ -1841,7 +1882,7 @@ impl LayerEndpoint {
                     out.push_str(
                         &space
                             .store
-                            .receipt_answer(r)
+                            .receipt_answer(r, now)
                             .map_err(|e| self.space_error(e))?,
                     );
                 } else {
@@ -1854,9 +1895,13 @@ impl LayerEndpoint {
                         out.push_str(&format!(
                             " attempt={} lease={} until={}",
                             r.attempt,
-                            lease.state.word(),
+                            lease.word_at(now),
                             lease.until
                         ));
+                        // Only in the window between the lapse and its record.
+                        if lease.recorded_at(now) == Some(false) {
+                            out.push_str(" recorded=no");
+                        }
                         if let LeaseState::Done {
                             result: Some(result),
                         } = &lease.state
@@ -1877,21 +1922,37 @@ impl LayerEndpoint {
             None => None,
             Some(query) => Some(space.store.matching(query).await?.into_iter().collect()),
         };
-        let pending: Vec<TupleMeta> = space
-            .index
-            .read()
-            .expect("tuplespace lock")
-            .pending()
-            .filter(|m| m.seq > after)
-            .filter(|m| matched.as_ref().is_none_or(|hits| hits.contains(&m.cid)))
-            .take(limit as usize)
-            .cloned()
-            .collect();
+        // Each pending tuple, with the receipt it is read from when its lease lapsed unrecorded:
+        // such a tuple reads as pending at its own `ik:seq`, where it will go back.
+        let pending: Vec<(TupleMeta, Option<Receipt>)> = {
+            let index = space.index.read().expect("tuplespace lock");
+            let mut pending: Vec<(TupleMeta, Option<Receipt>)> = index
+                .pending()
+                .filter(|m| matched.as_ref().is_none_or(|hits| hits.contains(&m.cid)))
+                .map(|m| (m.clone(), None))
+                .collect();
+            // INTERIM until layers item 1b: `match=` evaluates only the tuples stored in
+            // intray, and a lapsed, unrecorded tuple's bytes are in its receipt, so a template
+            // omits it until the lapse is recorded (README, "lease").
+            if template.is_none() {
+                pending.extend(index.lapsed_unrecorded(now).map(|r| {
+                    let mut meta = r.tuple.clone();
+                    meta.attempts = r.attempt;
+                    (meta, Some(r.clone()))
+                }));
+                pending.sort_by_key(|(m, _)| m.seq);
+            }
+            pending
+                .into_iter()
+                .filter(|(m, _)| m.seq > after)
+                .take(limit as usize)
+                .collect()
+        };
         if asked == JSON {
             // The list, mirroring the feed's JSON: what the text face says, one object a line.
             let listed: Vec<serde_json::Value> = pending
                 .iter()
-                .map(|m| {
+                .map(|(m, _)| {
                     serde_json::json!({
                         "seq": m.seq, "created": m.created, "subject": m.subject,
                         "dropper": m.dropper,
@@ -1904,11 +1965,13 @@ impl LayerEndpoint {
             })));
         }
         let mut out = String::new();
-        for meta in &pending {
+        for (meta, lapsed) in &pending {
             if graph_face {
+                if let Some(receipt) = lapsed {
+                    out.push_str(&self.lapsed_tuple(receipt)?);
                 // A tuple taken between the index read and here is simply not listed: the
                 // take's cut ends this answer.
-                if let Some(bytes) = space
+                } else if let Some(bytes) = space
                     .store
                     .read(&meta.cid)
                     .await
@@ -1928,6 +1991,17 @@ impl LayerEndpoint {
         } else {
             Representation::new(ReprType::new(TEXT), out.into_bytes())
         })
+    }
+
+    /// The tuple a lapsed, unrecorded take holds, as Turtle: what goes back to the space when
+    /// the lapse is recorded ([`crate::tuplespace::Tuplespace::return_tuple`]).
+    fn lapsed_tuple(&self, receipt: &Receipt) -> Result<String> {
+        self.state
+            .tuplespace()
+            .store
+            .taken_tuple(receipt)
+            .map(|tuple| rdf::to_turtle(&tuple))
+            .map_err(|e| self.space_error(e))
     }
 
     /// `settle` (a Sink on a receipt): its taker settles a leased take as `done`, naming an
@@ -1971,6 +2045,7 @@ impl LayerEndpoint {
         }
         let space = self.state.tuplespace();
         let _write = self.state.write.lock().await;
+        let now = self.record_lapses(inv).await?;
         let receipt = space
             .index
             .read()
@@ -1996,7 +2071,6 @@ impl LayerEndpoint {
                  to settle"
             )));
         };
-        let now = self.now(inv)?;
         let lapsed = || {
             Error::Conflict(format!(
                 "receipt <{iri}>'s lease lapsed at {}, and <{}> went back to the space: a \
@@ -2081,9 +2155,10 @@ impl LayerEndpoint {
             // A retained receipt never changes, but a configured window can remove it, and a
             // leased take's standing changes until it is settled or lapses.
             Some(receipt) => {
+                let now = inv.now().map(xsd_date_time);
                 let text = space
                     .store
-                    .receipt_answer(&receipt)
+                    .receipt_answer(&receipt, now.as_deref())
                     .map_err(|e| self.space_error(e))?;
                 let repr = self.graph_face(text, as_ld).await?;
                 Ok(if self.def().retain.is_some() || receipt.lease.is_some() {
@@ -2340,6 +2415,28 @@ impl Endpoint for LayerEndpoint {
         if let (false, Some(principal)) = (self.is_share(), inv.capability.principal()) {
             self.host().gate(principal, inv.now())?;
         }
+        // A write records every due lapse before it does anything else, inside its own write
+        // lock (`record_lapses`, ledger #4076); a read never does (ledger #4075). A read
+        // (Source, Exists, Meta) COMPUTES a held lease past its `until` as lapsed instead: its
+        // tuple reads as pending and its receipt as `lapsed`, with `recorded` false, and
+        // nothing is stored (README, "lease"). On a layer that also retains, the lease sweep
+        // runs here too, before the retention sweep below, so a write's `returned` events come
+        // before its `sweep`.
+        let writes = matches!(inv.request.verb, Verb::Sink | Verb::Delete);
+        if writes && self.def().model == Model::Tuplespace && self.def().retain.is_some() {
+            if let Some(now) = inv.now() {
+                if self
+                    .state
+                    .sweep_leases(now)
+                    .await
+                    .map_err(|e| self.space_error(e))?
+                {
+                    self.host().notify().bump();
+                }
+            }
+        }
+        // Retention still sweeps before every request, reads included; it gets the lease's
+        // computed-on-read rule in its own item.
         if self.def().retain.is_some()
             && self
                 .state
@@ -2354,19 +2451,6 @@ impl Endpoint for LayerEndpoint {
                 .map_err(Error::Endpoint)?
         {
             self.host().notify().bump();
-        }
-        // A lapsed lease returns its tuple before anything reads or writes the layer.
-        if self.def().model == Model::Tuplespace {
-            if let Some(now) = inv.now() {
-                if self
-                    .state
-                    .sweep_leases(now)
-                    .await
-                    .map_err(|e| self.space_error(e))?
-                {
-                    self.host().notify().bump();
-                }
-            }
         }
         if self.def().is_feed() && self.action.is_shared_feed_read() {
             return if self.is_share() {

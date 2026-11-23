@@ -110,7 +110,11 @@ impl LayerState {
     }
 
     /// Return to the space every tuple whose lease has lapsed by `now`, under the layer's
-    /// write lock (ledger #2119). Each lapse is stored first, with the number of its
+    /// write lock (ledger #2119), in the order the leases lapsed ([`Self::record_lapses`]).
+    /// Each lapse is recorded at its
+    /// lease's `until`, not at `now` (ledger #4075): the lease file's lapse time and the
+    /// `returned` event's time are the instant a read already computed it lapsed, whenever the
+    /// sweep noticed. Each lapse is stored first, with the number of its
     /// `returned` event, then its tuple is dropped back, then the event is logged; a lapse
     /// whose tuple could not be dropped back is retried by the next sweep, or the next open.
     /// Answers whether anything changed.
@@ -129,6 +133,21 @@ impl LayerState {
             return Ok(false);
         }
         let _write = self.write.lock().await;
+        self.record_lapses(now).await
+    }
+
+    /// Record every lapse due by `now`, in the order the leases lapsed, exactly as
+    /// [`Self::sweep_leases`] does, for a caller that ALREADY holds the layer's write lock: a
+    /// write on the layer (`out`, `take`, a settle) calls it first, with the instant it stamps
+    /// its own event with, so every `returned` (at its `until`, no later than that instant)
+    /// precedes the write's event and the feed's times never go backward (ledger #4076). The
+    /// lock is what keeps a write and the sweep from both recording one lapse: whichever runs
+    /// second finds the receipt no longer due. Answers whether anything changed.
+    pub(crate) async fn record_lapses(&self, now: ikigai_core::Time) -> Result<bool, String> {
+        let ModelState::Tuplespace(space) = &self.model else {
+            return Ok(false);
+        };
+        let time = crate::time::xsd_date_time(now);
         let due = space.index.read().expect("tuplespace lock").due(&time);
         let mut changed = false;
         for mut receipt in due {
@@ -143,11 +162,11 @@ impl LayerState {
                     feed.next()
                 };
                 let lapsed = Lease {
-                    until: lease.until,
                     state: LeaseState::Lapsed {
                         seq,
-                        time: time.clone(),
+                        time: lease.until.clone(),
                     },
+                    until: lease.until,
                 };
                 space.store.write_lease(&receipt.id, &lapsed)?;
                 space.record_lease(&receipt.id, lapsed.clone());
@@ -365,9 +384,10 @@ impl Host {
         Ok(())
     }
 
-    /// Return to the space every tuple whose lease has lapsed by `now` (ledger #2119). Called
-    /// on layer requests; an idle deployment can also schedule this method, so a lapsed
-    /// tuple's `returned` event reaches the feed without waiting for the next request.
+    /// Return to the space every tuple whose lease has lapsed by `now` (ledger #2119), each
+    /// recorded at its lease's `until`. Called before every write on a layer, never before a
+    /// read (ledger #4075); a deployment schedules this method too, so a lapsed tuple's
+    /// `returned` event reaches the feed without waiting for the next write.
     pub async fn sweep_leases(&self, now: ikigai_core::Time) -> Result<(), ConfigError> {
         for (name, state) in &self.layers {
             if state

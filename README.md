@@ -636,7 +636,8 @@ receipts stay indefinitely. A sweep deletes receipts whose take time is strictly
 unchanged inside the window; after expiration, retries and reports cannot use that receipt.
 The tuple's subject stays reserved, so an expired tuple cannot be submitted again.
 
-The host sweeps when it opens and before requests on a layer with retention configured.
+The host sweeps when it opens and before every request, reads included, on a layer with
+retention configured.
 For expiration while idle, the deployment schedules `Host::sweep_retention(now)` with its
 clock. The feed keeps its existing events and adds one `sweep` event per nonempty batch,
 with the layer IRI, `by = urn:layers:retention` and aggregate fields only. Plain lines append
@@ -678,8 +679,19 @@ subject and `ik:seq`, pending again for anyone to take, and the feed logs a `ret
 with its subject, `by = urn:layers:lease`. The next take's receipt counts the attempt. After
 the lapse, `done`, `renew` and a report on the offer from the late taker are each refused as
 a Conflict, so a tuple keeps one result. The lapsed receipt stays (retention keeps it while
-its tuple is pending again). The host returns lapsed tuples before every request on the
-layer; for an idle host, the deployment schedules `Host::sweep_leases(now)` with its clock.
+its tuple is pending again). A read never writes: from the lease's `until` on, every read
+(the tuples, a receipt, the feed, the definition) computes the lease as lapsed, so the tuple
+reads as pending and the receipt as `lapsed`, and nothing is stored. Until the lapse is
+recorded, `rd state=taken` appends `recorded=no` to the receipt's line and its JSON `lease`
+says `"recorded": false` (`true` once recorded). The lapse is recorded, with its `returned`
+event, by `Host::sweep_leases(now)` or by the next write on the layer (`out`, `take`, a
+settle), whichever runs first. A write records every due lapse first, under the layer's write
+lock and in `until` order, so a take of a tuple whose lease has passed succeeds, and every
+`returned` comes before the write's own event. The event's time and the lapse's are the lease's
+`until`, not the moment the host noticed.
+For an idle host, the deployment schedules `Host::sweep_leases(now)` with its clock. For now
+`rd match=` omits a lapsed tuple until its lapse is recorded (an interim, until the template
+can be evaluated against the receipt's copy).
 A lapse is stored before its tuple goes back, so a host that stops between the two drops the
 tuple back when it next opens.
 
