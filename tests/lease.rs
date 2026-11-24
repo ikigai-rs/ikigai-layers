@@ -424,7 +424,29 @@ fn a_settle_result_is_bounded_by_the_layer() {
     .unwrap();
 }
 
-/// A read never writes (ledger #4075): at the lapse, a definition read, an `rd` in each face, a
+/// Reading the definition at expiry does not record a lease return (ledger #4215).
+#[test]
+fn definition_source_does_not_write_the_feed() {
+    let (mut f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    let before = lease_files(&f);
+
+    at(&mut f, &clock, 10);
+    source(
+        &f.kernel,
+        "urn:layer:tasks-bobby",
+        &[],
+        &tasker(&bobby_gonk()),
+    );
+
+    assert!(
+        lease_files(&f) == before,
+        "the definition read wrote lease state or the feed"
+    );
+}
+
+/// A read never writes (ledger #4075): at the lapse, the shapes, an `rd` in each face, a
 /// receipt read and a feed read each leave `feed.log` and the lease files byte-identical. The
 /// reads compute the lapse instead: the tuple reads as pending and the receipt as `lapsed`, not
 /// yet recorded. The files are read directly, so no request can be what changed them.
@@ -448,8 +470,7 @@ fn a_read_at_the_lapse_writes_nothing() {
     at(&mut f, &clock, 10);
     let who = tasker(&bobby_gonk());
     let a = offer_iri("a");
-    let reads: [Read; 10] = [
-        ("definition", "urn:layer:tasks-bobby", &[]),
+    let reads: [Read; 9] = [
         ("shapes", "urn:layer:tasks-bobby:shapes", &[]),
         ("rd", TUPLES, &[]),
         ("rd as JSON", TUPLES, &[("as", "application/json")]),
