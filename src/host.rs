@@ -370,6 +370,10 @@ impl Host {
         // Catch up on the grants layer: an entitlement said while no host ran is applied now,
         // and one already applied changes nothing (ledger #2009).
         futures::executor::block_on(host.apply_entitlements(opened_at));
+        // A restart records what lapsed while no host ran, at each lease's `until`, as the
+        // retention sweep below catches up on its window (ledger #4077). The lease sweep goes
+        // first, as it does before a write, so its `returned` events precede a `sweep`.
+        futures::executor::block_on(host.sweep_leases(opened_at))?;
         futures::executor::block_on(host.sweep_retention(opened_at))?;
         Ok(host)
     }
@@ -390,9 +394,10 @@ impl Host {
     }
 
     /// Return to the space every tuple whose lease has lapsed by `now` (ledger #2119), each
-    /// recorded at its lease's `until`. Called before every write on a layer, never before a
-    /// read (ledger #4075); a deployment schedules this method too, so a lapsed tuple's
-    /// `returned` event reaches the feed without waiting for the next write.
+    /// recorded at its lease's `until`. Called at open and before every write on a layer, never
+    /// before a read (ledger #4075); a deployment schedules this method too, from
+    /// [`next_lapse`](Self::next_lapse), so a lapsed tuple's `returned` event reaches the feed
+    /// without waiting for the next write.
     pub async fn sweep_leases(&self, now: ikigai_core::Time) -> Result<(), ConfigError> {
         for (name, state) in &self.layers {
             if state
@@ -404,6 +409,63 @@ impl Host {
             }
         }
         Ok(())
+    }
+
+    /// When the next lease lapse is due: the earliest `until` of a held lease across every
+    /// layer, or `None` when no lease is held (ledger #4077). Each tuplespace layer keeps its
+    /// held leases ordered by `until` beside its live receipts, so this is one lookup per
+    /// layer, never a scan of receipts. An instant at or before now means a lapse is due
+    /// already (a lease that lapsed and is not recorded yet stays held until it is).
+    ///
+    /// The library owns no timer (wasm32 has none, [`crate::timer`]), so the DEPLOYMENT
+    /// schedules the sweep: it sleeps until this instant with its own timer, calls
+    /// [`sweep_leases`](Self::sweep_leases), and asks again. A take or a renew can make an
+    /// earlier `until` than the one it is sleeping toward; both bump [`notify`](Self::notify),
+    /// so the loop wakes on that signal too and asks again. The signal is a hint, bumped by
+    /// every feed append and every settle besides: a wake that finds nothing earlier simply
+    /// sleeps again. Under the computed lapse (ledger #4075) a late or missed wake only
+    /// delays when the feed shows `returned`, never what a reader or a taker sees.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    /// use ikigai_core::Clock;
+    /// use ikigai_layers::{timer::Timer, ConfigError, Host};
+    ///
+    /// /// A deployment's lease loop: the host's clock and the deployment's own timer.
+    /// async fn sweep_loop(
+    ///     host: Arc<Host>,
+    ///     clock: Arc<dyn Clock>,
+    ///     timer: Arc<dyn Timer>,
+    /// ) -> Result<(), ConfigError> {
+    ///     loop {
+    ///         host.sweep_leases(clock.now()).await?;
+    ///         // Read the signal BEFORE asking, so a take between the two wakes the wait.
+    ///         let seen = host.notify().generation();
+    ///         let woken = host.notify().changed(seen);
+    ///         match host.next_lapse() {
+    ///             Some(due) => {
+    ///                 let delay = due.as_millis().saturating_sub(clock.now().as_millis());
+    ///                 let slept = timer.sleep(Duration::from_millis(delay));
+    ///                 futures::pin_mut!(woken, slept);
+    ///                 futures::future::select(woken, slept).await;
+    ///             }
+    ///             None => woken.await,
+    ///         }
+    ///     }
+    /// }
+    /// # let _ = sweep_loop;
+    /// ```
+    pub fn next_lapse(&self) -> Option<ikigai_core::Time> {
+        self.layers
+            .values()
+            .filter_map(|state| match &state.model {
+                ModelState::Tuplespace(space) => {
+                    space.index.read().expect("tuplespace lock").next_lapse()
+                }
+                ModelState::Channel(_) => None,
+            })
+            .min()
     }
 
     /// The feeds' epoch: this host's name for the incarnation of its state, which every feed's
@@ -616,7 +678,9 @@ impl Host {
         self.feeds.computed(layer)
     }
 
-    /// The change signal every feed append bumps.
+    /// The change signal every feed append bumps, and every settle of a lease (`done` or
+    /// `renew`), which appends nothing: a host's lease loop waits on it to learn that a take
+    /// or a renew may have made an earlier [`next_lapse`](Self::next_lapse).
     pub fn notify(&self) -> &Notify {
         &self.notify
     }

@@ -289,6 +289,20 @@ pub fn passed(until: &str, now: &str) -> bool {
     }
 }
 
+/// A lease's `until` in milliseconds since the epoch, for the index of held leases. One that
+/// does not parse, or is before the epoch, is 0: due at once, as [`passed`] counts it passed.
+fn until_millis(until: &str) -> u64 {
+    use std::str::FromStr;
+    let epoch = oxsdatatypes::DateTime::from_str("1970-01-01T00:00:00Z").expect("the epoch");
+    oxsdatatypes::DateTime::from_str(until)
+        .ok()
+        .and_then(|until| until.checked_sub(epoch))
+        .and_then(|since| std::time::Duration::try_from(since).ok())
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// The order two leases lapse in, by their `until` instants. One that does not parse sorts
 /// first, as [`passed`] counts it passed.
 fn lapse_order(a: &str, b: &str) -> std::cmp::Ordering {
@@ -344,6 +358,11 @@ pub struct Index {
     subjects: HashMap<String, Place>,
     /// The receipts whose lease is held, or lapsed with its tuple not yet back in the space.
     live: BTreeSet<String>,
+    /// Every HELD lease, by its `until` (in milliseconds, [`until_millis`]) and then its
+    /// receipt's id: the first is the next lapse due ([`Index::next_lapse`]). Kept beside
+    /// `live` as each lease is granted, renewed, settled or recorded lapsed, so the answer is
+    /// O(log n) to maintain and never a scan (ledger #4077).
+    held: BTreeSet<(u64, String)>,
 }
 
 impl Index {
@@ -416,6 +435,7 @@ impl Index {
         ) {
             self.live.insert(receipt.id.clone());
         }
+        self.hold(&receipt.id, receipt.lease.as_ref());
         let i = self.receipts.len();
         self.subjects
             .insert(receipt.tuple.subject.clone(), Place::Taken(i));
@@ -501,7 +521,30 @@ impl Index {
         if matches!(lease.state, LeaseState::Done { .. }) {
             self.live.remove(id);
         }
+        if let Some(old) = self.receipts[i].lease.as_ref() {
+            self.held
+                .remove(&(until_millis(&old.until), id.to_string()));
+        }
+        self.hold(id, Some(&lease));
         self.receipts[i].lease = Some(lease);
+    }
+
+    /// Index `lease` under receipt `id` when it is held.
+    fn hold(&mut self, id: &str, lease: Option<&Lease>) {
+        if let Some(lease) = lease.filter(|l| l.state == LeaseState::Held) {
+            self.held
+                .insert((until_millis(&lease.until), id.to_string()));
+        }
+    }
+
+    /// The earliest `until` of a held lease in this layer: when its next lapse is due, read
+    /// from the index of held leases, not by a scan (ledger #4077). `None` when no lease is
+    /// held. A lease already past its `until` and not yet recorded is still held, so the
+    /// answer may be in the past: the lapse is due now.
+    pub fn next_lapse(&self) -> Option<ikigai_core::Time> {
+        self.held
+            .first()
+            .map(|(millis, _)| ikigai_core::Time::from_millis(*millis))
     }
 
     /// A lapsed take's tuple is back in the space as `meta`.
@@ -1132,6 +1175,8 @@ impl Tuplespace {
             })
             .collect();
         index.receipts.retain(|r| !deleted.contains(&r.id));
+        // Never a held lease (it is live), but the index names no receipt that is gone.
+        index.held.retain(|(_, id)| !deleted.contains(id));
         index.by_receipt_id.clear();
         let positions: Vec<_> = index
             .receipts

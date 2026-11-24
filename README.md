@@ -735,7 +735,15 @@ settle), whichever runs first. A write records every due lapse first, under the 
 lock and in `until` order, so a take of a tuple whose lease has passed succeeds, and every
 `returned` comes before the write's own event. The event's time and the lapse's are the lease's
 `until`, not the moment the host noticed.
-For an idle host, the deployment schedules `Host::sweep_leases(now)` with its clock.
+A host opening records what lapsed while it was down, as it catches up on retention.
+
+**A deployment schedules the sweep** (gonk's host, the edge, `ikigai serve`): the library owns
+no timer, since wasm32 has none. `Host::next_lapse()` answers when the next lapse is due, the
+earliest `until` of a held lease across every layer, or none. The deployment sleeps until then
+with its own timer, calls `Host::sweep_leases(now)` with its clock, and asks again. A take or a
+renew can make an earlier `until`; both bump `Host::notify()`, so the loop also wakes on that
+signal and asks again (`Host::next_lapse` documents such a loop). A late or missed wake only
+delays when the feed shows `returned`: what a reader or a taker sees is computed from `until`.
 `rd match=` sees such a tuple too: its bytes are in its receipt, not in the space, so the
 template is evaluated against the receipt's copy by intray's own matcher, in the same
 evaluation as the stored tuples, within the same time budget and nesting bound, and a match

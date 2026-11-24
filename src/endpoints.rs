@@ -2321,6 +2321,10 @@ impl LayerEndpoint {
             .write_lease(&id, &settled)
             .map_err(|e| self.space_error(e))?;
         space.record_lease(&id, settled);
+        // A settle logs no event, but a renew can move the layer's next lapse EARLIER (a
+        // shorter lease than the one it replaces): the host's signal tells a deployment's lease
+        // loop to ask `Host::next_lapse` again (ledger #4077).
+        self.host().notify().bump();
         Ok(named(&iri, as_json))
     }
 

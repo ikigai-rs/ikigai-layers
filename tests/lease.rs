@@ -287,9 +287,8 @@ fn the_receipt_records_attempts_across_a_restart() {
     f.reopen();
     at(&mut f, &clock, 12);
     assert!(pending(&f).contains(&offer_iri("a")));
-    // Read as pending, the second lapse is not recorded until a write: open does not sweep
-    // leases yet (lease sweep item 3), and a read never does (ledger #4075).
-    assert_eq!(kinds(&f), ["out", "taken", "returned", "taken"]);
+    // The second lapse happened while the host was down: open records it (ledger #4077).
+    assert_eq!(kinds(&f), ["out", "taken", "returned", "taken", "returned"]);
     // The lapsed receipts stay, each with its attempt and state.
     let turtle = source(&f.kernel, &first, &[], &tasker(&bobby_gonk()));
     assert!(turtle.contains("\"lapsed\""), "{turtle}");
@@ -853,4 +852,127 @@ fn rd_match_over_a_lapsed_tuple_runs_within_the_budget() {
         matches!(refused, Err(Error::Timeout(ref message)) if message.contains("200 ms")),
         "{refused:?}"
     );
+}
+
+/// The tuplespace layer `tasks-chris`, defined as `tasks-bobby` is (with `lease_max`), beside
+/// it on the same host: two leased layers for [`Host::next_lapse`].
+const CHRIS_TUPLES: &str = "urn:layer:tasks-chris:tuples";
+
+fn chris_tasker(principal: &str) -> ikigai_core::Capability {
+    cap(
+        principal,
+        &[
+            "urn:cap:layer:read:tasks-chris",
+            "urn:cap:layer:feed:tasks-chris",
+            "urn:cap:layer:out:tasks-chris",
+            "urn:cap:layer:take:tasks-chris",
+        ],
+    )
+}
+
+/// The minute after the tests' start that `time` is, for an instant on a whole minute.
+fn minute_of(time: Option<Time>) -> Option<u64> {
+    time.map(|t| {
+        let after = t.as_millis() - START;
+        assert_eq!(after % MINUTE, 0, "{t:?}");
+        after / MINUTE
+    })
+}
+
+/// Ledger #4077: `Host::next_lapse` names the earliest `until` of a held lease across every
+/// layer, and moves when a renew, a settle or a lapse changes it.
+#[test]
+fn next_lapse_names_the_earliest_until() {
+    let (mut f, clock) = leased();
+    let definition = std::fs::read_to_string(f.config.path().join("layers/tasks-bobby.toml"))
+        .unwrap()
+        .replace("Tasks for Bobby", "Tasks for Chris");
+    f.config.write("layers/tasks-chris.toml", &definition);
+    let chris = std::fs::read_to_string(f.config.path().join("collabs/chris.toml")).unwrap();
+    f.config.write(
+        "collabs/chris.toml",
+        &format!(
+            "{chris}\n[[mount]]\nlayer = \"tasks-chris\"\nbobby-gonk = [\"read\", \"feed\", \"out\", \"take\"]\n"
+        ),
+    );
+    f.reopen();
+    at(&mut f, &clock, 0);
+    assert_eq!(f.host.next_lapse(), None, "no lease is held");
+    // A lease on each layer: 20m on tasks-bobby, 30m on tasks-chris.
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "20m").unwrap();
+    let theirs = offer("c").replace("tasks-bobby", "tasks-chris");
+    let subject = "urn:layer:tasks-chris:offer:c";
+    issue(
+        &f.kernel,
+        Verb::Sink,
+        CHRIS_TUPLES,
+        &[("content", &theirs)],
+        &chris_tasker(&gonk()),
+    )
+    .unwrap();
+    issue(
+        &f.kernel,
+        Verb::Delete,
+        CHRIS_TUPLES,
+        &[("tuple", subject), ("lease", "30m")],
+        &chris_tasker(&bobby_gonk()),
+    )
+    .unwrap();
+    assert_eq!(minute_of(f.host.next_lapse()), Some(20));
+    // A renew at minute 5 for 5m makes tasks-bobby's lease EARLIER, and wakes a loop waiting
+    // on the host's signal to ask again.
+    at(&mut f, &clock, 5);
+    let receipt = receipt_of(&f, &offer_iri("a"));
+    let seen = f.host.notify().generation();
+    settle(
+        &f,
+        &bobby_gonk(),
+        &receipt,
+        &[("settle", "renew"), ("lease", "5m")],
+    )
+    .unwrap();
+    assert_ne!(f.host.notify().generation(), seen, "a renew wakes the loop");
+    assert_eq!(minute_of(f.host.next_lapse()), Some(10));
+    // A renew past tasks-chris's lease hands the next lapse to the other layer.
+    at(&mut f, &clock, 8);
+    settle(
+        &f,
+        &bobby_gonk(),
+        &receipt,
+        &[("settle", "renew"), ("lease", "40m")],
+    )
+    .unwrap();
+    assert_eq!(minute_of(f.host.next_lapse()), Some(30));
+    // Recorded lapsed, a lease is no longer held: the sweep at 30 leaves tasks-bobby's.
+    at(&mut f, &clock, 30);
+    sweep_leases(&f, &clock);
+    assert_eq!(minute_of(f.host.next_lapse()), Some(48));
+    // Settled done, it is no longer held either.
+    settle(&f, &bobby_gonk(), &receipt, &[("settle", "done")]).unwrap();
+    assert_eq!(f.host.next_lapse(), None);
+}
+
+/// Ledger #4077: a lease that lapsed while no host ran is recorded when the host opens, at its
+/// `until`, before any request, read or write, reaches the layer.
+#[test]
+fn open_records_a_lapse_while_down() {
+    let (mut f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    assert_eq!(minute_of(f.host.next_lapse()), Some(10));
+    // The host stops at minute 5 and opens again at minute 15. Open sweeps at its own instant
+    // (the system clock, after this test's 2026-10-10 lapse), as it catches up on retention.
+    at(&mut f, &clock, 5);
+    f.reopen();
+    at(&mut f, &clock, 15);
+    // Recorded by the open itself, before any request: no lease is held any more.
+    assert_eq!(
+        f.host.next_lapse(),
+        None,
+        "nothing held once it is recorded"
+    );
+    assert_eq!(kinds(&f), ["out", "taken", "returned"]);
+    assert_eq!(feed_lines(&f)[2].1, LAPSE, "recorded at its until, 00:10");
+    assert!(pending(&f).contains(&offer_iri("a")), "{}", pending(&f));
 }
