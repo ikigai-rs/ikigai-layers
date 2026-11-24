@@ -681,9 +681,28 @@ impl Store {
     /// intray keeps. A pending tuple that does not open refuses the match (intray's typed
     /// `Conflict` naming it), never reads as absent.
     pub async fn matching(&self, query: &str) -> Result<Vec<String>> {
+        self.matching_with(query, Vec::new())
+    }
+
+    /// [`matching`](Self::matching), with `candidates` considered beside the stored tuples:
+    /// each an intray id and its plaintext Turtle, never stored. Intray's one evaluation of
+    /// the template covers both, within the same budget and with the same nesting bound, and
+    /// answers the matching ids in id order, each once (ledger #4081). This is how `rd match=`
+    /// sees a tuple whose lease lapsed unrecorded: its bytes are in its receipt, not in intray.
+    pub fn matching_with(
+        &self,
+        query: &str,
+        candidates: Vec<(String, Vec<u8>)>,
+    ) -> Result<Vec<String>> {
+        let request = Request::new(Verb::Source, space_iri())
+            .with_arg("match", ArgRef::Inline(query.as_bytes().to_vec()));
+        let mut bindings = Bindings::new();
+        bindings.insert("name", SPACE_NAME);
+        let inv = Invocation::detached(&request, &bindings, &self.authority);
         let bytes = self
-            .call(Verb::Source, &[("match", query.as_bytes())])
-            .await?;
+            .space
+            .invoke_with_match_candidates(&inv, candidates)?
+            .bytes;
         Ok(ids(&bytes))
     }
 

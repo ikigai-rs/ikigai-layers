@@ -4,6 +4,10 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+// Another unit test over the same `common` (ledger #4081), which one crate loads once.
+#[path = "../lease/candidates.rs"]
+mod lease_candidates;
+
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
