@@ -154,7 +154,7 @@ accepts.
 the other model is refused, like a misspelled key.
 
 **`match` is off by default.** A `match=` template is the caller's own SPARQL ASK,
-evaluated against every pending tuple: the store's limits bound a query's size and
+evaluated against every pending tuple (a lapsed, unrecorded one included): the store's limits bound a query's size and
 nesting, and a cross join of triple patterns is a few hundred bytes and shallow, yet costs
 about 8x more for each pattern added: seconds on one tuple at eight patterns, minutes at
 ten, and again for every pending tuple (ledger #1327). So on a layer that does not say
@@ -735,9 +735,11 @@ settle), whichever runs first. A write records every due lapse first, under the 
 lock and in `until` order, so a take of a tuple whose lease has passed succeeds, and every
 `returned` comes before the write's own event. The event's time and the lapse's are the lease's
 `until`, not the moment the host noticed.
-For an idle host, the deployment schedules `Host::sweep_leases(now)` with its clock. For now
-`rd match=` omits a lapsed tuple until its lapse is recorded (an interim, until the template
-can be evaluated against the receipt's copy).
+For an idle host, the deployment schedules `Host::sweep_leases(now)` with its clock.
+`rd match=` sees such a tuple too: its bytes are in its receipt, not in the space, so the
+template is evaluated against the receipt's copy by intray's own matcher, in the same
+evaluation as the stored tuples, within the same time budget and nesting bound, and a match
+is listed pending in `rd`'s order (ledger #4081).
 A lapse is stored before its tuple goes back, so a host that stops between the two drops the
 tuple back when it next opens.
 

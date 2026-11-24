@@ -44,7 +44,7 @@
 //! inside; they offer themselves to anyone holding some grant of the family, and refuse the
 //! rest by name.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -2075,9 +2075,41 @@ impl LayerEndpoint {
                 Representation::new(ReprType::new(TEXT), out.into_bytes())
             });
         }
-        let matched: Option<std::collections::HashSet<String>> = match template {
+        // A template's hits: intray ids, and the `ik:seq`s of the lapsed, unrecorded tuples
+        // it holds for. A lapsed tuple's bytes are in its receipt, not in intray, so its
+        // receipt's copy is a candidate in intray's one evaluation of the template, within
+        // the host's one budget (ledger #4081). Its hit is kept by `ik:seq`, so a lapse
+        // recorded between the match and the listing below still lists the tuple it put back.
+        let matched: Option<(HashSet<String>, HashSet<u64>)> = match template {
             None => None,
-            Some(query) => Some(space.store.matching(query).await?.into_iter().collect()),
+            Some(query) => {
+                let lapsed: Vec<Receipt> = {
+                    let index = space.index.read().expect("tuplespace lock");
+                    index.lapsed_unrecorded(now).cloned().collect()
+                };
+                let mut seqs = HashMap::with_capacity(lapsed.len());
+                let mut candidates = Vec::with_capacity(lapsed.len());
+                for receipt in &lapsed {
+                    // A taken tuple has no intray id (its bytes left the space), so its copy is
+                    // named as intray names a tuple, by the hash of the bytes supplied.
+                    let copy = self.lapsed_tuple(receipt)?.into_bytes();
+                    let id = ikigai_intray::tuple_id(&copy);
+                    seqs.insert(id.clone(), receipt.tuple.seq);
+                    candidates.push((id, copy));
+                }
+                let hits: HashSet<String> = space
+                    .store
+                    .matching_with(query, candidates)?
+                    .into_iter()
+                    .collect();
+                let lapsed_hits = hits.iter().filter_map(|id| seqs.get(id).copied()).collect();
+                Some((hits, lapsed_hits))
+            }
+        };
+        let holds = |m: &TupleMeta| {
+            matched
+                .as_ref()
+                .is_none_or(|(ids, seqs)| ids.contains(&m.cid) || seqs.contains(&m.seq))
         };
         // Each pending tuple, with the receipt it is read from when its lease lapsed unrecorded:
         // such a tuple reads as pending at its own `ik:seq`, where it will go back.
@@ -2085,20 +2117,20 @@ impl LayerEndpoint {
             let index = space.index.read().expect("tuplespace lock");
             let mut pending: Vec<(TupleMeta, Option<Receipt>)> = index
                 .pending()
-                .filter(|m| matched.as_ref().is_none_or(|hits| hits.contains(&m.cid)))
+                .filter(|m| holds(m))
                 .map(|m| (m.clone(), None))
                 .collect();
-            // INTERIM until layers item 1b: `match=` evaluates only the tuples stored in
-            // intray, and a lapsed, unrecorded tuple's bytes are in its receipt, so a template
-            // omits it until the lapse is recorded (README, "lease").
-            if template.is_none() {
-                pending.extend(index.lapsed_unrecorded(now).map(|r| {
-                    let mut meta = r.tuple.clone();
-                    meta.attempts = r.attempt;
-                    (meta, Some(r.clone()))
-                }));
-                pending.sort_by_key(|(m, _)| m.seq);
-            }
+            pending.extend(
+                index
+                    .lapsed_unrecorded(now)
+                    .filter(|r| holds(&r.tuple))
+                    .map(|r| {
+                        let mut meta = r.tuple.clone();
+                        meta.attempts = r.attempt;
+                        (meta, Some(r.clone()))
+                    }),
+            );
+            pending.sort_by_key(|(m, _)| m.seq);
             pending
                 .into_iter()
                 .filter(|(m, _)| m.seq > after)

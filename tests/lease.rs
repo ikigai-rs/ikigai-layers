@@ -734,3 +734,123 @@ fn a_write_records_the_lapses_due_at_its_own_instant() {
         }
     }
 }
+
+/// [`leased`], with the layer also taking `match=` templates, under `layers_toml`.
+fn leased_matching(layers_toml: &str) -> (Fixture, Arc<ManualClock>) {
+    let (mut f, clock) = leased();
+    let path = f.config.path().join("layers/tasks-bobby.toml");
+    let definition = std::fs::read_to_string(&path).unwrap();
+    f.config.write(
+        "layers/tasks-bobby.toml",
+        &format!("{definition}match = true\n"),
+    );
+    f.config.write("layers.toml", layers_toml);
+    f.reopen();
+    f.kernel = kernel_over(&f.host).with_clock(clock.clone());
+    (f, clock)
+}
+
+fn rd_match(f: &Fixture, template: &str) -> Result<String, Error> {
+    issue(
+        &f.kernel,
+        Verb::Source,
+        TUPLES,
+        &[("match", template)],
+        &tasker(&bobby_gonk()),
+    )
+    .map(|r| text(&r))
+}
+
+/// The layer's feed and its lease files, byte for byte.
+fn lease_files(f: &Fixture) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
+    let dir = f.state.path().join(TASKS);
+    let mut leases: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir.join("leases"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .map(|p| (p.display().to_string(), std::fs::read(&p).unwrap()))
+        .collect();
+    leases.sort();
+    (std::fs::read(dir.join("feed.log")).unwrap(), leases)
+}
+
+/// Ledger #4081: a tuple taken under a lease, at the lapse instant and not yet recorded, is
+/// pending to `rd match=` as it is to `rd`. Its bytes are in its receipt, not in intray, so
+/// before this change a template it satisfies omitted it. The template is evaluated against
+/// the receipt's copy by intray's matcher, and the read writes nothing.
+#[test]
+fn rd_match_at_the_lapse_lists_a_lapsed_unrecorded_tuple() {
+    let (mut f, clock) = leased_matching("");
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    out(&f.kernel, &gonk(), &offer("b")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    let title =
+        |name: &str| format!("ASK {{ ?s <http://purl.org/dc/terms/title> \"Task {name}\" }}");
+    let offers = format!("ASK {{ ?s a <{IK}Offer> }}");
+    // Held: the taken tuple matches nothing.
+    at(&mut f, &clock, 9);
+    assert_eq!(rd_match(&f, &title("a")).unwrap(), "");
+    let before = lease_files(&f);
+    at(&mut f, &clock, 10);
+    let hit = rd_match(&f, &title("a")).unwrap();
+    assert_eq!(hit.lines().count(), 1, "{hit}");
+    assert!(
+        hit.starts_with("1 ") && hit.contains(&offer_iri("a")),
+        "{hit}"
+    );
+    assert_eq!(rd_match(&f, &title("zzz")).unwrap(), "");
+    let other = rd_match(&f, &title("b")).unwrap();
+    assert_eq!(other.lines().count(), 1, "{other}");
+    assert!(other.contains(&offer_iri("b")), "{other}");
+    // Merged with the stored hits in `rd`'s order, by `ik:seq`, and the same lines as `rd`.
+    let both = rd_match(&f, &offers).unwrap();
+    assert_eq!(both, pending(&f), "{both}");
+    let subjects: Vec<&str> = both.lines().map(|l| l.split(' ').nth(2).unwrap()).collect();
+    assert_eq!(subjects, [offer_iri("a"), offer_iri("b")]);
+    let page = issue(
+        &f.kernel,
+        Verb::Source,
+        TUPLES,
+        &[("match", &offers), ("after", "1")],
+        &tasker(&bobby_gonk()),
+    )
+    .map(|r| text(&r))
+    .unwrap();
+    assert_eq!(page.lines().count(), 1, "{page}");
+    assert!(page.contains(&offer_iri("b")), "{page}");
+    assert_eq!(lease_files(&f), before, "rd match= wrote");
+    assert_eq!(kinds(&f), ["out", "out", "taken"]);
+    // Recorded, the tuple is in intray again, and matched there once.
+    sweep_leases(&f, &clock);
+    let hit = rd_match(&f, &title("a")).unwrap();
+    assert_eq!(hit.lines().count(), 1, "{hit}");
+    assert!(hit.contains(&offer_iri("a")), "{hit}");
+}
+
+/// Ledger #4081: a lapsed tuple's receipt copy is evaluated inside the host's one budget, not
+/// beside it. With no tuple stored in intray, a template that never ends on the receipt's copy
+/// times out; before this change the copy was not evaluated and the read answered empty.
+#[test]
+fn rd_match_over_a_lapsed_tuple_runs_within_the_budget() {
+    let (mut f, clock) = leased_matching("[match]\nbudget_ms = 200\nmax_overdue = 4\n");
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    // Eight unconstrained patterns over the copy's triples, under a FILTER that never holds.
+    let patterns: String = (0..8).map(|i| format!("?s{i} ?p{i} ?o{i} . ")).collect();
+    let all: Vec<String> = (0..8).map(|i| format!("STR(?o{i})")).collect();
+    let endless = format!(
+        "ASK {{ {patterns}FILTER(CONCAT({}) = \"never\") }}",
+        all.join(", ")
+    );
+    at(&mut f, &clock, 9);
+    assert_eq!(
+        rd_match(&f, &endless).unwrap(),
+        "",
+        "held: nothing to evaluate"
+    );
+    at(&mut f, &clock, 10);
+    let refused = rd_match(&f, &endless);
+    assert!(
+        matches!(refused, Err(Error::Timeout(ref message)) if message.contains("200 ms")),
+        "{refused:?}"
+    );
+}
