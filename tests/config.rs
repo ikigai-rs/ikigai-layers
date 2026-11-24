@@ -37,6 +37,36 @@ fn the_fixture_loads() {
     assert_eq!(loaded.participants.members.len(), 7);
     // `match` is off unless a definition turns it on (ledger #1327).
     assert!(loaded.layers.values().all(|def| !def.matching));
+    assert!(loaded.layers.values().all(|def| !def.lease_required));
+}
+
+#[test]
+fn requiring_a_lease_is_a_tuplespace_option_that_needs_a_maximum() {
+    let config = Scratch::new("cfg");
+    write_config(&config);
+    let path = "layers/extra.toml";
+    config.write(path, &layer("tuplespace", "lease_required = true\n"));
+    let why = refused(&config);
+    assert!(
+        why.contains("lease_required = true needs lease_max"),
+        "{why}"
+    );
+
+    config.write(path, &layer("channel", "lease_required = false\n"));
+    let why = refused(&config);
+    assert!(
+        why.contains("lease_required is a tuplespace option"),
+        "{why}"
+    );
+
+    config.write(path, &layer("tuplespace", "lease_required = false\n"));
+    assert!(!Config::load(config.path()).unwrap().layers["extra"].lease_required);
+
+    config.write(
+        path,
+        &layer("tuplespace", "lease_required = true\nlease_max = \"1h\"\n"),
+    );
+    assert!(Config::load(config.path()).unwrap().layers["extra"].lease_required);
 }
 
 /// `match = true` turns a tuplespace's templates on, and is read as written.

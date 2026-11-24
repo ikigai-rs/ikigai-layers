@@ -28,7 +28,8 @@
 //!   optional result) or renews it before it lapses; a lapsed lease returns the tuple to the
 //!   space (the same tuple, under the same subject and `ik:seq`, with a `returned` feed event),
 //!   and the next take's receipt counts the attempt (`layers:attempt`). A settle after the lapse
-//!   is refused, so a tuple has at most one result. A take with no `lease=` stays final.
+//!   is refused, so a tuple has at most one result. A take with no `lease=` stays final unless
+//!   the layer sets `lease_required = true`, in which case it is refused.
 //!
 //! # Crash order
 //!

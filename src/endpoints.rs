@@ -1722,6 +1722,15 @@ impl LayerEndpoint {
         let (taker, _) = self.attributed(inv, "take")?;
         let subject = take_subject(inv)?;
         let lease = lease_of(self.def(), inv)?;
+        if self.def().lease_required && lease.is_none() {
+            return Err(Error::InvalidArgument {
+                name: "lease".into(),
+                detail: format!(
+                    "Layer `{}` requires a lease on every take. Give a duration with lease=.",
+                    self.layer()
+                ),
+            });
+        }
         let space = self.state.tuplespace();
         let _write = self.state.write.lock().await;
         // A lease that has passed is recorded first, so its tuple is pending below; one that
@@ -2951,20 +2960,29 @@ impl Endpoint for LayerEndpoint {
                 } else {
                     ""
                 };
-                // `lease=` is declared only where the definition allows it (`lease_max`).
+                // `lease=` is declared only where allowed, and required on lease-only layers.
+                let lease_required = self.def().lease_required;
                 let (leasing, leased): (String, Box<dyn Fn(ActionSpec) -> ActionSpec>) =
                     match self.def().lease_max {
                         None => (String::new(), Box::new(|spec| spec)),
                         Some(max) => (
                             format!(
-                                ". With lease=, the take holds for at most {}: its taker \
+                                ". {} The lease holds for at most {}: its taker \
                                  settles the receipt (a Sink on it, settle=done) or renews it \
                                  (settle=renew lease=) before it lapses, and a lapsed lease \
                                  returns the tuple to the space, where the next take's receipt \
                                  counts the attempt",
+                                if lease_required {
+                                    "This layer requires lease= on every take."
+                                } else {
+                                    "Use lease= for a take that can lapse."
+                                },
                                 lease_words(max)
                             ),
-                            Box::new(move |spec| spec.input(lease_spec(max).optional())),
+                            Box::new(move |spec| {
+                                let lease = lease_spec(max);
+                                spec.input(if lease_required { lease } else { lease.optional() })
+                            }),
                         ),
                     };
                 base.title(format!("Layer {layer}: tuples"))

@@ -101,6 +101,7 @@ kind = "task"
 shapes = "review-offer.shapes.ttl"
 context = "review-offer.context.jsonld"
 lease_max = "1h"
+lease_required = true
 ```
 
 `layers/review-offer.shapes.ttl`
@@ -216,8 +217,8 @@ designated approver principals and review the effective grants across all manife
    stamps the taker and offer, and returns the tuple. The mentor reads
    `Source urn:layer:review-offer:tuples state=taken tuple=<offer-IRI>` to get the
    receipt IRI and checks the taker and lease state. After a lapse, the offer is
-   available again and the next attempt has its own receipt. The host also allows
-   final takes without a lease and the layer cannot require one.
+   available again and the next attempt has its own receipt. The layer refuses a
+   take without a lease and leaves the offer pending.
 3. The mentor posts an `Answer` with `ik:inReplyTo` pointing to the question and
    `m:receipt` pointing to that attempt. They settle the receipt before the lease lapses
    with a Sink on the receipt IRI using `settle=done result=<answer-IRI>`. Ordinary answers omit the receipt and
@@ -263,8 +264,9 @@ design records historical endorsement and has no withdrawal operation.
 
 On base commit `003690a6a80d98457d92520709af477e464867dd`,
 `cargo test --test channel --test tuplespace --test lease` passed 55 tests.
-A temporary local test loaded all nine definition blocks into the existing host
-fixture. It confirmed that a well-formed reply to a missing question is stored,
+A temporary local test loaded the original nine definition blocks into the existing
+host fixture, before the review-offer layer could require a lease. It confirmed
+that a well-formed reply to a missing question is stored,
 then exercised a valid question, leased take and receipt lookup, answer and
 settlement, grant denial for an unauthorized approver, approval lookup by answer,
 and JSON-LD reads by the original citation IRIs after reopening the host.
@@ -276,9 +278,6 @@ definitions remain a design and are available here for review.
 - **Validate mentoring references on write.** Define reusable admission checks for an
   existing question, a completed receipt and its result, and independent approval.
   Exercise missing and wrong-type targets, a mismatched taker, and late settlement.
-- **Require a lease on review-offer takes.** Add a tuplespace option for deployments
-  that need every interrupted assignment to return to the queue. Test that a missing
-  lease leaves the offer pending.
 - **Record approval withdrawal.** Design an append-only decision that keeps each
   citation resolvable and makes a withdrawn endorsement visible to readers.
 - **Resolve citations across host moves.** Specify a durable host locator and test

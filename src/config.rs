@@ -214,6 +214,8 @@ pub struct LayerDef {
     /// A tuplespace's only: the longest lease a `take lease=` may ask for. None takes no
     /// lease: every take is final.
     pub lease_max: Option<std::time::Duration>,
+    /// A tuplespace's only: whether every take must specify a lease. Defaults to false.
+    pub lease_required: bool,
     /// A channel's only: how long a `say` under `idempotency-key=` is remembered (ledger
     /// #4060), so a repeat within it answers the first answer and stores nothing. At least
     /// 24 hours ([`ikigai_core::idempotency::MIN_WINDOW`], the default), published as
@@ -315,6 +317,7 @@ struct LayerToml {
     entry_max: Option<toml::Value>,
     retain: Option<String>,
     lease_max: Option<String>,
+    lease_required: Option<bool>,
     resend_window: Option<String>,
     about: Option<String>,
     addressed: Option<bool>,
@@ -404,6 +407,11 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
                  has no rd"
             ))
         }
+        Model::Channel if parsed.lease_required.is_some() => {
+            return err(format!(
+                "{at}: lease_required is a tuplespace option. A channel has no take."
+            ))
+        }
         Model::Tuplespace if parsed.lobby.is_some() => {
             return err(format!(
                 "{at}: `lobby` is a channel option: an enrollment request is an entry someone \
@@ -457,6 +465,12 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
     if lease_max.is_some() && model != Model::Tuplespace {
         return err(format!(
             "{at}: lease_max is a tuplespace option: it bounds a take's lease"
+        ));
+    }
+    let lease_required = parsed.lease_required.unwrap_or(false);
+    if lease_required && lease_max.is_none() {
+        return err(format!(
+            "{at}: lease_required = true needs lease_max to set the longest allowed lease."
         ));
     }
     let resend_window = parsed
@@ -605,6 +619,7 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         entry_max,
         retain,
         lease_max,
+        lease_required,
         resend_window,
         about,
         addressed: parsed.addressed.unwrap_or(false),

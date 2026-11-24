@@ -131,6 +131,7 @@ addressed = true                 # a tuple with ik:addressedTo is taken only by 
 match     = false                # optional; the default: `rd match=` is refused
 # retain  = "30d"                # optional: expire taken receipts after 30 days
 # lease_max = "1h"               # optional: allow `take lease=` up to an hour
+# lease_required = true          # optional: require `take lease=` (needs lease_max)
 ```
 
 **`kind` says what a layer is for**, so that a reader can group layers, for example into a
@@ -150,8 +151,9 @@ accepts.
 | `inquiry` | `ik:InquiryKind` | contact inquiries |
 | `join` | `ik:JoinKind` | join requests |
 
-`addressed`, `match`, `retain` and `lease_max` are a tuplespace's options and `about` and `resend_window` a channel's; naming one on
-the other model is refused, like a misspelled key.
+`addressed`, `match`, `retain`, `lease_max` and `lease_required` are tuplespace options.
+`about` and `resend_window` are channel options. The host refuses an option on the other
+model, like a misspelled key.
 
 **`match` is off by default.** A `match=` template is the caller's own SPARQL ASK,
 evaluated against every pending tuple (a lapsed, unrecorded one included): the store's limits bound a query's size and
@@ -712,6 +714,10 @@ days: `90s`, `15m`, `2h`, `1d`), and a taker then asks for a lease, at most that
 ```text
 $ ikigai -c 'delete urn:layer:tasks-bobby:tuples urn:layer:tasks-bobby:offer:01m4hhr0z8 lease=10m'
 ```
+
+Set `lease_required = true` alongside `lease_max` to make a lease mandatory. A take without
+`lease=` is refused and leaves the tuple pending. By default `lease_required` is false, so a
+take without a lease is still final, even when `lease_max` is set.
 
 The take is the same, and its receipt also records `layers:attempt` (1 for a tuple's first
 take) and `layers:leaseUntil`. Before the lease lapses its taker, and only its taker, settles
