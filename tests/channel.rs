@@ -668,3 +668,44 @@ fn metadata_reader_gets_entry_metadata_without_content() {
     assert_eq!(entry[rdf::ik_seq()][0]["@value"], "2");
     assert_eq!(entry[rdf::DCT_CREATED][0]["@type"], rdf::XSD_DATE_TIME);
 }
+
+#[test]
+fn a_verb_say_does_not_declare_stores_nothing() {
+    let f = fixture();
+    let reader = member(&bobby());
+    let first = say(&f.kernel, "talk", &bobby(), &message("one")).unwrap();
+    let before = source(&f.kernel, "urn:layer:talk:entries", &[], &reader);
+    assert!(before.contains(first.as_str()));
+    for verb in [Verb::Exists, Verb::Source, Verb::Delete] {
+        let answer = issue(
+            &f.kernel,
+            verb,
+            "urn:layer:talk:say",
+            &[("content", &message("sneaked"))],
+            &reader,
+        );
+        assert!(answer.is_err(), "{verb:?} on say answered {answer:?}");
+    }
+    let after = source(&f.kernel, "urn:layer:talk:entries", &[], &reader);
+    assert!(
+        !after.contains("sneaked"),
+        "an undeclared verb stored an entry"
+    );
+}
+
+#[test]
+fn a_read_refuses_a_mutating_verb_and_keeps_its_cache() {
+    let f = fixture();
+    let reader = member(&bobby());
+    say(&f.kernel, "talk", &bobby(), &message("one")).unwrap();
+    let entries = request(Verb::Source, "urn:layer:talk:entries", &[]);
+    source(&f.kernel, "urn:layer:talk:entries", &[], &reader);
+    assert!(
+        f.kernel.is_cached(&entries, &reader),
+        "entries are cacheable"
+    );
+    for verb in [Verb::Sink, Verb::Delete] {
+        let answer = issue(&f.kernel, verb, "urn:layer:talk:entries", &[], &reader);
+        assert!(answer.is_err(), "{verb:?} on entries answered {answer:?}");
+    }
+}
