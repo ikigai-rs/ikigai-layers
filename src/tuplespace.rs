@@ -291,7 +291,7 @@ pub fn passed(until: &str, now: &str) -> bool {
 
 /// A lease's `until` in milliseconds since the epoch, for the index of held leases. One that
 /// does not parse, or is before the epoch, is 0: due at once, as [`passed`] counts it passed.
-fn until_millis(until: &str) -> u64 {
+pub(crate) fn until_millis(until: &str) -> u64 {
     use std::str::FromStr;
     let epoch = oxsdatatypes::DateTime::from_str("1970-01-01T00:00:00Z").expect("the epoch");
     oxsdatatypes::DateTime::from_str(until)
@@ -545,6 +545,57 @@ impl Index {
         self.held
             .first()
             .map(|(millis, _)| ikigai_core::Time::from_millis(*millis))
+    }
+
+    /// Whether `receipt` is still in play, so retention keeps it whatever its age: a held
+    /// lease is not over yet (computed lapsed or not, until its lapse is recorded and its tuple
+    /// is back), and a lapsed one counts the attempts of a tuple pending again.
+    fn in_play(&self, receipt: &Receipt) -> bool {
+        self.live.contains(&receipt.id)
+            || (receipt.lapsed()
+                && matches!(
+                    self.subjects.get(&receipt.tuple.subject),
+                    Some(Place::Pending(_))
+                ))
+    }
+
+    /// Whether a read COMPUTES `receipt` as expired by retention, with `before` the cutoff its
+    /// instant gives (`now - retain`), though no `sweep` has recorded it yet (ledger #4082): it
+    /// is out of play and was taken strictly before the cutoff, the rule a sweep deletes by. A
+    /// read does not show such a receipt and never writes. `None` (no window, or no clock)
+    /// computes nothing.
+    pub fn expired_at(&self, receipt: &Receipt, before: Option<&str>) -> bool {
+        use std::str::FromStr;
+        let Some(before) = before else {
+            return false;
+        };
+        if self.in_play(receipt) {
+            return false;
+        }
+        match (
+            oxsdatatypes::DateTime::from_str(&receipt.time),
+            oxsdatatypes::DateTime::from_str(before),
+        ) {
+            (Ok(taken), Ok(cutoff)) => taken < cutoff,
+            _ => false,
+        }
+    }
+
+    /// When retention next expires a receipt under a window of `retain`: the earliest take,
+    /// among the receipts out of play, plus the window and one millisecond (a receipt expires
+    /// once its take is strictly before `now - retain`), or `None` when no receipt can expire
+    /// (ledger #4082). An instant at or before now means an expiry is due already, recorded by
+    /// the next sweep or write. A scan of the layer's receipts.
+    pub fn next_expiry(&self, retain: std::time::Duration) -> Option<ikigai_core::Time> {
+        let window = u64::try_from(retain.as_millis()).unwrap_or(u64::MAX);
+        self.receipts
+            .iter()
+            .filter(|r| !self.in_play(r))
+            .map(|r| until_millis(&r.time))
+            .min()
+            .map(|taken| {
+                ikigai_core::Time::from_millis(taken.saturating_add(window).saturating_add(1))
+            })
     }
 
     /// A lapsed take's tuple is back in the space as `meta`.
@@ -1102,15 +1153,7 @@ impl Tuplespace {
         let index = self.index.read().expect("tuplespace lock");
         let mut ids = Vec::new();
         for receipt in index.receipts.iter().filter(|r| r.seq < seq) {
-            // A held lease is not over yet, and a lapsed one counts the attempts of a tuple
-            // still in play (pending again, or being returned).
-            let in_play = index.live.contains(&receipt.id)
-                || (receipt.lapsed()
-                    && matches!(
-                        index.subjects.get(&receipt.tuple.subject),
-                        Some(Place::Pending(_))
-                    ));
-            if in_play {
+            if index.in_play(receipt) {
                 continue;
             }
             let taken = oxsdatatypes::DateTime::from_str(&receipt.time)
@@ -1120,6 +1163,28 @@ impl Tuplespace {
             }
         }
         Ok(ids)
+    }
+
+    /// The latest take time, in milliseconds since the epoch, among the receipts
+    /// [`Self::expired`] selects for `before` and `seq`: the batch's last receipt expired the
+    /// millisecond after this plus the window, the instant its `sweep` is recorded at
+    /// (ledger #4082). `None` when nothing is expired.
+    pub(crate) fn latest_expired(
+        &self,
+        before: &str,
+        seq: u64,
+    ) -> std::result::Result<Option<u64>, String> {
+        let ids: BTreeSet<String> = self.expired(before, seq)?.into_iter().collect();
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let index = self.index.read().expect("tuplespace lock");
+        Ok(index
+            .receipts
+            .iter()
+            .filter(|r| ids.contains(&r.id))
+            .map(|r| until_millis(&r.time))
+            .max())
     }
 
     /// Finish a durably logged sweep. Missing files mean a previous attempt deleted them.

@@ -1894,6 +1894,7 @@ impl LayerEndpoint {
         // lapse is recorded yet: a read computes it and never writes (ledger #4075).
         let now = inv.now().map(xsd_date_time);
         let now = now.as_deref();
+        let before = self.retention_cutoff(inv);
         // Expiration and a lapsed lease advance without a Sink or Delete to cut the kernel's
         // cache.
         let answer = |r: Representation| {
@@ -1926,7 +1927,15 @@ impl LayerEndpoint {
                 let index = space.index.read().expect("tuplespace lock");
                 let lapsed =
                     |r: &Receipt| r.lease.as_ref().is_some_and(|l| l.lapsed_unrecorded(now));
-                match (taken, index.lookup(subject)) {
+                // A receipt retention has expired by now reads as gone, though no `sweep`
+                // has recorded it yet (ledger #4082).
+                let found = match index.lookup(subject) {
+                    Lookup::Taken(receipt) if index.expired_at(receipt, before.as_deref()) => {
+                        Lookup::Gone
+                    }
+                    found => found,
+                };
+                match (taken, found) {
                     (false, Lookup::Pending(meta)) => Ok(Err(Ok(meta.cid.clone()))),
                     (false, Lookup::Taken(receipt)) if lapsed(receipt) => {
                         Ok(Err(Err(receipt.clone())))
@@ -1991,16 +2000,16 @@ impl LayerEndpoint {
                         .into(),
                 });
             }
-            let receipts: Vec<Receipt> = space
-                .index
-                .read()
-                .expect("tuplespace lock")
-                .receipts()
-                .iter()
-                .filter(|r| r.seq > after)
-                .take(limit as usize)
-                .cloned()
-                .collect();
+            let receipts: Vec<Receipt> = {
+                let index = space.index.read().expect("tuplespace lock");
+                index
+                    .receipts()
+                    .iter()
+                    .filter(|r| r.seq > after && !index.expired_at(r, before.as_deref()))
+                    .take(limit as usize)
+                    .cloned()
+                    .collect()
+            };
             if asked == JSON {
                 let listed: Vec<serde_json::Value> = receipts
                     .iter()
@@ -2328,6 +2337,15 @@ impl LayerEndpoint {
         Ok(named(&iri, as_json))
     }
 
+    /// The retention cutoff a read computes at its instant, `now - retain` as an
+    /// `xsd:dateTime`: a receipt out of play taken strictly before it has expired, recorded
+    /// or not (ledger #4082). `None` without a window or a clock.
+    fn retention_cutoff(&self, inv: &Invocation<'_>) -> Option<String> {
+        let retain = u64::try_from(self.def().retain?.as_millis()).unwrap_or(u64::MAX);
+        let cutoff = inv.now()?.as_millis().checked_sub(retain)?;
+        Some(xsd_date_time(ikigai_core::Time::from_millis(cutoff)))
+    }
+
     /// A NotFound that a later out or take can end: it hangs from the tuples thread.
     fn not_found_tuple(&self, inv: &Invocation<'_>, what: String) -> Error {
         inv.depends_on(self.tuples_thread());
@@ -2338,12 +2356,15 @@ impl LayerEndpoint {
         let as_ld = face(inv, &GRAPH_FACES)? == JSON_LD;
         let id = inv.bindings.get("id").unwrap_or_default();
         let space = self.state.tuplespace();
-        let found = space
-            .index
-            .read()
-            .expect("tuplespace lock")
-            .receipt(id)
-            .cloned();
+        let before = self.retention_cutoff(inv);
+        // A receipt retention has expired by now is not found, before any `sweep` records it.
+        let found = {
+            let index = space.index.read().expect("tuplespace lock");
+            index
+                .receipt(id)
+                .filter(|r| !index.expired_at(r, before.as_deref()))
+                .cloned()
+        };
         match found {
             // A retained receipt never changes, but a configured window can remove it, and a
             // leased take's standing changes until it is settled or lapses.
@@ -2623,42 +2644,26 @@ impl Endpoint for LayerEndpoint {
         if let (false, Some(principal)) = (self.is_share(), inv.capability.principal()) {
             self.host().gate(principal, inv.now())?;
         }
-        // A write records every due lapse before it does anything else, inside its own write
-        // lock (`record_lapses`, ledger #4076); a read never does (ledger #4075). A read
-        // (Source, Exists, Meta) COMPUTES a held lease past its `until` as lapsed instead: its
-        // tuple reads as pending and its receipt as `lapsed`, with `recorded` false, and
-        // nothing is stored (README, "lease"). On a layer that also retains, the lease sweep
-        // runs here too, before the retention sweep below, so a write's `returned` events come
-        // before its `sweep`.
+        // A write records every due lapse and every retention expiry before it does anything
+        // else, under the layer's write lock, in the order they fell due (`record_lapses`,
+        // ledgers #4076, #4082); a read never does (ledgers #4075, #4082). A read (Source,
+        // Exists, Meta) COMPUTES them instead: a held lease past its `until` reads as lapsed,
+        // its tuple as pending and its receipt as `lapsed` with `recorded` false, and a receipt
+        // past the retention window is not shown, and nothing is stored (README, "lease" and
+        // "retain"). On a layer that retains, every write records them here, before its own
+        // handler, so a write that records nothing itself still keeps the feed in time order.
         let writes = matches!(inv.request.verb, Verb::Sink | Verb::Delete);
         if writes && self.def().model == Model::Tuplespace && self.def().retain.is_some() {
             if let Some(now) = inv.now() {
                 if self
                     .state
-                    .sweep_leases(now)
+                    .sweep(now)
                     .await
                     .map_err(|e| self.space_error(e))?
                 {
                     self.host().notify().bump();
                 }
             }
-        }
-        // Retention still sweeps before every request, reads included; it gets the lease's
-        // computed-on-read rule in its own item.
-        if self.def().retain.is_some()
-            && self
-                .state
-                .sweep_retention(inv.now().ok_or_else(|| {
-                    Error::Endpoint(format!(
-                        "layer `{}` has retain configured, so its retention sweep needs a clock: \
-                     give the kernel one with with_clock",
-                        self.layer()
-                    ))
-                })?)
-                .await
-                .map_err(Error::Endpoint)?
-        {
-            self.host().notify().bump();
         }
         if self.def().is_feed() && self.action.is_shared_feed_read() {
             return if self.is_share() {
