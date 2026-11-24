@@ -23,7 +23,10 @@ presentation has not been evaluated here.
   new entry's or tuple's IRI as `text/plain`; the feeds, the pending tuples and the receipts list
   one line per item as `text/plain`, space-separated (`<seq> <time> <kind> <iri> <participant>`
   for a feed event; a retention `sweep` appends labeled `count=N before=<UTC cutoff>`
-  fields and includes the same aggregate in the event's JSON `sweep` object; a leased receipt
+  fields and includes the same aggregate in the event's JSON `sweep` object, its time being the
+  instant the batch expired; a receipt past the window is left out of the receipts list, and
+  its subject reads as no longer in the space, from that instant on, whether or not the
+  `sweep` is recorded yet; a leased receipt
   appends labeled `attempt=N lease=<held, done or lapsed> until=<UTC time>` fields,
   `result=<iri>` once done, and `recorded=no` while a lapse is computed but not yet recorded,
   with the same in its JSON, there as `"recorded": false` or `true`); entries,
@@ -222,3 +225,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-15 | Fix natural plurals, name invalid grants arguments, and use sentence case for the restart notice; add wording regression tests. |
 | 2026-11-15 | Whether a name is in use: a one-word answer, a JSON face, and its three refusals. |
 | 2026-11-23 | The feed epoch: its refusal of a cursor from another epoch, its JSON fields and the `epoch` command. |
+| 2026-11-24 | A retention `sweep` is timed at the instant its batch expired, and a read leaves an expired receipt out before the sweep is recorded. |

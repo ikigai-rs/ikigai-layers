@@ -69,34 +69,149 @@ impl LayerState {
         }
     }
 
-    /// Expire this layer's old taken receipts under its write lock. Logging the aggregate
-    /// first commits the batch; replay finishes any interrupted deletion before another batch.
-    pub(crate) async fn sweep_retention(&self, now: ikigai_core::Time) -> Result<bool, String> {
+    /// Record, under the layer's write lock, everything due on this layer by `now`: each lease
+    /// lapse and each retention batch, interleaved in the order they fell due ([`Self::record_lapses`]).
+    /// The host's sweep, at open and as a deployment schedules it, for leases and retention
+    /// alike (ledger #4082). Answers whether anything changed.
+    pub(crate) async fn sweep(&self, now: ikigai_core::Time) -> Result<bool, String> {
+        let ModelState::Tuplespace(space) = &self.model else {
+            return Ok(false);
+        };
+        let time = crate::time::xsd_date_time(now);
+        if self.def.retain.is_none()
+            && space
+                .index
+                .read()
+                .expect("tuplespace lock")
+                .due(&time)
+                .is_empty()
+        {
+            return Ok(false);
+        }
+        let _write = self.write.lock().await;
+        self.record_lapses(now).await
+    }
+
+    /// Record every lapse due by `now`, and every receipt retention has expired by then, for a
+    /// caller that ALREADY holds the layer's write lock: the sweep ([`Self::sweep`]) and every
+    /// write on the layer (`out`, `take`, a settle), first thing, with the instant it stamps its
+    /// own event with. A read records nothing: it computes the same lapses and expiries
+    /// (ledgers #4075, #4082).
+    ///
+    /// Each is recorded at the instant it fell due, not the instant someone noticed: a lapse at
+    /// its lease's `until` ([`Self::record_lapse`]), a retention batch at the instant its last
+    /// receipt expired ([`Self::record_retention`]). They are recorded in that order, each
+    /// lapse after the retention due by its `until`, so every event lands no later than `now`
+    /// and the feed's times never go backward (ledger #4076). The lock is what keeps a write
+    /// and the sweep from both recording one: whichever runs second finds nothing due.
+    /// Answers whether anything changed.
+    pub(crate) async fn record_lapses(&self, now: ikigai_core::Time) -> Result<bool, String> {
+        let ModelState::Tuplespace(space) = &self.model else {
+            return Ok(false);
+        };
+        if self.def.retain.is_some() {
+            // Finish a batch whose `sweep` is logged but whose deletion was interrupted.
+            let feed = self.feed.lock().expect("feed lock");
+            if let Some(event) = feed.events().iter().rev().find(|e| e.sweep.is_some()) {
+                space.expire(
+                    &event.sweep.as_ref().expect("sweep event").before,
+                    event.seq,
+                )?;
+            }
+        }
+        let time = crate::time::xsd_date_time(now);
+        let due = space.index.read().expect("tuplespace lock").due(&time);
+        let mut changed = false;
+        for receipt in due {
+            let until = receipt
+                .lease
+                .as_ref()
+                .map_or(0, |l| crate::tuplespace::until_millis(&l.until));
+            self.record_retention(space, ikigai_core::Time::from_millis(until))?;
+            self.record_lapse(space, receipt).await?;
+            changed = true;
+        }
+        changed |= self.record_retention(space, now)?;
+        Ok(changed)
+    }
+
+    /// Record one lapse: the lease file first, with the number of its `returned` event, then
+    /// the tuple back in the space, then the event, at the lease's `until` (ledger #4075). A
+    /// lapse already stored whose tuple could not be dropped back only drops it back.
+    async fn record_lapse(
+        &self,
+        space: &Tuplespace,
+        mut receipt: crate::tuplespace::Receipt,
+    ) -> Result<(), String> {
+        if let Some(lease) = receipt
+            .lease
+            .clone()
+            .filter(|l| l.state == LeaseState::Held)
+        {
+            let seq = {
+                let mut feed = self.feed.lock().expect("feed lock");
+                feed.settle()?;
+                feed.next()
+            };
+            let lapsed = Lease {
+                state: LeaseState::Lapsed {
+                    seq,
+                    time: lease.until.clone(),
+                },
+                until: lease.until,
+            };
+            space.store.write_lease(&receipt.id, &lapsed)?;
+            space.record_lease(&receipt.id, lapsed.clone());
+            receipt.lease = Some(lapsed);
+            let event = crate::tuplespace::returned_event(&receipt).expect("a lapse");
+            // Stored, so its number is spent: owed when the feed cannot take it now.
+            let mut feed = self.feed.lock().expect("feed lock");
+            let _ = feed.append(event.clone()).inspect_err(|_| feed.owe(event));
+        }
+        space.return_tuple(&self.def.name, &receipt).await
+    }
+
+    /// Record the receipts retention has expired by `due` as one `sweep` batch, by
+    /// `urn:layers:retention`, then delete them. Logging the aggregate first commits the
+    /// batch; replay finishes any interrupted deletion before another batch.
+    ///
+    /// The event's time is the instant the batch's last receipt expired (its take, plus the
+    /// window, plus one millisecond, since a receipt expires once its take is strictly before
+    /// `now - retain`), never the instant the host noticed, and never before the feed's last
+    /// event (a receipt out of play only since that event, a take of its tuple again, expired
+    /// then). Its `before` is that instant less the window, so the event reads exactly as a
+    /// sweep run at its own time would have (ledger #4082).
+    fn record_retention(&self, space: &Tuplespace, due: ikigai_core::Time) -> Result<bool, String> {
         let Some(retain) = self.def.retain else {
             return Ok(false);
         };
-        let _write = self.write.lock().await;
-        let space = self.tuplespace();
-        let mut feed = self.feed.lock().expect("feed lock");
-        feed.settle()?;
-        if let Some(event) = feed.events().iter().rev().find(|e| e.sweep.is_some()) {
-            space.expire(
-                &event.sweep.as_ref().expect("sweep event").before,
-                event.seq,
-            )?;
-        }
-        let Some(cutoff) = now.as_millis().checked_sub(retain.as_millis() as u64) else {
+        let window = u64::try_from(retain.as_millis()).unwrap_or(u64::MAX);
+        let Some(cutoff) = due.as_millis().checked_sub(window) else {
             return Ok(false);
         };
-        let before = crate::time::xsd_date_time(ikigai_core::Time::from_millis(cutoff));
+        let mut feed = self.feed.lock().expect("feed lock");
+        feed.settle()?;
         let seq = feed.next();
+        let cutoff_at = crate::time::xsd_date_time(ikigai_core::Time::from_millis(cutoff));
+        let Some(latest) = space.latest_expired(&cutoff_at, seq)? else {
+            return Ok(false);
+        };
+        let last = feed
+            .events()
+            .last()
+            .map_or(0, |e| crate::tuplespace::until_millis(&e.time));
+        let at = latest.saturating_add(window).saturating_add(1).max(last);
+        // Never past the cutoff `due` gives, even when an earlier event's time was later.
+        let before = crate::time::xsd_date_time(ikigai_core::Time::from_millis(
+            at.saturating_sub(window).min(cutoff),
+        ));
         let count = space.expired(&before, seq)?.len() as u64;
         if count == 0 {
             return Ok(false);
         }
         feed.append(Event {
             seq,
-            time: crate::time::xsd_date_time(now),
+            time: crate::time::xsd_date_time(ikigai_core::Time::from_millis(at)),
             kind: "sweep".into(),
             iri: crate::name::layer_iri(&self.def.name),
             by: "urn:layers:retention".into(),
@@ -107,79 +222,6 @@ impl LayerState {
         })?;
         space.expire(&before, seq)?;
         Ok(true)
-    }
-
-    /// Return to the space every tuple whose lease has lapsed by `now`, under the layer's
-    /// write lock (ledger #2119), in the order the leases lapsed ([`Self::record_lapses`]).
-    /// Each lapse is recorded at its
-    /// lease's `until`, not at `now` (ledger #4075): the lease file's lapse time and the
-    /// `returned` event's time are the instant a read already computed it lapsed, whenever the
-    /// sweep noticed. Each lapse is stored first, with the number of its
-    /// `returned` event, then its tuple is dropped back, then the event is logged; a lapse
-    /// whose tuple could not be dropped back is retried by the next sweep, or the next open.
-    /// Answers whether anything changed.
-    pub(crate) async fn sweep_leases(&self, now: ikigai_core::Time) -> Result<bool, String> {
-        let ModelState::Tuplespace(space) = &self.model else {
-            return Ok(false);
-        };
-        let time = crate::time::xsd_date_time(now);
-        if space
-            .index
-            .read()
-            .expect("tuplespace lock")
-            .due(&time)
-            .is_empty()
-        {
-            return Ok(false);
-        }
-        let _write = self.write.lock().await;
-        self.record_lapses(now).await
-    }
-
-    /// Record every lapse due by `now`, in the order the leases lapsed, exactly as
-    /// [`Self::sweep_leases`] does, for a caller that ALREADY holds the layer's write lock: a
-    /// write on the layer (`out`, `take`, a settle) calls it first, with the instant it stamps
-    /// its own event with, so every `returned` (at its `until`, no later than that instant)
-    /// precedes the write's event and the feed's times never go backward (ledger #4076). The
-    /// lock is what keeps a write and the sweep from both recording one lapse: whichever runs
-    /// second finds the receipt no longer due. Answers whether anything changed.
-    pub(crate) async fn record_lapses(&self, now: ikigai_core::Time) -> Result<bool, String> {
-        let ModelState::Tuplespace(space) = &self.model else {
-            return Ok(false);
-        };
-        let time = crate::time::xsd_date_time(now);
-        let due = space.index.read().expect("tuplespace lock").due(&time);
-        let mut changed = false;
-        for mut receipt in due {
-            if let Some(lease) = receipt
-                .lease
-                .clone()
-                .filter(|l| l.state == LeaseState::Held)
-            {
-                let seq = {
-                    let mut feed = self.feed.lock().expect("feed lock");
-                    feed.settle()?;
-                    feed.next()
-                };
-                let lapsed = Lease {
-                    state: LeaseState::Lapsed {
-                        seq,
-                        time: lease.until.clone(),
-                    },
-                    until: lease.until,
-                };
-                space.store.write_lease(&receipt.id, &lapsed)?;
-                space.record_lease(&receipt.id, lapsed.clone());
-                receipt.lease = Some(lapsed);
-                let event = crate::tuplespace::returned_event(&receipt).expect("a lapse");
-                // Stored, so its number is spent: owed when the feed cannot take it now.
-                let mut feed = self.feed.lock().expect("feed lock");
-                let _ = feed.append(event.clone()).inspect_err(|_| feed.owe(event));
-            }
-            space.return_tuple(&self.def.name, &receipt).await?;
-            changed = true;
-        }
-        Ok(changed)
     }
 
     /// The feed's events after `after`, at most [`feed::MAX_EVENTS`].
@@ -370,27 +412,24 @@ impl Host {
         // Catch up on the grants layer: an entitlement said while no host ran is applied now,
         // and one already applied changes nothing (ledger #2009).
         futures::executor::block_on(host.apply_entitlements(opened_at));
-        // A restart records what lapsed while no host ran, at each lease's `until`, as the
-        // retention sweep below catches up on its window (ledger #4077). The lease sweep goes
-        // first, as it does before a write, so its `returned` events precede a `sweep`.
+        // A restart records what lapsed and what retention expired while no host ran, each at
+        // the instant it fell due, in that order (ledgers #4077, #4082).
         futures::executor::block_on(host.sweep_leases(opened_at))?;
-        futures::executor::block_on(host.sweep_retention(opened_at))?;
         Ok(host)
     }
 
-    /// Sweep configured retention windows using the supplied clock. Called at open and
-    /// on layer requests; an idle deployment can also schedule this method periodically.
+    /// Record every receipt each layer's retention window has expired by `now`, as one
+    /// `sweep` per batch at the instant its last receipt expired (ledger #4082). Called at
+    /// open and before every write on a layer with `retain`, never before a read (a read
+    /// computes the expiry and does not show those receipts). A deployment schedules this
+    /// method too, from [`next_expiry`](Self::next_expiry), so the `sweep` reaches the feed
+    /// without waiting for the next write.
+    ///
+    /// The same sweep as [`sweep_leases`](Self::sweep_leases): on a layer that also leases,
+    /// it records the lapses due too, in time order with the batches, so the feed's times never
+    /// go backward whichever the deployment calls.
     pub async fn sweep_retention(&self, now: ikigai_core::Time) -> Result<(), ConfigError> {
-        for (name, state) in &self.layers {
-            if state
-                .sweep_retention(now)
-                .await
-                .map_err(|e| ConfigError(format!("layer `{name}` retention: {e}")))?
-            {
-                self.notify.bump();
-            }
-        }
-        Ok(())
+        self.sweep(now, "retention").await
     }
 
     /// Return to the space every tuple whose lease has lapsed by `now` (ledger #2119), each
@@ -398,17 +437,44 @@ impl Host {
     /// before a read (ledger #4075); a deployment schedules this method too, from
     /// [`next_lapse`](Self::next_lapse), so a lapsed tuple's `returned` event reaches the feed
     /// without waiting for the next write.
+    ///
+    /// The same sweep as [`sweep_retention`](Self::sweep_retention): on a layer that also
+    /// retains, it records the retention batches due too, in time order with the lapses.
     pub async fn sweep_leases(&self, now: ikigai_core::Time) -> Result<(), ConfigError> {
+        self.sweep(now, "leases").await
+    }
+
+    async fn sweep(&self, now: ikigai_core::Time, what: &str) -> Result<(), ConfigError> {
         for (name, state) in &self.layers {
             if state
-                .sweep_leases(now)
+                .sweep(now)
                 .await
-                .map_err(|e| ConfigError(format!("layer `{name}` leases: {e}")))?
+                .map_err(|e| ConfigError(format!("layer `{name}` {what}: {e}")))?
             {
                 self.notify.bump();
             }
         }
         Ok(())
+    }
+
+    /// When retention next expires a receipt: across every layer with `retain`, the earliest
+    /// instant a receipt out of play passes its window, or `None` when none can (ledger #4082).
+    /// A deployment schedules it as it does [`next_lapse`](Self::next_lapse), and the loop
+    /// there waits for whichever comes first. A write can make an earlier one (a take of a
+    /// tuple pending again frees its old receipt); it appends to the feed, which bumps
+    /// [`notify`](Self::notify). Each answer scans the layer's receipts.
+    pub fn next_expiry(&self) -> Option<ikigai_core::Time> {
+        self.layers
+            .values()
+            .filter_map(|state| match (&state.model, state.def.retain) {
+                (ModelState::Tuplespace(space), Some(retain)) => space
+                    .index
+                    .read()
+                    .expect("tuplespace lock")
+                    .next_expiry(retain),
+                _ => None,
+            })
+            .min()
     }
 
     /// When the next lease lapse is due: the earliest `until` of a held lease across every
@@ -424,7 +490,9 @@ impl Host {
     /// so the loop wakes on that signal too and asks again. The signal is a hint, bumped by
     /// every feed append and every settle besides: a wake that finds nothing earlier simply
     /// sleeps again. Under the computed lapse (ledger #4075) a late or missed wake only
-    /// delays when the feed shows `returned`, never what a reader or a taker sees.
+    /// delays when the feed shows `returned`, never what a reader or a taker sees. Retention is
+    /// scheduled the same way, from [`next_expiry`](Self::next_expiry) (ledger #4082), so the
+    /// loop below waits for whichever is first.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -443,7 +511,8 @@ impl Host {
     ///         // Read the signal BEFORE asking, so a take between the two wakes the wait.
     ///         let seen = host.notify().generation();
     ///         let woken = host.notify().changed(seen);
-    ///         match host.next_lapse() {
+    ///         let next = [host.next_lapse(), host.next_expiry()].into_iter().flatten().min();
+    ///         match next {
     ///             Some(due) => {
     ///                 let delay = due.as_millis().saturating_sub(clock.now().as_millis());
     ///                 let slept = timer.sleep(Duration::from_millis(delay));

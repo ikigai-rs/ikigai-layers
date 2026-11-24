@@ -682,10 +682,20 @@ receipts stay indefinitely. A sweep deletes receipts whose take time is strictly
 unchanged inside the window; after expiration, retries and reports cannot use that receipt.
 The tuple's subject stays reserved, so an expired tuple cannot be submitted again.
 
-The host sweeps when it opens and before every request, reads included, on a layer with
-retention configured.
-For expiration while idle, the deployment schedules `Host::sweep_retention(now)` with its
-clock. The feed keeps its existing events and adds one `sweep` event per nonempty batch,
+A read never writes: from the instant a receipt expires, every read (the taken listing, the
+tuple by its subject, the receipt by its IRI) computes it as expired and does not show it, and
+nothing is stored or deleted. The expiry is recorded, with its `sweep` event, by the host's
+sweep (when it opens, and as the deployment schedules it) or by the next write on the layer,
+whichever runs first, under the layer's write lock. The event's time is the instant the batch's
+last receipt expired (its take time plus the window, plus one millisecond), not the moment the
+host noticed, and its `before` is that instant less the window. A write records every due
+expiry and every due lease lapse first, each at its own instant and in that order, so the
+feed's times never go backward.
+For expiration while idle, the deployment schedules the sweep as it does for leases:
+`Host::next_expiry()` answers when the next receipt expires, and the deployment sleeps until
+then and calls `Host::sweep_retention(now)` with its clock (on a layer with both, it and
+`Host::sweep_leases(now)` record the same things, lapses and expiries in time order). The feed
+keeps its existing events and adds one `sweep` event per nonempty batch,
 with the layer IRI, `by = urn:layers:retention` and aggregate fields only. Plain lines append
 `count=N before=<UTC cutoff>`; JSON events add `"sweep": {"count": N, "before": "..."}`.
 No receipt IDs, tuple subjects or contents are included in that aggregate. The aggregate is
