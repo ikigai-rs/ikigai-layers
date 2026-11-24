@@ -52,6 +52,39 @@ fn match_is_a_tuplespace_option_off_by_default() {
     assert!(!loaded.layers["tasks-bobby"].matching);
 }
 
+/// `resend_window` is a channel's (ledger #4060): how long a say's `idempotency-key=` is
+/// remembered, 24 hours unless the definition says more, and never less.
+#[test]
+fn resend_window_is_a_channel_option_of_at_least_a_day() {
+    let day = std::time::Duration::from_secs(86_400);
+    let config = Scratch::new("cfg");
+    write_config(&config);
+    config.write(
+        "layers/long.toml",
+        &layer("channel", "resend_window = \"2d\"\n"),
+    );
+    let loaded = Config::load(config.path()).unwrap();
+    assert_eq!(loaded.layers["long"].resend_window, 2 * day);
+    assert_eq!(loaded.layers["talk"].resend_window, day);
+
+    config.write(
+        "layers/long.toml",
+        &layer("channel", "resend_window = \"23h\"\n"),
+    );
+    let why = refused(&config);
+    assert!(
+        why.contains("resend_window `23h` is shorter than 24h"),
+        "{why}"
+    );
+
+    config.write(
+        "layers/long.toml",
+        &layer("tuplespace", "resend_window = \"2d\"\n"),
+    );
+    let why = refused(&config);
+    assert!(why.contains("resend_window is a channel option"), "{why}");
+}
+
 /// Brian, 2026-10-10: a manifest naming a layer another manifest names is REFUSED unless
 /// the layer declares itself shared with exactly those collaborations.
 #[test]

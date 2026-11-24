@@ -68,9 +68,11 @@ required-features = ["host"]
 # types are in this crate's API, so the move is this crate's 0.7.0. **0.4.x is core 0.4.0
 # (scope opacity, structured denials; the core 0.4.0 cascade, ledger #3893)**: a scope is used
 # only by issuing requests, and `Error::Denied` carries a `Denial`. Again core's types are in
-# this crate's API, so this move is this crate's 0.11.0. 0.4.1 is the current release.
-# ⚠ `"0.4.1"` is `<0.5.0`.
-ikigai-core = "0.4.1"
+# this crate's API, so this move is this crate's 0.11.0. **0.4.2 is the floor**: its
+# `idempotency` toolkit (ledger #4056: `IdempotencyKey`, `Replay`, `fingerprint_without`,
+# `ActionSpec::resend_window`) is how `say` takes `idempotency-key=` (ledger #4060).
+# ⚠ `"0.4.2"` is `<0.5.0`.
+ikigai-core = "0.4.2"
 # Shared triple-term nesting guard. Also used by participants: adds oxrdfio and quick-xml, but
 # no store or RocksDB. 0.6.0 is the release on core 0.4 (the linkeddata workspace's).
 # ⚠ `"0.6.0"` is `<0.7.0`.

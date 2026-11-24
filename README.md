@@ -116,6 +116,7 @@ shapes  = "msg.shapes.ttl"       # closed SHACL shapes: what may be written
 context = "msg.context.jsonld"   # the egress allowlist
 entry_max = "16KiB"              # optional; the default
 shared  = ["bobby", "chris"]     # optional: the collaborations that may mount it
+# resend_window = "2d"           # optional: remember a say's idempotency-key= for 2 days (1d)
 ```
 
 A task layer:
@@ -149,7 +150,7 @@ accepts.
 | `inquiry` | `ik:InquiryKind` | contact inquiries |
 | `join` | `ik:JoinKind` | join requests |
 
-`addressed`, `match`, `retain` and `lease_max` are a tuplespace's options and `about` a channel's; naming one on
+`addressed`, `match`, `retain` and `lease_max` are a tuplespace's options and `about` and `resend_window` a channel's; naming one on
 the other model is refused, like a misspelled key.
 
 **`match` is off by default.** A `match=` template is the caller's own SPARQL ASK,
@@ -591,6 +592,31 @@ And a follower that was waiting on `source urn:layer:talk:feed after=0 wait=50` 
 ```text
 1 2026-10-10T00:00:01.000Z say urn:layer:talk:entry:01m4hhr0z80000000000001 urn:collab:participant:brian
 ```
+
+**A say sent again under a token is one entry** (ledger #4060). A writer that does not know
+whether its `say` landed (a timeout, a dropped connection) sends it again with the same
+`idempotency-key=`, a token of its own (ASCII letters, digits and `-._~:`, at most 256):
+
+```text
+$ cat note.ttl | ikigai -c 'sink urn:layer:talk:say idempotency-key=note-7f3a'
+urn:layer:talk:entry:01m4hhr0z80000000000001
+```
+
+The repeat stores nothing and logs nothing, and answers the first answer byte for byte, with
+no marker saying it is a repeat. The token is the author's own on this layer's `say`: another
+participant, or another layer, may use the same one. The same token with a different say
+(other content, or another `as=`) is refused: ``invalid argument `idempotency-key`:
+`note-7f3a` was used for a different request``. Only a stored entry is remembered: a say that
+was refused stored nothing, so its token stays free. A repeat that arrives while the first is
+being written waits for it under the layer's write lock and answers what it answered. The
+contract declares this (`resend_safe_with_key("idempotency-key")`), so a retrying overlay such
+as `ikigai-throttle`'s `Retry` resends a `say` that carries the token, and no other.
+
+A token is remembered for the layer's `resend_window` (at least, and by default, `"1d"`;
+written as a `lease_max` is), published as `ik:resendWindow`; after it, the token is a new
+say. The record is stored in the entry's own sealed file, so the entry and its record are one
+write: there is never one without the other, and a restart keeps both. No read answers it. A
+join lobby takes no token: it answers a request with what it granted.
 
 A feed event's `kind` names the operation (`say`, `out`, `taken` or `sweep`), not the
 entry's `rdf:type`. Both the plain and JSON faces omit entry types. A client showing a
