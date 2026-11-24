@@ -12,6 +12,13 @@
 //!   (but for [`crate::Migration::Reseal`], which seals it again with the same Turtle): there is no edit and no delete, and a correction is a new entry that
 //!   `ik:supersedes` the old one (the same author's, in the same layer).
 //!
+//! An entry said under `idempotency-key=` (ledger #4060) carries its replay record IN THE SAME
+//! FILE, so the record and the entry are one store update: the file is renamed into place
+//! whole or not at all, and there is never an entry without its record or a record without
+//! its entry. The record is one Turtle comment line before the entry's Turtle,
+//! `#ik:replay <base64 of ikigai-core's Replay encoding>`, which no reader is answered:
+//! [`Channel::turtle`] answers the entry without it.
+//!
 //! This module holds the entries and their index; the endpoints in [`crate::endpoints`]
 //! compose admission (the host's own call to ikigai-shacl's validator) around it.
 
@@ -19,6 +26,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
+use ikigai_core::idempotency::{IdempotencyKey, Replay};
 use ikigai_core::Error;
 use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use oxrdfio::{RdfFormat, RdfParser};
@@ -36,6 +45,28 @@ pub use crate::name::NEW_SUBJECT;
 /// The suffix of an entry file still being written (`.{id}.ttl.partial`, beside where it
 /// will be stored): never read as an entry, and cleared on open.
 pub const PARTIAL: &str = ".partial";
+
+/// The line an entry file's replay record is written on, before the entry's Turtle: a Turtle
+/// comment, so the file is still Turtle.
+const REPLAY_LINE: &str = "#ik:replay ";
+
+/// Split an entry file's text into its replay record's line (if any) and the entry's Turtle.
+fn split_replay(text: &str) -> (Option<&str>, &str) {
+    match text.strip_prefix(REPLAY_LINE) {
+        Some(rest) => match rest.split_once('\n') {
+            Some((record, turtle)) => (Some(record), turtle),
+            None => (Some(rest), ""),
+        },
+        None => (None, text),
+    }
+}
+
+fn decode_replay(line: &str) -> Result<Replay, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(line.trim_end())
+        .map_err(|e| format!("a replay record that is not base64: {e}"))?;
+    Replay::from_bytes(&bytes).map_err(|e| e.to_string())
+}
 
 /// What the index knows about one entry.
 #[derive(Clone, Debug)]
@@ -71,6 +102,14 @@ pub struct Channel {
     entries: Vec<EntryMeta>,
     by_id: HashMap<String, usize>,
     superseded: HashSet<String>,
+    /// Each entry said under a token, by (author, token): its replay record. A later entry
+    /// under the same token (said after the first's window) replaces it.
+    replays: HashMap<(String, IdempotencyKey), Replay>,
+}
+
+/// The IRI of `layer`'s `say`: the endpoint resource a replay record is scoped to.
+pub fn say_iri(layer: &str) -> String {
+    format!("urn:layer:{layer}:say")
 }
 
 /// The prefix of every entry IRI in `layer`.
@@ -100,6 +139,7 @@ impl Channel {
             entries: Vec::new(),
             by_id: HashMap::new(),
             superseded: HashSet::new(),
+            replays: HashMap::new(),
         };
         let mut found = Vec::new();
         for slug_dir in read_dir(&graphs)? {
@@ -119,11 +159,19 @@ impl Channel {
                     continue;
                 }
                 let text = channel.sealer.read_text(&file)?;
+                let (record, turtle) = split_replay(&text);
                 let triples =
-                    rdf::parse_turtle(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+                    rdf::parse_turtle(turtle).map_err(|e| format!("{}: {e}", file.display()))?;
                 let meta = channel
                     .meta(&triples)
                     .map_err(|e| format!("{}: {e}", file.display()))?;
+                let replay = record
+                    .map(|line| {
+                        decode_replay(line)
+                            .and_then(|r| channel.check_replay(&r, &meta).map(|()| r))
+                            .map_err(|e| format!("{}: {e}", file.display()))
+                    })
+                    .transpose()?;
                 let expected = slug_dir.join(format!("{}.ttl", meta.id));
                 if expected != file {
                     return Err(format!(
@@ -134,19 +182,23 @@ impl Channel {
                         expected.display()
                     ));
                 }
-                found.push(meta);
+                found.push((meta, replay));
             }
         }
-        found.sort_by_key(|m| m.seq);
-        for meta in found {
-            channel.index(meta)?;
+        found.sort_by_key(|(m, _)| m.seq);
+        for (meta, replay) in found {
+            channel.index(meta, replay)?;
         }
         Ok(channel)
     }
 
-    fn index(&mut self, meta: EntryMeta) -> Result<(), String> {
+    fn index(&mut self, meta: EntryMeta, replay: Option<Replay>) -> Result<(), String> {
         if self.by_id.contains_key(&meta.id) {
             return Err(format!("{} is stored twice", meta.iri));
+        }
+        if let Some(replay) = replay {
+            self.replays
+                .insert((meta.author.clone(), replay.scope.key.clone()), replay);
         }
         self.superseded.extend(meta.supersedes.iter().cloned());
         self.by_id.insert(meta.id.clone(), self.entries.len());
@@ -222,6 +274,36 @@ impl Channel {
         })
     }
 
+    /// A replay record belongs to the entry it is stored with: its scope is this layer's
+    /// `say` and the entry's author, and its answer names the entry.
+    fn check_replay(&self, replay: &Replay, meta: &EntryMeta) -> Result<(), String> {
+        let endpoint = say_iri(&self.layer);
+        if replay.scope.endpoint != endpoint
+            || replay.scope.principal.as_deref() != Some(meta.author.as_str())
+        {
+            return Err(format!(
+                "the replay record of {} is scoped to {} by {}, not to {endpoint} by {}",
+                meta.iri,
+                replay.scope.endpoint,
+                replay.scope.principal.as_deref().unwrap_or("nobody"),
+                meta.author
+            ));
+        }
+        if !String::from_utf8_lossy(&replay.bytes).contains(&meta.iri) {
+            return Err(format!(
+                "the replay record of {} answers another entry",
+                meta.iri
+            ));
+        }
+        Ok(())
+    }
+
+    /// The replay record of the entry `author` said under `key`, if any (live or not: the
+    /// caller asks [`Replay::is_live`] with the layer's window).
+    pub fn replay(&self, author: &str, key: &IdempotencyKey) -> Option<&Replay> {
+        self.replays.get(&(author.to_string(), key.clone()))
+    }
+
     /// The highest sequence number among the stored entries (0 for none).
     pub fn last_seq(&self) -> u64 {
         self.entries.last().map_or(0, |m| m.seq)
@@ -245,9 +327,13 @@ impl Channel {
             .find(|m| m.about.contains(iri) && !self.superseded.contains(&m.iri))
     }
 
-    /// The stored Turtle of one entry.
+    /// The stored Turtle of one entry, without its replay record.
     pub fn turtle(&self, meta: &EntryMeta) -> Result<String, String> {
-        self.sealer.read_text(&self.path_of(meta))
+        let text = self.sealer.read_text(&self.path_of(meta))?;
+        Ok(match split_replay(&text) {
+            (None, _) => text,
+            (Some(_), turtle) => turtle.to_string(),
+        })
     }
 
     /// Seal again, to the current identity, every entry that is plaintext or sealed only to
@@ -284,12 +370,32 @@ impl Channel {
     /// torn entry it would refuse the layer over. Nothing carrying the entry's number was
     /// stored, so the next write takes that number.
     pub fn append(&mut self, triples: &[Triple]) -> Result<EntryMeta, String> {
+        self.append_with(triples, None)
+    }
+
+    /// [`append`](Self::append) an entry said under an idempotency key, with its replay
+    /// record in the same file: one rename stores both, or neither.
+    pub fn append_with(
+        &mut self,
+        triples: &[Triple],
+        replay: Option<Replay>,
+    ) -> Result<EntryMeta, String> {
         let meta = self.meta(triples)?;
+        if let Some(r) = &replay {
+            self.check_replay(r, &meta)?;
+        }
         let path = self.path_of(&meta);
         let dir = path.parent().expect("a graph directory");
         at_rest::private_dir(dir)
             .map_err(|e| format!("create the graph of {}: {e}", meta.author))?;
-        let sealed = self.sealer.seal(rdf::to_turtle(triples).as_bytes())?;
+        let mut text = String::new();
+        if let Some(r) = &replay {
+            text.push_str(REPLAY_LINE);
+            text.push_str(&base64::engine::general_purpose::STANDARD.encode(r.to_bytes()));
+            text.push('\n');
+        }
+        text.push_str(&rdf::to_turtle(triples));
+        let sealed = self.sealer.seal(text.as_bytes())?;
         let partial = dir.join(format!(".{}.ttl{PARTIAL}", meta.id));
         let written = at_rest::private_file()
             .write(true)
@@ -318,7 +424,7 @@ impl Channel {
             let _ = std::fs::remove_file(&partial);
             return Err(e);
         }
-        self.index(meta.clone())?;
+        self.index(meta.clone(), replay)?;
         Ok(meta)
     }
 

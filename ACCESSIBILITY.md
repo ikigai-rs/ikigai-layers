@@ -10,7 +10,7 @@ how to report a barrier. It is not a conformance claim. Adapted from the
 | Status | Evaluation in progress. No conformance claim. |
 | Owner | the maintainers of this repository |
 | Report a barrier | [a GitHub issue](https://github.com/ikigai-rs/ikigai-layers/issues/new?labels=accessibility) with the `accessibility` label; anything security-sensitive through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-layers/security/advisories/new) |
-| Last reviewed | 2026-11-12 |
+| Last reviewed | 2026-11-24 |
 
 ## What it emits that people read
 
@@ -42,7 +42,12 @@ presentation has not been evaluated here.
   to free it, on the onboarding status and the stderr line below. One naming a participant a
   manifest grants answers ``onb:principal <participant> is granted by manifest `<name>`, …`` and
   says how to change that, and one naming `onboard.controller` says it is never entitled, both
-  in the same two places. A write that fails admission answers ``does not conform to layer
+  in the same two places. A `say` whose `idempotency-key=` was used for a
+  different say answers ``invalid argument `idempotency-key`: `<token>` was used for a different request``; a
+  malformed token names the character and its position, or says the token is empty or longer
+  than 256 characters, and spells out the alphabet (``ASCII letters, digits and - . _ ~ :``); a
+  token on a join lobby says the lobby takes none. A repeat under a token answers the first
+  answer exactly, so a reader sees nothing new. A write that fails admission answers ``does not conform to layer
   `talk`'s shapes (1 violation): …`` (``N violations`` for other counts), listing up to 20
   violations and a count of the rest. A settle after a lease lapsed answers ``receipt <iri>'s
   lease lapsed at <time>, and <tuple> went back to the space: a settle after the lapse is

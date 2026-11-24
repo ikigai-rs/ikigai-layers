@@ -49,6 +49,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ikigai_core::idempotency::{IdempotencyKey, Replay, ReplayScope, IDEMPOTENCY_KEY_ARG};
 use ikigai_core::{
     ActionSpec, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
     Iri, ReprType, Representation, Request, Result, UriTemplate, Verb,
@@ -332,6 +333,45 @@ fn limit_spec() -> ArgSpec {
         ))
         .class(xsd("nonNegativeInteger"))
         .default_value(DEFAULT_LIMIT.to_string())
+}
+
+/// `say`'s contract. Off a join lobby it takes `idempotency-key=` (ledger #4060): a repeat
+/// under the same token within the layer's window answers the first answer and stores
+/// nothing, so a resend carrying it is safe (`Resend::Key`), and the window is published as
+/// `ik:resendWindow`.
+fn say_action(def: &LayerDef, layer: &str) -> ActionSpec {
+    let mut action = ActionSpec::new(Verb::Sink)
+        .input(
+            ArgSpec::new("content")
+                .summary(
+                    "the entry, as Turtle or JSON-LD, about <urn:layer:new>; never \
+                     prov:wasAttributedTo, dcterms:created or ik:seq, which the host stamps",
+                )
+                .class(xsd("string")),
+        )
+        .input(as_spec(&[TEXT, JSON]))
+        .output(TEXT)
+        .output(JSON)
+        .requires(layer_cap("say", layer));
+    if !def.join {
+        let window = def.resend_window;
+        action = action
+            .input(
+                ArgSpec::new(IDEMPOTENCY_KEY_ARG)
+                    .summary(format!(
+                        "a token of your own for this say (ASCII letters, digits and - . _ ~ :, \
+                         at most 256): the same say sent again with it, by you, within {}, \
+                         stores nothing and answers the first answer byte for byte; the token \
+                         with a different say is refused",
+                        lease_words(window)
+                    ))
+                    .class(xsd("string"))
+                    .optional(),
+            )
+            .resend_safe_with_key(IDEMPOTENCY_KEY_ARG)
+            .resend_window(window);
+    }
+    action
 }
 
 fn turtle(text: String) -> Representation {
@@ -1141,6 +1181,8 @@ impl LayerEndpoint {
         // The face first: a write answered in a face nobody offers is refused before it is
         // stored, never after.
         let as_json = face(inv, &[TEXT, JSON])? == JSON;
+        // The token next (ledger #4060): a malformed one is refused before anything is done.
+        let key = IdempotencyKey::from_request(inv.request, IDEMPOTENCY_KEY_ARG)?;
         let (author, _) = self.attributed(inv, "say")?;
         if let Some(c) = self
             .host()
@@ -1169,7 +1211,24 @@ impl LayerEndpoint {
             }
         }
         if self.def().join {
+            if key.is_some() {
+                return Err(Error::InvalidArgument {
+                    name: IDEMPOTENCY_KEY_ARG.into(),
+                    detail: format!(
+                        "layer `{}` is a join lobby, which answers a request with what it \
+                         granted and takes no idempotency key: send the request without one",
+                        self.layer()
+                    ),
+                });
+            }
             return self.join(inv, as_json, author).await;
+        }
+        // A repeat is answered before it is counted or parsed: it does no work again. Asked
+        // again under the write lock, where the answer is authoritative.
+        if let Some(key) = &key {
+            if let Some(answer) = self.replayed(inv, &author, key)? {
+                return Ok(answer);
+            }
         }
         if self.def().lobby {
             // Counted before anything is parsed: the rate bounds the work a stranger causes.
@@ -1211,6 +1270,14 @@ impl LayerEndpoint {
         // From here to the feed append is one step per layer: the sequence number is
         // assigned, stamped, admitted, stored and logged under this lock.
         let _write = self.state.write.lock().await;
+        // A repeat that waited on this lock while the first was written finds its record
+        // here, so two sends of one token never store two entries: the lock is what a
+        // `RetryAfter` for a repeat in flight would otherwise stand for.
+        if let Some(key) = &key {
+            if let Some(answer) = self.replayed(inv, &author, key)? {
+                return Ok(answer);
+            }
+        }
         let seq = self.settle_feed()?;
         self.state
             .channel()
@@ -1226,11 +1293,22 @@ impl LayerEndpoint {
         let created = xsd_date_time(now);
         let stamped = draft.stamp(&iri, &author, &created, seq);
         admit(self.def(), &stamped)?;
+        let answer = named(&iri, as_json);
+        // Recorded only now that the entry is decided: a refusal above stored nothing, and
+        // its token stays free for a retry.
+        let replay = key.map(|key| {
+            Replay::success(
+                ReplayScope::new(channel::say_iri(self.layer()), Some(&author), key),
+                inv.request.fingerprint_without(IDEMPOTENCY_KEY_ARG),
+                &answer,
+                now,
+            )
+        });
         self.state
             .channel()
             .write()
             .expect("channel lock")
-            .append(&stamped)
+            .append_with(&stamped, replay)
             .map_err(Error::Endpoint)?;
         let logged = self.log_stored(Event {
             sweep: None,
@@ -1261,7 +1339,38 @@ impl LayerEndpoint {
             // The entry is stored whatever applying it decides: the decision is the status's.
             self.host().apply_entitlements(now).await;
         }
-        Ok(named(&iri, as_json))
+        Ok(answer)
+    }
+
+    /// The answer to a repeat of a `say` under `key` by `author` (ledger #4060): the first
+    /// answer, byte for byte, when the token's record is live and was made for this same
+    /// request (its fingerprint without the token); a refusal naming the token when it was
+    /// made for another; `None` when there is no live record, and the say is a new one.
+    fn replayed(
+        &self,
+        inv: &Invocation<'_>,
+        author: &str,
+        key: &IdempotencyKey,
+    ) -> Result<Option<Representation>> {
+        let now = self.now(inv)?;
+        let channel = self.state.channel().read().expect("channel lock");
+        let Some(record) = channel
+            .replay(author, key)
+            .filter(|r| r.is_live(now, self.def().resend_window))
+        else {
+            return Ok(None);
+        };
+        if !record.matches(inv.request.fingerprint_without(IDEMPOTENCY_KEY_ARG)) {
+            return Err(key.mismatch(IDEMPOTENCY_KEY_ARG));
+        }
+        match record.representation() {
+            Some(answer) => Ok(Some(answer)),
+            // Only a success is recorded for a say, so a recorded failure is answered as
+            // the failure it was.
+            None => Err(record
+                .error()
+                .unwrap_or_else(|| key.mismatch(IDEMPOTENCY_KEY_ARG))),
+        }
     }
 
     /// A request on the join lobby (ledger #3290): the deny list, the persisted rate, the
@@ -2620,19 +2729,7 @@ impl Endpoint for LayerEndpoint {
                      the layer's closed shapes, and answers its IRI. Append-only: correct an \
                      entry with a new one that ik:supersedes it"
                 ))
-                .verb(Verb::Sink)
-                .input(
-                    ArgSpec::new("content")
-                        .summary(
-                            "the entry, as Turtle or JSON-LD, about <urn:layer:new>; never \
-                             prov:wasAttributedTo, dcterms:created or ik:seq, which the host \
-                             stamps",
-                        )
-                        .class(xsd("string")),
-                )
-                .input(as_spec(&[TEXT, JSON]))
-                .output(TEXT)
-                .output(JSON),
+                .action(say_action(self.def(), layer)),
             Action::FeedGraph => base
                 .title(format!("Feed {layer}: graph"))
                 .summary(format!(

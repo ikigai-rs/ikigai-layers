@@ -214,6 +214,11 @@ pub struct LayerDef {
     /// A tuplespace's only: the longest lease a `take lease=` may ask for. None takes no
     /// lease: every take is final.
     pub lease_max: Option<std::time::Duration>,
+    /// A channel's only: how long a `say` under `idempotency-key=` is remembered (ledger
+    /// #4060), so a repeat within it answers the first answer and stores nothing. At least
+    /// 24 hours ([`ikigai_core::idempotency::MIN_WINDOW`], the default), published as
+    /// `ik:resendWindow`.
+    pub resend_window: std::time::Duration,
     /// The predicate `latest about=` reads (default `dcterms:subject`). A channel's only.
     pub about: String,
     /// A tuplespace's only: whether a tuple carrying `ik:addressedTo` may be taken only by a
@@ -310,6 +315,7 @@ struct LayerToml {
     entry_max: Option<toml::Value>,
     retain: Option<String>,
     lease_max: Option<String>,
+    resend_window: Option<String>,
     about: Option<String>,
     addressed: Option<bool>,
     #[serde(rename = "match")]
@@ -453,6 +459,38 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
             "{at}: lease_max is a tuplespace option: it bounds a take's lease"
         ));
     }
+    let resend_window = parsed
+        .resend_window
+        .as_deref()
+        .map(|value| {
+            parse_lease(value)
+                // The lease's own words, about a window.
+                .map_err(|why| {
+                    ConfigError(format!(
+                        "{at}: resend_window {}",
+                        why.replace("lease", "window")
+                    ))
+                })
+                .and_then(|window| {
+                    let min = ikigai_core::idempotency::MIN_WINDOW;
+                    if window < min {
+                        Err(ConfigError(format!(
+                            "{at}: resend_window `{value}` is shorter than 24h: a token is \
+                             remembered for at least a day"
+                        )))
+                    } else {
+                        Ok(window)
+                    }
+                })
+        })
+        .transpose()?;
+    if resend_window.is_some() && model != Model::Channel {
+        return err(format!(
+            "{at}: resend_window is a channel option: it bounds how long a say's \
+             idempotency-key= is remembered"
+        ));
+    }
+    let resend_window = resend_window.unwrap_or(ikigai_core::idempotency::MIN_WINDOW);
     let feed_options = parsed.feed.unwrap_or(false);
     if !feed_options {
         let stray = [
@@ -567,6 +605,7 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         entry_max,
         retain,
         lease_max,
+        resend_window,
         about,
         addressed: parsed.addressed.unwrap_or(false),
         matching: parsed.matching.unwrap_or(false),
