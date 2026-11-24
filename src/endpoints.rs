@@ -44,7 +44,7 @@
 //! inside; they offer themselves to anyone holding some grant of the family, and refuse the
 //! rest by name.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -590,6 +590,13 @@ fn source_request(iri: &str) -> Request {
         Verb::Source,
         Iri::parse(iri).expect("an IRI this crate built"),
     )
+}
+
+/// What a reference check learns of the entry it names: its classes and its author.
+#[derive(Default)]
+struct Referenced {
+    types: BTreeSet<String>,
+    author: Option<String>,
 }
 
 struct LayerEndpoint {
@@ -1258,6 +1265,42 @@ impl LayerEndpoint {
                             feed.scheme.iri
                         ),
                     });
+                }
+            }
+        }
+        // The reference checks (ledger #4274), before the write lock: an entry never changes, so
+        // what each target is cannot change between this read and the store.
+        for check in &self.def().references {
+            let targets: BTreeSet<&str> = draft
+                .triples()
+                .iter()
+                .filter(|t| t.predicate.as_str() == check.path)
+                .filter_map(|t| rdf::object_iri(&t.object))
+                .collect();
+            for target in targets {
+                let found = self
+                    .referenced_entry(inv, "content", &check.path, &check.layer, target)
+                    .await?;
+                if !found.types.contains(&check.class) {
+                    return Err(Error::InvalidArgument {
+                        name: "content".into(),
+                        detail: format!(
+                            "<{}> names <{target}>, an entry of layer `{}` that is not a <{}>: \
+                             name one that is",
+                            check.path, check.layer, check.class
+                        ),
+                    });
+                }
+                if check.independent && found.author.as_deref() == Some(author.as_str()) {
+                    return Err(Error::Denied(
+                        format!(
+                            "<{}> names <{target}>, which {author} wrote: on layer `{}` it must \
+                             name another participant's entry",
+                            check.path,
+                            self.layer()
+                        )
+                        .into(),
+                    ));
                 }
             }
         }
@@ -2304,12 +2347,18 @@ impl LayerEndpoint {
                      is no lease to renew"
                 )))
             }
-            ("done", LeaseState::Held) => Lease {
-                until: lease.until.clone(),
-                state: LeaseState::Done {
-                    result: result.map(str::to_string),
-                },
-            },
+            ("done", LeaseState::Held) => {
+                if let Some(check) = &self.def().result {
+                    self.check_result(inv, check, &receipt.taker, result)
+                        .await?;
+                }
+                Lease {
+                    until: lease.until.clone(),
+                    state: LeaseState::Done {
+                        result: result.map(str::to_string),
+                    },
+                }
+            }
             ("renew", LeaseState::Held) => {
                 let length = lease_of(self.def(), inv)?
                     .ok_or_else(|| Error::MissingArgument("lease".into()))?;
@@ -2335,6 +2384,114 @@ impl LayerEndpoint {
         // loop to ask `Host::next_lapse` again (ledger #4077).
         self.host().notify().bump();
         Ok(named(&iri, as_json))
+    }
+
+    /// A `settle=done` on a layer with a `[result]` check (ledger #4274): its `result=` must be
+    /// an entry of the check's channel, of its class if it names one, that the taker wrote,
+    /// read under the taker's own grants.
+    async fn check_result(
+        &self,
+        inv: &Invocation<'_>,
+        check: &crate::config::ResultCheck,
+        taker: &str,
+        result: Option<&str>,
+    ) -> Result<()> {
+        let Some(result) = result else {
+            return Err(Error::MissingArgument("result".into()));
+        };
+        let found = self
+            .referenced_entry(inv, "result", "result", &check.layer, result)
+            .await?;
+        if let Some(class) = check.class.as_ref().filter(|c| !found.types.contains(*c)) {
+            return Err(Error::InvalidArgument {
+                name: "result".into(),
+                detail: format!(
+                    "<{result}> is an entry of layer `{}` that is not a <{class}>: layer `{}` \
+                     needs a result of that class",
+                    check.layer,
+                    self.layer()
+                ),
+            });
+        }
+        if found.author.as_deref() != Some(taker) {
+            return Err(Error::InvalidArgument {
+                name: "result".into(),
+                detail: format!(
+                    "<{result}> was written by {}, not by this receipt's taker {taker}: a \
+                     result names an entry its taker wrote",
+                    found.author.as_deref().unwrap_or("nobody the entry names")
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Read the entry `target` of channel `layer` for a reference check (ledger #4274), under
+    /// the CALLER's own capability, never the host's: a writer who cannot read `layer` is
+    /// refused for that, and learns nothing about whether `target` exists. `arg` is the
+    /// argument a bad target is blamed on, `what` the term that named it.
+    async fn referenced_entry(
+        &self,
+        inv: &Invocation<'_>,
+        arg: &str,
+        what: &str,
+        layer: &str,
+        target: &str,
+    ) -> Result<Referenced> {
+        let bad = |why: String| Error::InvalidArgument {
+            name: arg.into(),
+            detail: format!("<{what}> names <{target}>, {why}"),
+        };
+        let prefix = entry_prefix(layer);
+        if target
+            .strip_prefix(&prefix)
+            .is_none_or(|id| id.is_empty() || id.contains([':', '/', '?', '#']))
+        {
+            return Err(bad(format!(
+                "which is no entry IRI of layer `{layer}` (they begin {prefix})"
+            )));
+        }
+        let iri = Iri::parse(target).map_err(|_| bad("which is not an IRI".into()))?;
+        let answer = match inv.issue(Request::new(Verb::Source, iri)).await {
+            Ok(answer) => answer,
+            Err(Error::NotFound(_)) => {
+                return Err(bad(format!("which is no entry of layer `{layer}`")))
+            }
+            Err(Error::Denied(_)) => {
+                return Err(Error::Denied(
+                    format!(
+                        "<{what}> names an entry of layer `{layer}`, and checking it needs \
+                         {}, which this request does not hold",
+                        layer_cap("read", layer)
+                    )
+                    .into(),
+                ))
+            }
+            Err(other) => return Err(other),
+        };
+        let text = String::from_utf8(answer.bytes).map_err(|e| {
+            Error::Endpoint(format!("layer `{layer}`: an entry answered no UTF-8: {e}"))
+        })?;
+        let triples = rdf::parse_turtle(&text).map_err(|e| {
+            Error::Endpoint(format!(
+                "layer `{layer}`: a stored entry does not parse: {e}"
+            ))
+        })?;
+        let mut found = Referenced::default();
+        for t in triples.iter().filter(
+            |t| matches!(&t.subject, oxrdf::NamedOrBlankNode::NamedNode(n) if n.as_str() == target),
+        ) {
+            match t.predicate.as_str() {
+                rdf::RDF_TYPE => found
+                    .types
+                    .extend(rdf::object_iri(&t.object).map(str::to_string)),
+                rdf::PROV_ATTRIBUTED => {
+                    found.author = rdf::object_iri(&t.object).map(str::to_string)
+                }
+                _ => {}
+            }
+        }
+        Ok(found)
     }
 
     /// The retention cutoff a read computes at its instant, `now - retain` as an

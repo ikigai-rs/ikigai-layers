@@ -250,6 +250,56 @@ pub struct LayerDef {
     pub join: bool,
     /// A channel's only: what makes it a feed layer (`feed = true`, ledger #3284).
     pub feed: Option<FeedDef>,
+    /// A channel's only: the reference checks every `say` must pass (`[[reference]]`,
+    /// ledger #4274), each naming a predicate whose every object must be an entry of a
+    /// channel layer, of a class, that the writer can read.
+    pub references: Vec<Reference>,
+    /// A leased tuplespace's only: what a `settle=done result=` must name (`[result]`,
+    /// ledger #4274). None checks only that the result is an IRI.
+    pub result: Option<ResultCheck>,
+}
+
+/// One reference check of a channel's `say` (`[[reference]]`): every object of `path` in the
+/// submitted entry must be an existing entry of channel layer `layer`, typed `class`, read under
+/// the WRITER's grants, so the check reveals nothing the writer could not read itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reference {
+    /// The predicate whose objects are checked.
+    pub path: String,
+    /// The channel layer each object must be an entry of.
+    pub layer: String,
+    /// The class each target entry must be typed with.
+    pub class: String,
+    /// Whether the target must have been written by someone other than the writer
+    /// (`independent = true`): an approval of another participant's answer, say.
+    pub independent: bool,
+}
+
+/// What a tuplespace's `settle=done` must name (`[result]`): a `result=` that is an existing
+/// entry of channel layer `layer`, written by the receipt's taker, and typed `class` if one is
+/// given, read under the taker's grants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResultCheck {
+    /// The channel layer the result must be an entry of.
+    pub layer: String,
+    /// The class the result entry must be typed with, if any.
+    pub class: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReferenceToml {
+    path: String,
+    layer: String,
+    class: String,
+    independent: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResultToml {
+    layer: String,
+    class: Option<String>,
 }
 
 impl LayerDef {
@@ -327,6 +377,9 @@ struct LayerToml {
     publishers: Option<Vec<String>>,
     scheme: Option<String>,
     public: Option<bool>,
+    #[serde(default, rename = "reference")]
+    references: Vec<ReferenceToml>,
+    result: Option<ResultToml>,
 }
 
 /// Read every `layers/*.toml` under `dir`. No `layers/` directory is a host with no
@@ -338,7 +391,47 @@ pub fn load_layers(dir: &Path) -> Result<BTreeMap<String, LayerDef>, ConfigError
         let def = load_layer(&layers_dir, &path)?;
         layers.insert(def.name.clone(), def);
     }
+    check_targets(&layers)?;
     Ok(layers)
+}
+
+/// Every layer a `[[reference]]` or `[result]` names must be a channel this host defines, and
+/// a class it names one that channel's shapes target: a check that could never pass is the
+/// operator's mistake, refused when the host opens rather than on every write.
+fn check_targets(layers: &BTreeMap<String, LayerDef>) -> Result<(), ConfigError> {
+    for def in layers.values() {
+        let targets = def
+            .references
+            .iter()
+            .map(|r| ("reference", &r.layer, Some(&r.class)))
+            .chain(
+                def.result
+                    .iter()
+                    .map(|r| ("result", &r.layer, r.class.as_ref())),
+            );
+        for (what, layer, class) in targets {
+            let at = format!("layer `{}`: its {what} check", def.name);
+            let Some(target) = layers.get(layer) else {
+                return err(format!(
+                    "{at} names layer `{layer}`, which this host does not define"
+                ));
+            };
+            if target.model != Model::Channel {
+                return err(format!(
+                    "{at} names layer `{layer}`, a {}: a check reads entries, which only a \
+                     channel holds",
+                    target.model.as_str()
+                ));
+            }
+            if let Some(class) = class.filter(|c| !target.target_classes.contains(*c)) {
+                return err(format!(
+                    "{at} names class <{class}>, which layer `{layer}`'s shapes do not target, \
+                     so no entry there could pass it"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn toml_files(dir: &Path) -> Result<Vec<PathBuf>, ConfigError> {
@@ -571,6 +664,57 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
                 .join(", ")
         ));
     }
+    if model != Model::Channel && !parsed.references.is_empty() {
+        return err(format!(
+            "{at}: `reference` is a channel option: it checks what a `say` names"
+        ));
+    }
+    if parsed.result.is_some() && (model != Model::Tuplespace || lease_max.is_none()) {
+        return err(format!(
+            "{at}: `result` is an option of a tuplespace with a lease_max: it checks what a \
+             settle names"
+        ));
+    }
+    let iri = |what: &str, value: &str| {
+        oxrdf::NamedNode::new(value)
+            .map(|_| ())
+            .map_err(|e| ConfigError(format!("{at}: {what} `{value}` is not an IRI: {e}")))
+    };
+    let mut references = Vec::new();
+    for r in parsed.references {
+        iri("reference path", &r.path)?;
+        iri("reference class", &r.class)?;
+        if !is_layer_name(&r.layer) {
+            return err(format!(
+                "{at}: reference layer `{}` is not a layer name",
+                r.layer
+            ));
+        }
+        references.push(Reference {
+            path: r.path,
+            layer: r.layer,
+            class: r.class,
+            independent: r.independent.unwrap_or(false),
+        });
+    }
+    let result = match parsed.result {
+        None => None,
+        Some(r) => {
+            if let Some(class) = &r.class {
+                iri("result class", class)?;
+            }
+            if !is_layer_name(&r.layer) {
+                return err(format!(
+                    "{at}: result layer `{}` is not a layer name",
+                    r.layer
+                ));
+            }
+            Some(ResultCheck {
+                layer: r.layer,
+                class: r.class,
+            })
+        }
+    };
     let shared = match parsed.shared {
         None => None,
         Some(names) => {
@@ -613,6 +757,8 @@ fn load_layer(layers_dir: &Path, path: &Path) -> Result<LayerDef, ConfigError> {
         lobby,
         join,
         feed,
+        references,
+        result,
     })
 }
 

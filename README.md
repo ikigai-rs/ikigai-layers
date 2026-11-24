@@ -153,6 +153,42 @@ accepts.
 `addressed`, `match`, `retain` and `lease_max` are a tuplespace's options and `about` and `resend_window` a channel's; naming one on
 the other model is refused, like a misspelled key.
 
+**Reference checks validate what a write names** (ledger #4274). Without them, a channel
+validates only the submitted graph, so a reply's `ik:inReplyTo` can name a missing entry or an
+entry of the wrong class, and a settle's `result=` only has to be an IRI. A definition turns
+the checks on:
+
+```toml
+# layers/question.toml: every ik:inReplyTo must name an existing m:Question of `question`
+[[reference]]
+path  = "https://ikigai-rs.dev/ns#inReplyTo"
+layer = "question"
+class = "urn:layers:mentoring:Question"
+
+# layers/answer-approval.toml: an approval names an m:Answer that someone else wrote
+[[reference]]
+path        = "urn:layers:mentoring:answer"
+layer       = "question"
+class       = "urn:layers:mentoring:Answer"
+independent = true
+
+# layers/review-offer.toml (a tuplespace with lease_max): settle=done needs result=, and the
+# result must be an m:Answer of `question` that the receipt's taker wrote
+[result]
+layer = "question"
+class = "urn:layers:mentoring:Answer"   # optional
+```
+
+A `say` is refused with `content` named if an object of `path` is not an entry of `layer`,
+or is not typed `class`. With `independent = true`, a `say` that names the writer's own entry
+is denied. A `settle=done` is refused with `result` named if its result is missing, is not an
+entry of `layer`, has the wrong class, or was written by someone other than the taker. A late
+settle is refused as before. Each check reads the target with the WRITER's own grants, never
+the host's. A writer without `read` on `layer` is denied because of that missing grant, with
+the same answer whether or not the target exists. A check's layer must be a channel this host
+defines, and its class one that layer's shapes target. Otherwise the host does not start.
+`reference` is a channel option. `result` is an option only for a tuplespace with `lease_max`.
+
 **`match` is off by default.** A `match=` template is the caller's own SPARQL ASK,
 evaluated against every pending tuple (a lapsed, unrecorded one included): the store's limits bound a query's size and
 nesting, and a cross join of triple patterns is a few hundred bytes and shallow, yet costs
