@@ -54,7 +54,9 @@ presentation has not been evaluated here.
   `talk`'s shapes (1 violation): …`` (``N violations`` for other counts), listing up to 20
   violations and a count of the rest. A settle after a lease lapsed answers ``receipt <iri>'s
   lease lapsed at <time>, and <tuple> went back to the space: a settle after the lapse is
-  refused, so the tuple keeps one result. Take it again to work on it``; a `lease=` longer than
+  refused, so the tuple keeps one result. Take it again to work on it``; a take without a lease
+  on a layer that requires one answers ``Layer `tasks-bobby` requires a lease on every take.
+  Give a duration with lease=.``; a `lease=` longer than
   the layer allows answers ``… a lease is at most 1h``, and one that is not a length spells out
   the form (``such as "90s", "15m", "2h" or "1d"``).
   A `say` on a feed by a non-publisher answers ``layer `releases` is a feed, written only by

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use common::*;
-use ikigai_core::{Clock, Error, Time, Verb};
+use ikigai_core::{Clock, Error, Iri, Request, Resolution, Scope, Space, Time, Verb};
 
 const MINUTE: u64 = 60_000;
 const START: u64 = 1_791_590_400_000;
@@ -22,12 +22,16 @@ impl ikigai_core::Clock for ManualClock {
 
 /// The task layer, defined with `lease_max = "1h"`, over a clock the test moves.
 fn leased() -> (Fixture, Arc<ManualClock>) {
+    leased_with("")
+}
+
+fn leased_with(extra: &str) -> (Fixture, Arc<ManualClock>) {
     let mut f = fixture();
     let path = f.config.path().join("layers/tasks-bobby.toml");
     let definition = std::fs::read_to_string(&path).unwrap();
     f.config.write(
         "layers/tasks-bobby.toml",
-        &format!("{definition}lease_max = \"1h\"\n"),
+        &format!("{definition}lease_max = \"1h\"\n{extra}"),
     );
     f.reopen();
     let clock = Arc::new(ManualClock(AtomicU64::new(START)));
@@ -119,6 +123,93 @@ fn attempt_of(receipt_turtle: &str) -> String {
         .find(|t| t.predicate.as_str() == "https://ikigai-rs.dev/ns/layers#attempt")
         .map(|t| t.object.to_string())
         .unwrap_or_else(|| panic!("no ik:attempt in {receipt_turtle}"))
+}
+
+#[test]
+fn a_lease_max_alone_still_allows_a_final_take() {
+    let (mut f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    let subject = offer_iri("a");
+    take(&f.kernel, &bobby_gonk(), &subject).unwrap();
+    at(&mut f, &clock, 120);
+    sweep_leases(&f, &clock);
+    assert!(!pending(&f).contains(&subject));
+    assert_eq!(kinds(&f), ["out", "taken"]);
+}
+
+#[test]
+fn the_take_contract_marks_the_lease_required_only_when_configured() {
+    for (extra, required) in [("", false), ("lease_required = true\n", true)] {
+        let (f, _) = leased_with(extra);
+        let request = Request::new(Verb::Meta, Iri::parse(TUPLES).unwrap());
+        let Resolution::Hit(resolved) = root_over(&f.host).resolve(&request, &Scope::empty())
+        else {
+            panic!("unresolved tuples endpoint");
+        };
+        let description = resolved.endpoint.describe();
+        description.validate().expect("a valid description");
+        let action = description
+            .action_specs()
+            .into_iter()
+            .find(|action| action.verb == Verb::Delete)
+            .expect("a take action");
+        let lease = action.inputs.iter().find(|input| input.name == "lease");
+        assert_eq!(lease.map(|input| input.required), Some(required));
+    }
+}
+
+#[test]
+fn a_required_lease_refuses_an_unleased_take() {
+    let (f, _) = leased_with("lease_required = true\n");
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    let subject = offer_iri("a");
+    let refused = take(&f.kernel, &bobby_gonk(), &subject).unwrap_err();
+    let Error::InvalidArgument { name, detail } = &refused else {
+        panic!("{refused:?}");
+    };
+    assert_eq!(name, "lease");
+    assert_eq!(
+        detail,
+        "Layer `tasks-bobby` requires a lease on every take. Give a duration with lease=."
+    );
+    assert_eq!(refused.to_json()["detail"], detail.as_str());
+    assert!(pending(&f).contains(&subject));
+    assert_eq!(kinds(&f), ["out"]);
+}
+
+#[test]
+fn a_required_lease_can_lapse_and_the_next_attempt_can_settle() {
+    let (mut f, clock) = leased_with("lease_required = true\n");
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    let subject = offer_iri("a");
+    take_leased(&f, &bobby_gonk(), &subject, "10m").unwrap();
+    let first = receipt_of(&f, &subject);
+    assert!(!pending(&f).contains(&subject));
+
+    at(&mut f, &clock, 10);
+    sweep_leases(&f, &clock);
+    assert!(pending(&f).contains(&subject));
+    assert_eq!(kinds(&f), ["out", "taken", "returned"]);
+
+    take_leased(&f, &bobby_gonk(), &subject, "10m").unwrap();
+    let second = receipt_of(&f, &subject);
+    assert_ne!(first, second);
+    let result = "urn:blake3:0f1e";
+    settle(
+        &f,
+        &bobby_gonk(),
+        &second,
+        &[("settle", "done"), ("result", result)],
+    )
+    .unwrap();
+
+    at(&mut f, &clock, 20);
+    sweep_leases(&f, &clock);
+    assert!(!pending(&f).contains(&subject));
+    assert_eq!(kinds(&f), ["out", "taken", "returned", "taken"]);
+    let receipt = source(&f.kernel, &second, &[], &tasker(&bobby_gonk()));
+    assert!(receipt.contains("\"done\""), "{receipt}");
+    assert!(receipt.contains(result), "{receipt}");
 }
 
 #[test]
