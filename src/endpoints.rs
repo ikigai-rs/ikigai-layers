@@ -455,6 +455,18 @@ impl Action {
         }
     }
 
+    /// The verbs this action answers. The kernel hands an endpoint a verb it does not declare
+    /// under every capability it declares, so without this an `Exists` (a read, which cuts
+    /// nothing) or a `Delete` on `say` stored an entry, and a `Sink` on a read cut its thread.
+    fn verbs(self) -> &'static [Verb] {
+        match self {
+            Action::Say => &[Verb::Sink],
+            Action::Tuples => &[Verb::Sink, Verb::Source, Verb::Delete],
+            Action::Receipt => &[Verb::Source, Verb::Exists, Verb::Sink],
+            _ => &[Verb::Source, Verb::Exists],
+        }
+    }
+
     /// The `{verb}` of the capability this action requires (for `tuples`, its Meta face; each
     /// of its three verbs declares its own).
     fn cap_verb(self) -> &'static str {
@@ -2448,6 +2460,21 @@ fn take_subject(inv: &Invocation<'_>) -> Result<String> {
 #[async_trait]
 impl Endpoint for LayerEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let verb = inv.request.verb;
+        if !self.action.verbs().contains(&verb) {
+            let answered: Vec<String> = self
+                .action
+                .verbs()
+                .iter()
+                .map(|v| format!("{v:?}"))
+                .collect();
+            return Err(Error::Endpoint(format!(
+                "layer `{}`'s {} answers {}, not {verb:?}",
+                self.layer(),
+                self.action.word(),
+                answered.join(", ")
+            )));
+        }
         if let (false, Some(principal)) = (self.is_share(), inv.capability.principal()) {
             self.host().gate(principal, inv.now())?;
         }
