@@ -553,10 +553,14 @@ fn a_linked_key_is_checked_where_it_lands() {
     assert!(refused.contains("mode 0644"), "{refused}");
     set_mode(&path, 0o600);
 
+    // The target is named where the link resolves, so canonically: on macOS the temp dir
+    // `/var/folders/...` is a link to `/private/var/folders/...` (ledger #4090). The link's
+    // own directory is named as the path to the key gives it.
     set_mode(target.path(), 0o777);
     let refused = StateKey::load(&link).unwrap_err().0;
+    let landed = std::fs::canonicalize(target.path()).unwrap();
     assert!(
-        refused.contains(&format!("`chmod go-w {}`", target.path().display())),
+        refused.contains(&format!("`chmod go-w {}`", landed.display())),
         "{refused}"
     );
     set_mode(target.path(), 0o700);
