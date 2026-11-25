@@ -783,7 +783,9 @@ reads as pending and the receipt as `lapsed`, and nothing is stored. Until the l
 recorded, `rd state=taken` appends `recorded=no` to the receipt's line and its JSON `lease`
 says `"recorded": false` (`true` once recorded). The lapse is recorded, with its `returned`
 event, by `Host::sweep_leases(now)` or by the next write on the layer (`out`, `take`, a
-settle), whichever runs first. A write records every due lapse first, under the layer's write
+settle), whichever runs first. If the tuple cannot be dropped back once its lapse is recorded
+(the space refused the write), it still reads as pending, from its receipt, until a later sweep
+or write drops it back. A write records every due lapse first, under the layer's write
 lock and in `until` order, so a take of a tuple whose lease has passed succeeds, and every
 `returned` comes before the write's own event. The event's time and the lapse's are the lease's
 `until`, not the moment the host noticed.

@@ -494,8 +494,9 @@ impl Index {
         due
     }
 
-    /// The receipts whose lease a read at `now` computes as lapsed though no lapse is recorded
-    /// yet ([`Lease::lapsed_unrecorded`]): their tuples read as pending (ledger #4075).
+    /// The receipts whose take a read at `now` computes as over though their tuple is not back
+    /// in the space yet ([`Index::returning`]): their tuples read as pending, from the receipt
+    /// (ledger #4075).
     pub fn lapsed_unrecorded<'a>(
         &'a self,
         now: Option<&'a str>,
@@ -503,7 +504,18 @@ impl Index {
         self.live
             .iter()
             .filter_map(|id| self.receipt(id))
-            .filter(move |r| r.lease.as_ref().is_some_and(|l| l.lapsed_unrecorded(now)))
+            .filter(move |r| self.returning(r, now))
+    }
+
+    /// Whether `receipt`'s lease is over at `now` while its tuple is not back in the space: a
+    /// held lease past its `until` with no lapse recorded yet ([`Lease::lapsed_unrecorded`]),
+    /// or a lapse recorded whose drop back has not happened yet (it failed, and the next write
+    /// or sweep drops it again). Either way the take is over and the tuple reads as pending.
+    pub fn returning(&self, receipt: &Receipt, now: Option<&str>) -> bool {
+        self.live.contains(&receipt.id)
+            && receipt.lease.as_ref().is_some_and(|l| {
+                l.lapsed_unrecorded(now) || matches!(l.state, LeaseState::Lapsed { .. })
+            })
     }
 
     /// The receipt `subject` is taken under now, if it is taken.
