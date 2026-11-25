@@ -1,7 +1,7 @@
 # Design spike: layers created and changed at runtime
 
-**Status:** a design for a decision, not a decision. Nothing here is built. This document
-changes no host code, client, shape or configuration (ledger #2010).
+**Status:** accepted 2026-11-24, with the recommendations (see "Decisions" below). Nothing here is
+built yet. This document changes no host code, client, shape or configuration (ledger #2010).
 
 **The question.** Today a layer is files in the host's config home, edited by hand: a
 definition (`layers/<name>.toml`), the shapes and context it names, a collaboration manifest
@@ -56,6 +56,25 @@ in examples are `alice` and `bob`; the person running the host is "the operator"
   with collaborations, participants and enrollment live from day one; make layer creation
   live second, once the door can rebind; keep deletion to "unmount, then retire the name"
   and leave the full removal semantics to ledger #2006. About ten items, listed at the end.
+
+## Decisions (Brian, 2026-11-24)
+
+The recommendations are accepted:
+
+- **Build order:** the resources, the staged check and the derived grants first, with
+  collaborations, participants and enrollment live from day one; live layer creation second,
+  once the door can rebind.
+- **Several files, one change:** the journal (`<config>/.change/`), not a generation directory.
+- **Serving a layer created live:** the host swaps its layer snapshot and the door rebinds its
+  space (option 2 in section 6). Until the door can, a layer write is stored and its answer says
+  a restart is needed (option 3 as the fallback).
+- **Deleting a layer:** refused while mounted, otherwise the name is retired and the state kept
+  sealed; full removal semantics stay with ledger #2006.
+- **Names:** the new resources are singular and keyed as written here; existing public names stay.
+
+The follow-up items of section 10 are filed as ledger #4307 to #4317, in order. A management
+console, out of scope here, is a design spike of its own (ledger #4318), started once those
+items are done.
 
 ## 1. What a host reads today, and when
 
