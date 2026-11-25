@@ -25,6 +25,12 @@
 //! that holds it alone, and to no one else. A joined identity never holds it: its grant is
 //! written by the join, never here.
 //!
+//! **Administration is named, never derived** (ledger #4307): an administrative capability
+//! (`urn:cap:layers:admin:*`) goes to exactly the participants the `[admin]` table of
+//! `layers.toml` names ([`crate::config::load_admins`]), added to the grant each already has or
+//! making one that holds it alone. No manifest grants one: [`crate::config::load_collabs`]
+//! refuses a manifest naming one, so the generator never runs on it.
+//!
 //! **Isolation is structural here.** The generator reads only manifests that
 //! [`crate::config::load_collabs`] accepted, and that refuses a manifest mounting a layer
 //! another manifest mounts unless the layer is declared shared with both. So no grant this
@@ -67,6 +73,8 @@ pub struct Enrollment {
     pub idle: Vec<String>,
     /// The grants `join.count_readers` gives the join count to.
     pub count_readers: Vec<String>,
+    /// The grants the `[admin]` table gives administrative capabilities to, each with them.
+    pub admins: BTreeMap<String, Vec<String>>,
 }
 
 /// Every certificate fingerprint, participant → fingerprints: `enrollment.toml`'s, with
@@ -170,11 +178,22 @@ pub fn generate(
             .or_default()
             .insert(CAP_JOIN_COUNT.to_string());
     }
+    for (admin, caps) in &config.admins {
+        scopes
+            .entry(admin.clone())
+            .or_default()
+            .extend(caps.iter().cloned());
+    }
     let mut enrollment = Enrollment {
         count_readers: config
             .count_readers
             .iter()
             .map(|p| p.slug().to_string())
+            .collect(),
+        admins: config
+            .admins
+            .iter()
+            .map(|(p, caps)| (p.slug().to_string(), caps.iter().cloned().collect()))
             .collect(),
         ..Enrollment::default()
     };

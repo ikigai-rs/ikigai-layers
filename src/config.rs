@@ -1321,6 +1321,7 @@ fn load_manifest(
                     mounts.push(mount);
                 }
             }
+            ("admin", _) => return err(no_admin_in_manifest(&at.to_string(), "`admin`")),
             (other, _) => {
                 return err(format!(
                     "{at}: unknown key `{other}` (a manifest has `label` and [[mount]] tables)"
@@ -1368,6 +1369,12 @@ fn load_mount(
             let Some(verb) = item.as_str() else {
                 return err(format!("{at}: `{key}` lists a verb that is not a string"));
             };
+            if is_admin_word(verb) {
+                return err(no_admin_in_manifest(
+                    at,
+                    &format!("`{key}` holding `{verb}` on `{layer}`"),
+                ));
+            }
             if !def.model.verbs().contains(&verb) {
                 return err(format!(
                     "{at}: `{key}` holds `{verb}` on `{layer}`, a {} layer, whose verbs are {}",
@@ -1395,6 +1402,22 @@ fn load_mount(
         }
     }
     Ok(Mount { layer, grants })
+}
+
+/// Whether a word a manifest wrote names an administrative capability
+/// (`urn:cap:layers:admin:*`, or `admin` and `admin:*` as a verb would be written).
+fn is_admin_word(word: &str) -> bool {
+    word == "admin" || word.starts_with("admin:") || word.starts_with(ADMIN_CAP_PREFIX)
+}
+
+/// The refusal of a manifest naming an administrative capability (ledger #4307): taking part
+/// never confers administration, so only [`HOST_FILE`]'s `[admin]` table grants one.
+fn no_admin_in_manifest(at: &str, what: &str) -> String {
+    format!(
+        "{at}: {what} names an administrative capability, and no manifest grants one: \
+         administering a host is not taking part in a layer. Name the participant in the \
+         [admin] table of {HOST_FILE} instead, such as read = [\"brian\"]; nothing written"
+    )
 }
 
 fn check_isolation(
@@ -1460,6 +1483,10 @@ struct HostToml {
     matching: Option<MatchToml>,
     onboard: Option<OnboardToml>,
     join: Option<JoinToml>,
+    /// Read and checked by [`load_admins`]; named here so the host's strict read of the file
+    /// accepts it.
+    #[allow(dead_code)]
+    admin: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -2092,6 +2119,258 @@ pub fn load_entitled(
     Ok(entitled)
 }
 
+/// The administrative capability family (ledger #4307, `docs/design/runtime-layers.md`
+/// section 4): administering a host, never taking part in a layer. No manifest grants one
+/// ([`load_collabs`] refuses a manifest naming one); the generator gives each to exactly the
+/// participants the `[admin]` table of [`HOST_FILE`] names ([`load_admins`]).
+pub const ADMIN_CAP_PREFIX: &str = "urn:cap:layers:admin:";
+
+/// Reads every configuration resource (`urn:layers:layer`, `urn:layers:shape`, …,
+/// `urn:layers:grant`, `urn:layers:revision`), and no layer's entries.
+pub const CAP_ADMIN_READ: &str = "urn:cap:layers:admin:read";
+
+/// The keys of the `[admin]` table, each with the capability it gives.
+pub const ADMIN_KEYS: &[(&str, &str)] = &[("read", CAP_ADMIN_READ)];
+
+/// The `[admin]` table of [`HOST_FILE`] under `dir`: who administers this host, and with which
+/// capabilities (ledger #4307). Each key names a capability ([`ADMIN_KEYS`]) and lists
+/// participants as a manifest names them:
+///
+/// ```toml
+/// # layers.toml
+/// [admin]
+/// read = ["brian"]   # urn:cap:layers:admin:read
+/// ```
+///
+/// Absent, nobody administers, and no generated grant holds an `admin:` capability. Refused, so
+/// nothing is written: a key that is not one of [`ADMIN_KEYS`], a value that is not a list of
+/// names, an entry that is no participant in `participants.ttl`, and an entry naming a joined
+/// identity, whose grant is written by the join alone.
+pub fn load_admins(
+    dir: &Path,
+    participants: &Participants,
+) -> Result<BTreeMap<Participant, BTreeSet<String>>, ConfigError> {
+    let path = dir.join(HOST_FILE);
+    let at = path.display();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return err(format!("read {at}: {e}")),
+    };
+    let table: toml::Table =
+        toml::from_str(&text).map_err(|e| ConfigError(format!("{at}: {e}")))?;
+    let Some(admin) = table.get("admin") else {
+        return Ok(BTreeMap::new());
+    };
+    let keys = ADMIN_KEYS
+        .iter()
+        .map(|(k, _)| format!("`{k}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let Some(admin) = admin.as_table() else {
+        return err(format!(
+            "{at}: `admin` is a table, [admin], whose keys are {keys}; nothing written"
+        ));
+    };
+    let joined = dir
+        .join(crate::onboard::join::JOINED_DIR)
+        .join(crate::onboard::join::IDENTITIES);
+    let mut admins: BTreeMap<Participant, BTreeSet<String>> = BTreeMap::new();
+    for (key, value) in admin {
+        let Some((_, cap)) = ADMIN_KEYS.iter().find(|(k, _)| k == key) else {
+            return err(format!(
+                "{at}: [admin] has no key `{key}`: its keys are {keys}; nothing written"
+            ));
+        };
+        let not_a_list = || {
+            ConfigError(format!(
+                "{at}: `admin.{key}` is a list of participant names, such as {key} = \
+                 [\"brian\"]; nothing written"
+            ))
+        };
+        let names = value.as_array().ok_or_else(not_a_list)?;
+        for name in names {
+            let name = name.as_str().ok_or_else(not_a_list)?;
+            let participant = Participant::from_manifest_key(name)
+                .map_err(|e| ConfigError(format!("{at}: `admin.{key}`: {e}; nothing written")))?;
+            if let Some(fp) = participant.fingerprint() {
+                if joined.join(format!("{fp}.json")).exists() {
+                    return err(format!(
+                        "{at}: `admin.{key}` names `{name}`, a joined identity, and a joined \
+                         identity never administers: name a participant from participants.ttl \
+                         instead; nothing written"
+                    ));
+                }
+            }
+            if !participants.names(participant.iri()) {
+                return err(format!(
+                    "{at}: `admin.{key}` names `{name}`, which is no participant in \
+                     participants.ttl: name a participant, or remove the entry; nothing written"
+                ));
+            }
+            admins
+                .entry(participant)
+                .or_default()
+                .insert((*cap).to_string());
+        }
+    }
+    Ok(admins)
+}
+
+/// What a document a layer definition names is: its shapes, its context, or a feed's scheme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DocumentKind {
+    /// Closed SHACL shapes (`shapes = "<file>"`), conventionally `<name>.shapes.ttl`.
+    Shape,
+    /// An egress context (`context = "<file>"`), conventionally `<name>.context.jsonld`.
+    Context,
+    /// A feed's concept scheme (`scheme = "<file>"`), conventionally `<name>.scheme.ttl`.
+    Scheme,
+}
+
+impl DocumentKind {
+    /// Every kind, in the order the revision reads them.
+    pub const ALL: [DocumentKind; 3] = [
+        DocumentKind::Shape,
+        DocumentKind::Context,
+        DocumentKind::Scheme,
+    ];
+
+    /// The definition key that names one, and the resource's type segment.
+    pub fn key(self) -> &'static str {
+        match self {
+            DocumentKind::Shape => "shapes",
+            DocumentKind::Context => "context",
+            DocumentKind::Scheme => "scheme",
+        }
+    }
+
+    /// The suffix a file of this kind conventionally carries after its name.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            DocumentKind::Shape => ".shapes.ttl",
+            DocumentKind::Context => ".context.jsonld",
+            DocumentKind::Scheme => ".scheme.ttl",
+        }
+    }
+
+    /// The name a file of this kind is served under: the file name less the conventional
+    /// suffix (`msg.shapes.ttl` is `msg`), or the whole file name when it carries none.
+    pub fn name_of(self, file: &str) -> String {
+        file.strip_suffix(self.suffix())
+            .filter(|n| !n.is_empty())
+            .unwrap_or(file)
+            .to_string()
+    }
+}
+
+/// One document in `layers/` that some layer definition names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Document {
+    /// Shapes, context or scheme.
+    pub kind: DocumentKind,
+    /// The name it is served under ([`DocumentKind::name_of`]).
+    pub name: String,
+    /// Its file name in `layers/`.
+    pub file: String,
+    /// The layers whose definitions name it.
+    pub layers: BTreeSet<String>,
+}
+
+/// Every document the layer definitions under `dir` name, by kind, then name. Read from the
+/// files as they are now, without the open's checks, so the configuration resources show what
+/// is on disk: a definition that does not parse names nothing here, and a name that is not a
+/// plain file name in `layers/` is left out, since the host never reads it.
+pub fn documents(dir: &Path) -> Result<Vec<Document>, ConfigError> {
+    let mut found: BTreeMap<(DocumentKind, String), Document> = BTreeMap::new();
+    for path in toml_files(&dir.join("layers"))? {
+        let layer = stem(&path);
+        let Ok(table) = read(&path)?.parse::<toml::Table>() else {
+            continue;
+        };
+        for kind in DocumentKind::ALL {
+            let Some(file) = table.get(kind.key()).and_then(toml::Value::as_str) else {
+                continue;
+            };
+            if !is_plain_file_name(file) {
+                continue;
+            }
+            found
+                .entry((kind, file.to_string()))
+                .or_insert_with(|| Document {
+                    kind,
+                    name: kind.name_of(file),
+                    file: file.to_string(),
+                    layers: BTreeSet::new(),
+                })
+                .layers
+                .insert(layer.clone());
+        }
+    }
+    let mut documents: Vec<Document> = found.into_values().collect();
+    documents.sort_by(|a, b| (a.kind, &a.name, &a.file).cmp(&(b.kind, &b.name, &b.file)));
+    Ok(documents)
+}
+
+/// The files the configuration under `dir` reads, relative to it, in the fixed order the
+/// revision digests them: [`HOST_FILE`], every `layers/*.toml`, every document they name
+/// ([`documents`]: shapes, then contexts, then schemes), `participants.ttl`, every
+/// `collabs/*.toml`, `enrollment.toml` and [`ENTITLEMENTS_FILE`]. A file that may be absent is
+/// listed whether or not it exists.
+pub fn read_files(dir: &Path) -> Result<Vec<String>, ConfigError> {
+    let relative = |sub: &str, path: &Path| {
+        format!(
+            "{sub}/{}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        )
+    };
+    let mut files = vec![HOST_FILE.to_string()];
+    for path in toml_files(&dir.join("layers"))? {
+        files.push(relative("layers", &path));
+    }
+    let mut named = BTreeSet::new();
+    for doc in documents(dir)? {
+        if named.insert(doc.file.clone()) {
+            files.push(format!("layers/{}", doc.file));
+        }
+    }
+    files.push("participants.ttl".to_string());
+    for path in toml_files(&dir.join("collabs"))? {
+        files.push(relative("collabs", &path));
+    }
+    files.push("enrollment.toml".to_string());
+    files.push(ENTITLEMENTS_FILE.to_string());
+    Ok(files)
+}
+
+/// The configuration's revision (ledger #4307): a SHA-256 over the files it reads
+/// ([`read_files`]), in their fixed order, each as its path, whether it exists, its length and
+/// its bytes, as lowercase hex. So it changes when any of those files changes, appears or goes,
+/// and not otherwise: a file the configuration does not read changes nothing.
+pub fn revision(dir: &Path) -> Result<String, ConfigError> {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    for file in read_files(dir)? {
+        let path = dir.join(&file);
+        digest.update(file.as_bytes());
+        digest.update([0]);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                digest.update(b"present\0");
+                digest.update((bytes.len() as u64).to_be_bytes());
+                digest.update(&bytes);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => digest.update(b"absent\0"),
+            Err(e) => return err(format!("read {}: {e}", path.display())),
+        }
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
 /// Everything in one directory, checked.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -2107,6 +2386,9 @@ pub struct Config {
     pub entitled: Vec<Entitled>,
     /// Who may read the join count: `join.count_readers` ([`load_count_readers`]).
     pub count_readers: BTreeSet<Participant>,
+    /// Who administers the host, and with which capabilities: the `[admin]` table
+    /// ([`load_admins`]).
+    pub admins: BTreeMap<Participant, BTreeSet<String>>,
 }
 
 impl Config {
@@ -2119,6 +2401,7 @@ impl Config {
         let collabs = load_collabs(&dir, &layers, &participants)?;
         let entitled = load_entitled(&dir, &layers, &participants, &collabs)?;
         let count_readers = load_count_readers(&dir, &layers, &participants)?;
+        let admins = load_admins(&dir, &participants)?;
         Ok(Config {
             dir,
             layers,
@@ -2126,6 +2409,7 @@ impl Config {
             collabs,
             entitled,
             count_readers,
+            admins,
         })
     }
 }

@@ -1710,13 +1710,24 @@ fn only_the_controller_asks_and_only_with_exists() {
         "true\n"
     );
 
-    // Exists only: a Source is refused, so the answer is never a listing.
+    // The controller asks Exists only: a Source is the administrator's (the participant atom,
+    // ledger #4307, under urn:cap:layers:admin:read), so the controller is refused it.
     let refused = issue(
         &edge.kernel,
         Verb::Source,
         &format!("{NAME}dana"),
         &[],
         &controller,
+    )
+    .unwrap_err();
+    assert!(matches!(refused, Error::Denied(_)), "{refused}");
+    // Another verb is refused naming what the resource answers.
+    let refused = issue(
+        &edge.kernel,
+        Verb::Delete,
+        &format!("{NAME}dana"),
+        &[],
+        &Capability::root(),
     )
     .unwrap_err();
     assert!(!matches!(refused, Error::Denied(_)), "{refused}");

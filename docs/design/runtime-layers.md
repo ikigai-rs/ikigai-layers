@@ -449,6 +449,8 @@ until the endpoints are bound.
 1. **The configuration resources, read-only.** Serve the sets and atoms of section 2 from
    today's files, with `urn:layers:revision` and the `urn:cap:layers:admin:read` capability,
    and an `[admin]` table in `layers.toml` that the generator turns into grants; no writes yet.
+   *Built (ledger #4307): `src/endpoints/admin.rs`, `tests/admin.rs`, README "Reading the
+   configuration".*
 2. **The staged write path and the journal.** A host-side `apply_change` that stages a change,
    runs the open's checks and the derivation, and commits through a journal replayed or
    discarded at open; tests that an isolation breach, an uncompilable shape and a stale

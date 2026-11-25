@@ -42,6 +42,10 @@
 //! urn:layers:participants           Source  who each principal is             layers:read:participants
 //! urn:layers:join:count             Source  three aggregate reader counts     layers:read:join-count
 //! urn:layers:me                     Source  who the door says the caller is   collab:read:* (any grant)
+//! urn:layers:participant:name:{name} Source one participant's statements  layers:admin:read
+//! urn:layers:{layer,shape,context,scheme,collab,participant,enrollment}[:…]
+//!                                   Source  the configuration's files, as written layers:admin:read
+//! urn:layers:{grant,client,revision} Source the derived grants, clients, revision layers:admin:read
 //! urn:layers:participant:name:{name} Exists whether a name is in use       say:{grants} (the controller)
 //! urn:collab:{name}                 Source  a manifest                        collab:read:{name}
 //! urn:collab:{name}:participants    Source  who takes part in it              collab:read:{name}

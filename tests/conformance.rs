@@ -15,7 +15,8 @@
 //! - **The entries, author-graph and latest reads are cacheable on the `say` thread**: the
 //!   kernel cuts `urn:layer:{layer}:say` after every Sink through it, which is the only way
 //!   an entry is written. `tests/channel.rs` pins the cut.
-//! - **Feeds, the participants graphs, `urn:layers:me` and manifests are live**: a feed waits on the next
+//! - **Feeds, the participants graphs, `urn:layers:me`, manifests and the configuration
+//!   resources are live**: a feed waits on the next
 //!   event, and the config reads are re-read per request because enrollment is live.
 //! - **`take` is not fired at all** (opted out): it is destructive, removing a tuple and
 //!   writing a receipt. `tests/tuplespace.rs` pins `take`'s `text/turtle` tuple under a principal, and both
@@ -49,6 +50,28 @@ use ikigai_layers::Config;
 
 const SPACE_LABEL: &str = "ikigai_layers::space(&host)";
 const LAYERS: [&str; 3] = ["notes", "talk", "talk-bobby"];
+
+/// The configuration resources' endpoints (ledger #4307), every one live.
+const ADMIN: [&str; 18] = [
+    "layers-participant-name",
+    "layers-admin-layers",
+    "layers-admin-layer",
+    "layers-admin-shapes",
+    "layers-admin-shape",
+    "layers-admin-contexts",
+    "layers-admin-context",
+    "layers-admin-schemes",
+    "layers-admin-scheme",
+    "layers-admin-collabs",
+    "layers-admin-mount",
+    "layers-admin-collab",
+    "layers-admin-participants",
+    "layers-admin-enrollments",
+    "layers-admin-enrollment",
+    "layers-admin-grants",
+    "layers-admin-clients",
+    "layers-admin-revision",
+];
 
 /// Who `say`s into each channel layer when the suite probes it: a participant whose
 /// generated grant holds `say` there (brian only reads `notes`).
@@ -108,11 +131,50 @@ fn suite(
         // Answered about its caller, so probed AS one: brian, through the grant his door
         // mints (two collaborations), and every check judges what it served.
         .fixture(Probe::new("layers-me", Verb::Source).capability(minted(f, &participant("brian"))))
+        // The configuration resources (ledger #4307) are keyed by what the fixture holds.
+        .fixture(Probe::new("layers-participant-name", Verb::Source).binding("name", "bobby"))
+        .fixture(Probe::new("layers-admin-layer", Verb::Source).binding("layer", "talk"))
+        .fixture(Probe::new("layers-admin-shape", Verb::Source).binding("name", "msg"))
+        .fixture(Probe::new("layers-admin-context", Verb::Source).binding("name", "msg"))
+        .fixture(Probe::new("layers-admin-collab", Verb::Source).binding("collab", "bobby"))
+        .fixture(
+            Probe::new("layers-admin-mount", Verb::Source)
+                .binding("collab", "bobby")
+                .binding("layer", "talk"),
+        )
+        .fixture(Probe::new("layers-admin-enrollment", Verb::Source).binding(
+            "fingerprint",
+            "aa00000000000000000000000000000000000000000000000000000000000003",
+        ))
         .live("layers-feed")
         .live("layers-participants")
         .live("collab")
         .live("collab-participants")
         .live("layers-me");
+    // The configuration resources read the files on every request, as the participants graph
+    // does: what they answer is what is on disk now (ledger #4307).
+    // The scheme atom is opted out below, so it is not declared live.
+    for id in ADMIN.into_iter().filter(|id| *id != "layers-admin-scheme") {
+        suite = suite.live(id);
+    }
+    // A shapes or scheme atom is the file AS WRITTEN, byte for byte, the storage form a later
+    // write takes back (docs/design/runtime-layers.md section 2), and a file written the usual
+    // way has blank property shapes. The skolemized graph a participant reads is
+    // urn:layer:{layer}:shapes (and :scheme), held to SKOLEM-RDF above.
+    suite = suite.opt_out_check(
+        "layers-admin-shape",
+        Check::SkolemRdf,
+        "the atom answers the file as written, byte for byte; urn:layer:{layer}:shapes serves \
+         the skolemized graph",
+    );
+    // The fixture defines no feed, so no definition names a scheme, and the atom has nothing
+    // to answer; tests/admin.rs reads one byte for byte over a feed's configuration.
+    suite = suite.opt_out(
+        "layers-admin-scheme",
+        Some(Verb::Source),
+        "the fixture names no scheme document; tests/admin.rs \
+         a_feed_scheme_is_served_byte_for_byte reads one",
+    );
     // ⚠ A BRIDGE, to remove at the next ikigai-vocab release. The two fixture layers that
     // declare a kind publish `ik:layerKind` (ledger #3882), merged in ikigai-core
     // (ikigai-rs/ikigai-core#328, ledger #3881) but defined by no released ikigai-vocab yet
@@ -246,6 +308,12 @@ fn conforms() {
     .map(String::from)
     .into_iter()
     .chain(
+        ADMIN
+            .into_iter()
+            .filter(|id| *id != "layers-admin-scheme")
+            .map(String::from),
+    )
+    .chain(
         LAYERS
             .into_iter()
             .chain([TASKS])
@@ -280,6 +348,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
         "layers-me".to_string(),
         "layers-participants".to_string(),
     ];
+    expected.extend(ADMIN.map(String::from));
     for layer in LAYERS {
         for action in [
             "context",

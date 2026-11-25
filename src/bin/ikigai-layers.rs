@@ -26,6 +26,8 @@ participants (participants.ttl) and certificate fingerprints (enrollment.toml), 
 grants.json and clients.json into --out (default: <config dir>), each atomically and 0600.
 The participants layers.toml's join.count_readers names gain urn:cap:layers:read:join-count,
 listed as count-reader lines; a name that is no participant, or a joined identity, is refused.
+The participants layers.toml's [admin] table names gain its capabilities (read = [...] gives
+urn:cap:layers:admin:read), listed as admin lines, and no manifest may grant one.
 A <config dir> that is missing or holds no manifest is refused and nothing is written.
 --check verifies the configuration and prints what would be written, writing nothing.
 A manifest that mounts another collaboration's layer is refused and nothing is written.
@@ -184,6 +186,12 @@ fn grants(args: &[String]) -> Outcome {
         println!(
             "count-reader {grant}: gains urn:cap:layers:read:join-count, the join count's three \
              aggregate numbers (join.count_readers)"
+        );
+    }
+    for (grant, caps) in &enrollment.admins {
+        println!(
+            "admin {grant}: gains {}, administering this host's configuration ([admin])",
+            caps.join(" ")
         );
     }
     if check {

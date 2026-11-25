@@ -23,6 +23,8 @@
 //! urn:layers:join:count            Source  layers-join-count         urn:cap:layers:read:join-count  (a host with a join)
 //! urn:layers:me                    Source  layers-me                 urn:cap:collab:read:*  (any participant grant)
 //! urn:layers:participant:name:{name} Exists layers-participant-name urn:cap:layer:say:{grants}  (a host with [onboard])
+//!                                  Source  (the participant atom)    urn:cap:layers:admin:read
+//! urn:layers:layer, :shape, … (admin) Source layers-admin-*          urn:cap:layers:admin:read  (see [`admin`])
 //! urn:collab:{name}                Source  collab                    urn:cap:collab:read:* (+ exact per manifest)
 //! urn:collab:{name}:participants   Source  collab-participants       urn:cap:collab:read:* (+ exact per manifest)
 //! ```
@@ -67,6 +69,10 @@ use crate::onboard;
 use crate::rdf::{self, node};
 use crate::time::xsd_date_time;
 use crate::tuplespace::{self, Lease, LeaseState, Lookup, Receipt, TupleMeta};
+
+pub mod admin;
+
+pub use crate::config::CAP_ADMIN_READ;
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 const TURTLE: &str = "text/turtle";
@@ -142,21 +148,31 @@ pub fn space(host: &Arc<Host>) -> EndpointSpace {
         }
     }
     if let Some(config) = host.onboard_config() {
-        space = space
-            .bind(
-                Exact::new(onboard::STATUS),
-                StatusEndpoint {
-                    host: Arc::clone(host),
-                    cap: layer_cap("say", &config.grants),
-                },
-            )
-            .bind(
-                template(PARTICIPANT_NAME.into()),
-                ParticipantName {
-                    host: Arc::clone(host),
-                    cap: layer_cap("say", &config.grants),
-                },
-            );
+        space = space.bind(
+            Exact::new(onboard::STATUS),
+            StatusEndpoint {
+                host: Arc::clone(host),
+                cap: layer_cap("say", &config.grants),
+            },
+        );
+    }
+    space = space.bind(
+        template(PARTICIPANT_NAME.into()),
+        ParticipantName {
+            host: Arc::clone(host),
+            cap: host
+                .onboard_config()
+                .map(|config| layer_cap("say", &config.grants)),
+        },
+    );
+    for resource in admin::Admin::all() {
+        let iri = resource.iri();
+        let endpoint = admin::AdminEndpoint::new(host, resource);
+        space = if iri.contains('{') {
+            space.bind(template(iri), endpoint)
+        } else {
+            space.bind(Exact::new(iri), endpoint)
+        };
     }
     if host.join().is_some() {
         space = space.bind(
@@ -3515,9 +3531,16 @@ impl Endpoint for StatusEndpoint {
 /// entitlement grants it), so no grant needs a new token and no other participant is offered
 /// the question. A request naming a principal must also name the controller; root, naming
 /// nobody, is the operator and is answered.
+///
+/// **Source, the administrator's** (ledger #4307): the same IRI is also the participant atom
+/// of the configuration resources ([`admin`]), answering its statements in
+/// `participants.ttl` (Turtle) or `{"name", "participant", "types", "label", "onBehalfOf"}`
+/// (JSON), under [`CAP_ADMIN_READ`]. It is bound on every host; `Exists` only on one with
+/// `[onboard]`.
 struct ParticipantName {
     host: Arc<Host>,
-    cap: String,
+    /// The grants layer's `say`, on a host with `[onboard]`: `Exists` is declared only then.
+    cap: Option<String>,
 }
 
 impl ParticipantName {
@@ -3556,12 +3579,20 @@ impl ParticipantName {
 #[async_trait]
 impl Endpoint for ParticipantName {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb == Verb::Source {
+            return self.statements(inv);
+        }
         if inv.request.verb != Verb::Exists {
             return Err(Error::Endpoint(format!(
                 "urn:layers:participant:name:{{name}} answers whether a name is in use, true or \
-                 false, to an Exists request only, and this request is {:?}: ask with Exists",
+                 false, to an Exists request, and a participant's statements to a Source, and \
+                 this request is {:?}: ask with Exists",
                 inv.request.verb
             )));
+        }
+        if self.cap.is_none() {
+            // No [onboard]: the question is not bound here, as before the Source shared the IRI.
+            return Err(Error::Unresolved(inv.request.target.clone()));
         }
         // The token is the controller's by configuration, and manifests are read live, so the
         // principal is checked too: a token another principal came to hold asks nothing.
@@ -3611,27 +3642,93 @@ impl Endpoint for ParticipantName {
     }
 
     fn describe(&self) -> Description {
-        Description::new("layers-participant-name")
-            .title("Participant name in use")
+        let name = || {
+            ArgSpec::new("name")
+                .summary("the participant's short name, as an entitlement names it")
+                .class(xsd("string"))
+                .binding()
+        };
+        let source = ActionSpec::new(Verb::Source)
             .summary(
-                "Whether a participant name is in use, for the onboarding controller: true \
-                 when this host would refuse an entitlement naming it for a new certificate \
-                 (it is the controller, a manifest grants it, enrollment.toml enrolls it, or a \
-                 current entitlement holds it), false otherwise. Answers one name at a time and \
-                 lists nothing",
+                "the participant's statements in participants.ttl, for whoever administers \
+                 this host: its class, label and for whom it acts, as Turtle or JSON",
             )
-            .verb(Verb::Exists)
-            .verb(Verb::Meta)
-            .requires(self.cap.clone())
-            .input(
-                ArgSpec::new("name")
-                    .summary("the participant's short name, as an entitlement names it")
-                    .class(xsd("string"))
-                    .binding(),
-            )
-            .input(as_spec(&[TEXT, JSON]))
-            .output(TEXT)
+            .input(name())
+            .input(as_spec(&[TURTLE, JSON]))
+            .output(TURTLE)
             .output(JSON)
+            .requires(CAP_ADMIN_READ);
+        let mut description = Description::new("layers-participant-name")
+            .title("Participant name")
+            .summary(
+                "One participant name. Exists, for the onboarding controller on a host with \
+                 [onboard]: true when this host would refuse an entitlement naming it for a new \
+                 certificate (it is the controller, a manifest grants it, enrollment.toml \
+                 enrolls it, or a current entitlement holds it), false otherwise, one name at a \
+                 time, listing nothing. Source, for whoever administers this host: the \
+                 participant's statements",
+            )
+            .verb(Verb::Meta)
+            .action(source);
+        if let Some(cap) = &self.cap {
+            description = description.action(
+                ActionSpec::new(Verb::Exists)
+                    .summary("whether the name is in use: true or false")
+                    .input(name())
+                    .input(as_spec(&[TEXT, JSON]))
+                    .output(TEXT)
+                    .output(JSON)
+                    .requires(cap.clone()),
+            );
+        }
+        description
+    }
+}
+
+impl ParticipantName {
+    /// Source: the participant's statements (ledger #4307).
+    fn statements(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let name = inv.bindings.get("name").unwrap_or_default();
+        if !crate::name::is_short_name(name) {
+            return Err(Error::InvalidArgument {
+                name: "name".into(),
+                detail: format!(
+                    "`{name}` is not a participant short name: lowercase letters, digits and \
+                     hyphens, at most {} characters, not starting or ending with a hyphen",
+                    crate::name::MAX_SHORT_NAME
+                ),
+            });
+        }
+        let as_json = face(inv, &[TURTLE, JSON])? == JSON;
+        let iri = format!("{}{name}", crate::name::PARTICIPANT_PREFIX);
+        let participants =
+            crate::config::load_participants(self.host.config_dir()).map_err(host_error)?;
+        let Some(member) = participants.members.get(&iri) else {
+            return Err(Error::NotFound(format!(
+                "participants.ttl names no participant {iri}"
+            )));
+        };
+        let own: Vec<Triple> = participants
+            .triples
+            .iter()
+            .filter(|t| rdf::subject_iri(&t.subject) == Some(iri.as_str()))
+            .cloned()
+            .collect();
+        if !as_json {
+            return Ok(turtle(rdf::to_turtle(&own)));
+        }
+        let on_behalf_of: Vec<&str> = own
+            .iter()
+            .filter(|t| t.predicate.as_str() == "http://www.w3.org/ns/prov#actedOnBehalfOf")
+            .filter_map(|t| rdf::object_iri(&t.object))
+            .collect();
+        Ok(json_repr(serde_json::json!({
+            "name": name,
+            "participant": iri,
+            "types": member.types,
+            "label": member.label,
+            "onBehalfOf": on_behalf_of,
+        })))
     }
 }
 

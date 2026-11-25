@@ -76,12 +76,24 @@ presentation has not been evaluated here.
   error ``the hourly key for source addresses cannot be drawn: …`` from `door_capability`.
 - **Whether a name is in use** (`src/endpoints.rs`, `urn:layers:participant:name:{name}`):
   `true` or `false` on one line as `text/plain`, and `{"name", "inUse"}` as JSON. A verb other
-  than `Exists` is refused with a sentence that says what the resource answers, names the verb
-  asked and ends ``ask with Exists``; a malformed name is refused naming it and spelling out a
+  than `Exists` or the administrator's `Source` (below) is refused with a sentence that says what
+  the resource answers, names the verb asked and ends ``ask with Exists``; a malformed name is refused naming it and spelling out a
   short name's rule (lowercase letters, digits and hyphens, at most 48 characters, not starting
   or ending with a hyphen). A principal other than the controller is refused with ``only
   onboard.controller (<participant>) asks whether a participant name is in use, and this request
   is <principal>'s``.
+- **The configuration resources** (`src/endpoints/admin.rs`, ledger #4307): the sets list one
+  line per member as `text/plain`, each starting with a word that says what it is and labeling
+  every field after the resource (``layer <resource> model=channel kind=talk
+  mounted-by=bobby,chris``, ``shape <resource> file=layers/msg.shapes.ttl layers=notes,talk``,
+  ``collab <resource> mounts=talk,notes`` then one ``mount <resource>`` line per mount,
+  ``participant <iri> resource=<resource>``, ``enrollment <fingerprint> participant=<iri>``); an
+  empty list reads `none`. ``revision <64 hex>`` is one line. A definition, a manifest and a
+  document answer their file unchanged, and a participant its Turtle statements. Every one also
+  answers JSON. A write is refused with ``<resource> is read-only and answers Source alone, and
+  this request is <verb>: no configuration resource is written yet; ask with Source``; an atom
+  nobody wrote is refused naming it and the file it would be (``no layer `nope` is defined:
+  layers/nope.toml does not exist``), and a malformed key names it and spells out the rule.
 - **The state key's refusals** (`src/at_rest.rs`): ``the state identity <path>: …`` says what
   is wrong (does not exist, cannot be read, a bad line by its number, or, on unix, an owner or
   mode another account could use) and, for an owner or a mode, the `chmod` or `chown` to run,
@@ -102,11 +114,15 @@ presentation has not been evaluated here.
 - **The `ikigai-layers` binary** (`src/bin/ikigai-layers.rs`): usage text; `grants` prints one
   line per grant, client, unenrolled participant and idle certificate, and one
   ``count-reader <grant>: gains urn:cap:layers:read:join-count, …`` line per participant
-  `join.count_readers` names, then what it wrote,
+  `join.count_readers` names, one ``admin <grant>: gains urn:cap:layers:admin:read, …`` line per
+  participant the `[admin]` table names, then what it wrote,
   and refuses a configuration directory that is missing, not a directory or holds no manifest,
   saying which and that nothing was written; it refuses a `join.count_readers` entry that is no
   participant or is a joined identity, naming the entry, saying what to do instead and that
   nothing was written;
+  it refuses an `[admin]` key that is no capability, or an entry that is no participant or is a
+  joined identity, and a manifest naming an administrative capability, saying where to name an
+  administrator instead and that nothing was written;
   `onboard setup` prints what it did and a `stuck: …` line for each way a node would be left in
   the lobby; `descriptor` prints `wrote <path> and <path>`; `epoch` prints ``epoch <epoch>``,
   and with `--renew` ``epoch <epoch>: renewed; every follower starts again from 0``, and
@@ -127,7 +143,7 @@ limitations and checks that could not run:
 - Every answer a participant reads has a JSON face, so a client can present it its own way
   without an RDF parser.
 - The binary's lines start with a word that says what the line is (`grant`, `client`,
-  `unenrolled`, `idle`, `count-reader`, `stuck:`, `checked`, `wrote`, `unchanged`, `kept`, `differs`, `backup`), and a join's plain answer the same
+  `unenrolled`, `idle`, `count-reader`, `admin`, `stuck:`, `checked`, `wrote`, `unchanged`, `kept`, `differs`, `backup`), and a join's plain answer the same
   (`entitlement`, `principal`, `expires`, `granted`) and the join count's (`joined`,
   `read-in-7-days`, `read-in-30-days`); `--check` ends by saying nothing was
   written; `-h`/`--help` prints the usage on stdout; a usage error exits 2 and a failure exits 1,
@@ -228,3 +244,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-15 | Whether a name is in use: a one-word answer, a JSON face, and its three refusals. |
 | 2026-11-23 | The feed epoch: its refusal of a cursor from another epoch, its JSON fields and the `epoch` command. |
 | 2026-11-24 | A retention `sweep` is timed at the instant its batch expired, and a read leaves an expired receipt out before the sweep is recorded. |
+| 2026-11-24 | The configuration resources: labeled set lines, the revision line, the read-only refusal, and `grants`' `admin` line and refusals. |
