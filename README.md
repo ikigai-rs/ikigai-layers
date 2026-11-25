@@ -60,6 +60,8 @@ Layers are inspired by Daniel Suarez's novel *Daemon*
 | `urn:layers:participants` | Source | who each principal is, across the host (the operator's) | `urn:cap:layers:read:participants` |
 | `urn:layers:join:count` | Source | a host with a join only: three aggregate numbers about its joined readers ([Counting joined readers](#counting-joined-readers)) | `urn:cap:layers:read:join-count`, held only by the participants `join.count_readers` names |
 | `urn:layers:participant:name:{name}` | Exists | a host with `[onboard]` only: `true` or `false`, whether this host would refuse an entitlement naming `{name}` for a new certificate ([Onboarding](#asking-whether-a-node-name-is-in-use)) | `urn:cap:layer:say:{grants}`, the controller's |
+| `urn:layers:participant:name:{name}` | Source | one participant's statements in `participants.ttl`, Turtle or JSON ([Reading the configuration](#reading-the-configuration)) | `urn:cap:layers:admin:read` |
+| `urn:layers:layer`, `urn:layers:shape`, `urn:layers:context`, `urn:layers:scheme`, `urn:layers:collab`, `urn:layers:participant`, `urn:layers:enrollment` and their keyed atoms; `urn:layers:grant`, `urn:layers:client`, `urn:layers:revision` | Source | the configuration's files, as written, and what the generator derives from them ([Reading the configuration](#reading-the-configuration)) | `urn:cap:layers:admin:read`, held only by the participants `[admin]` names |
 | `urn:layers:me` | Source | who the door says the caller is: its principal and, when it is a participant, its kind and the collaborations granting it anything (`as=application/json` for a client) | `urn:cap:collab:read:*`, which every generated grant holds |
 | `urn:collab:{name}` | Source | a collaboration's manifest | `urn:cap:collab:read:{name}` |
 | `urn:collab:{name}:participants` | Source | who takes part in that collaboration: each participant its manifest grants anything, as the participants graph describes it | `urn:cap:collab:read:{name}` |
@@ -311,6 +313,53 @@ The Rust enrollment generator and the Python client both use the command name
 `ikigai-layers`. If both are installed, use an explicit path to the intended executable
 (or separate environments); the `grants`, `onboard setup` and `descriptor` commands here
 belong to the Rust binary.
+
+### Reading the configuration
+
+Every file the host reads is also a resource under `urn:layers:` (ledger #4307, the first
+step of [layers changed at runtime](docs/design/runtime-layers.md)). Each is read from the
+files on every request, so it answers what is on disk now, and none is written yet:
+
+| resource | what it answers |
+| --- | --- |
+| `urn:layers:layer` | one `layer` line per definition: `layer <resource> model=<model> kind=<kind or none> mounted-by=<collabs or none>` |
+| `urn:layers:layer:name:{layer}` | `layers/{layer}.toml`, byte for byte (`application/toml`), or its keys as JSON |
+| `urn:layers:shape`, `…:context`, `…:scheme` | one line per document a definition names: `shape <resource> file=<file> layers=<layers>` |
+| `urn:layers:shape:name:{name}` (and `context`, `scheme`) | the document, byte for byte; `{name}` is its file name less `.shapes.ttl`, `.context.jsonld` or `.scheme.ttl` (the whole file name when it has none) |
+| `urn:layers:collab` | one `collab <resource> mounts=<layers>` line per manifest, each followed by one `mount <resource>` line per mount |
+| `urn:layers:collab:name:{collab}` | `collabs/{collab}.toml`, byte for byte, or its keys as JSON |
+| `urn:layers:collab:name:{collab}:mount:layer:{layer}` | that one `[[mount]]` table, as TOML or JSON |
+| `urn:layers:participant` | the participants graph, the same Turtle as `urn:layers:participants`; as text one `participant <iri>` line each |
+| `urn:layers:participant:name:{name}` | Source: that participant's statements (the `Exists` above stays the controller's) |
+| `urn:layers:enrollment` | one `enrollment <fingerprint> participant=<iri>` line per certificate `enrollment.toml` enrolls |
+| `urn:layers:enrollment:fingerprint:{fingerprint}` | that one line, or `{"fingerprint", "resource", "participant"}` |
+| `urn:layers:grant`, `urn:layers:client` | what `grants.json` and `clients.json` would hold, derived now; never written by reading |
+| `urn:layers:revision` | `revision <64 hex>`: a SHA-256 over the files the configuration reads |
+
+Every set and atom also answers `as=application/json`. The revision digests, in this order,
+`layers.toml`, every `layers/*.toml`, the documents they name, `participants.ttl`, every
+`collabs/*.toml`, `enrollment.toml` and `entitlements.toml`, each by path, presence, length
+and bytes: it changes when any of them changes, appears or goes, and not otherwise.
+
+Every one declares `urn:cap:layers:admin:read`, which reads the configuration and no layer's
+entries. **No manifest grants it**: a manifest naming an administrative capability, as a verb
+(`"urn:cap:layers:admin:read"`, `"admin:read"`) or as an `admin` key, is refused and nothing is
+written. The operator names who administers in `layers.toml`:
+
+```toml
+# layers.toml
+[admin]
+read = ["brian"]   # participants, as a manifest names them
+```
+
+and `ikigai-layers grants` adds the capability to exactly those grants, one line each:
+
+```text
+admin brian: gains urn:cap:layers:admin:read, administering this host's configuration ([admin])
+```
+
+`grants` refuses, naming the entry and writing nothing, a key other than `read`, a name that
+is no participant in `participants.ttl`, and a joined identity.
 
 ## Onboarding a node by itself
 
