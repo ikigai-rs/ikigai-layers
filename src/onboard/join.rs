@@ -22,7 +22,9 @@
 //! per hour (all three persisted, sealed at rest), a cap on live identities, the deny list
 //! [`DENY_FILE`], and expiry: an identity lapses after `join_idle_days` without a read, its
 //! certificate leaves the trust set, and it may join again. A restart forgets none of the
-//! counts but the per-address one, which begins again under a fresh key.
+//! counts but the per-address one, which begins again under a fresh key. A request is counted
+//! by the address its connection came from, so a request on a connection the host no longer
+//! remembers is refused, and the stranger reconnects.
 //!
 //! **No address is kept** (ledger #3307). A source address is counted by its HMAC-SHA256 under
 //! a random key held only in memory and replaced every hour, so a hash is comparable only with
@@ -82,10 +84,15 @@ const HOST_KEY: &str = "urn:layer:onboard:join-host-key";
 const SIGN: &str = "urn:sign:sign";
 const WINDOW_MILLIS: u64 = 60 * 60 * 1000;
 const DAY_MILLIS: u64 = 24 * WINDOW_MILLIS;
-/// The most connections the host remembers a source hash for: a stranger who connects and
-/// never joins cannot grow this without bound, and losing an entry loses only the per-address
-/// count for that connection.
+/// The most stranger connections the host remembers: one who connects and never joins cannot
+/// grow this without bound. When it is full the oldest is forgotten, and a request on a
+/// connection the host no longer remembers is refused (see [`Join::admit`]), so forgetting
+/// one never lets a request go uncounted by its address.
 const SOURCES_MAX: usize = 4096;
+/// The most connections the host remembers from one source address. A connection past it is
+/// not remembered, and its request is refused, so many connections from one address cannot
+/// push out its own earlier ones, nor fill [`SOURCES_MAX`] for everyone else.
+const SOURCES_PER_ADDRESS: usize = 256;
 /// The smallest count reported as a number. Anything under it, zero included, is reported in
 /// words, so that a count of one never singles anyone out.
 const COUNT_THRESHOLD: usize = 5;
@@ -150,52 +157,133 @@ struct SourceKey {
     since: u64,
 }
 
+/// What the host remembers of a stranger's latest connection, for the request it may make on it.
+struct Connection {
+    /// The keyed hash of the source address the door gave, under the key held now; `None`
+    /// when the door gave no address.
+    source: Option<String>,
+    /// Whether `source` was carried over from the previous key. A connection is remembered
+    /// across one key's retirement and forgotten at the next, so the hashes that can be
+    /// counted come from two keys at most.
+    carried: bool,
+    /// The order it was remembered in: the oldest is forgotten first when the host is full.
+    order: u64,
+}
+
 #[derive(Default)]
 struct State {
     identities: BTreeMap<String, Identity>,
     attempts: Vec<Attempt>,
-    /// The keyed hash of the source address the door gave at each stranger's connection.
-    sources: HashMap<String, String>,
+    /// Each stranger's latest connection, by fingerprint.
+    connections: HashMap<String, Connection>,
+    /// The `order` the next remembered connection takes.
+    next_order: u64,
     /// This hour's key, drawn when the first address of the hour is hashed.
     key: Option<SourceKey>,
 }
 
 impl State {
-    /// Retire a key whose hour is up, and every hash made under it: they match nothing now.
+    /// Retire a key whose hour is up. Every hash made under it is gone: an attempt's matches
+    /// nothing now, and a remembered connection's is carried to a fresh key, as the keyed hash
+    /// of the old one, so connections from one address still count together; one carried
+    /// already is forgotten. A fresh key that cannot be drawn forgets every address.
     fn retire_key(&mut self, now: u64) {
         if self
             .key
             .as_ref()
-            .is_some_and(|key| now.saturating_sub(key.since) >= WINDOW_MILLIS)
+            .is_none_or(|key| now.saturating_sub(key.since) < WINDOW_MILLIS)
         {
-            self.key = None;
-            self.sources.clear();
-            for attempt in &mut self.attempts {
-                attempt.source = None;
+            return;
+        }
+        self.key = None;
+        for attempt in &mut self.attempts {
+            attempt.source = None;
+        }
+        self.connections
+            .retain(|_, c| !(c.carried && c.source.is_some()));
+        if !self.connections.values().any(|c| c.source.is_some()) {
+            return;
+        }
+        if let Err(e) = self.draw_key(now) {
+            eprintln!("ikigai-layers: join: {e}; connections waiting to join must reconnect");
+            self.connections.retain(|_, c| c.source.is_none());
+            return;
+        }
+        let key = self.key.take().expect("drawn above");
+        for connection in self.connections.values_mut() {
+            if let Some(old) = connection.source.take() {
+                connection.source = Some(mac(&key, &format!("carried {old}")));
+                connection.carried = true;
             }
         }
+        self.key = Some(key);
     }
 
-    /// `address` as this hour's HMAC-SHA256, lowercase hex, drawing the hour's key if none is
-    /// held. Call [`State::retire_key`] first.
-    fn hash_source(&mut self, address: &str, now: u64) -> Result<String, String> {
+    fn draw_key(&mut self, now: u64) -> Result<(), String> {
         if self.key.is_none() {
             let mut bytes = [0; 32];
             getrandom::getrandom(&mut bytes)
                 .map_err(|e| format!("the hourly key for source addresses cannot be drawn: {e}"))?;
             self.key = Some(SourceKey { bytes, since: now });
         }
-        let key = self.key.as_ref().expect("drawn above");
-        let mut mac =
-            Hmac::<sha2::Sha256>::new_from_slice(&key.bytes).expect("HMAC takes any key length");
-        mac.update(address.as_bytes());
-        Ok(mac
-            .finalize()
-            .into_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect())
+        Ok(())
     }
+
+    /// `address` as this hour's HMAC-SHA256, lowercase hex, drawing the hour's key if none is
+    /// held. Call [`State::retire_key`] first.
+    fn hash_source(&mut self, address: &str, now: u64) -> Result<String, String> {
+        self.draw_key(now)?;
+        Ok(mac(self.key.as_ref().expect("drawn above"), address))
+    }
+
+    /// Remember `fingerprint`'s connection from `source`, replacing its last one, unless its
+    /// address already has [`SOURCES_PER_ADDRESS`] others remembered; then it is not, and
+    /// those keep theirs. A full host forgets its oldest connection to make room.
+    fn remember(&mut self, fingerprint: &str, source: Option<String>) {
+        if let Some(hash) = &source {
+            let same = self
+                .connections
+                .iter()
+                .filter(|(f, c)| f.as_str() != fingerprint && c.source.as_ref() == Some(hash))
+                .count();
+            if same >= SOURCES_PER_ADDRESS {
+                self.connections.remove(fingerprint);
+                return;
+            }
+        }
+        if !self.connections.contains_key(fingerprint) && self.connections.len() >= SOURCES_MAX {
+            let oldest = self
+                .connections
+                .iter()
+                .min_by_key(|(_, c)| c.order)
+                .map(|(f, _)| f.clone());
+            if let Some(oldest) = oldest {
+                self.connections.remove(&oldest);
+            }
+        }
+        let order = self.next_order;
+        self.next_order += 1;
+        self.connections.insert(
+            fingerprint.to_string(),
+            Connection {
+                source,
+                carried: false,
+                order,
+            },
+        );
+    }
+}
+
+/// `input` under `key` as HMAC-SHA256, lowercase hex.
+fn mac(key: &SourceKey, input: &str) -> String {
+    let mut mac =
+        Hmac::<sha2::Sha256>::new_from_slice(&key.bytes).expect("HMAC takes any key length");
+    mac.update(input.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// What the per-address limit counts for the `source` a door gave (ledger #3296): an IPv4
@@ -645,7 +733,9 @@ impl Join {
     }
 
     /// What a door mints for `fingerprint` at a connection: `Ok(Some)` for a live identity; or
-    /// `Ok(None)` to fall through to the lobby, remembering the source's hash for its request.
+    /// `Ok(None)` to fall through to the lobby, remembering the connection, and its source's
+    /// hash, for its request. A connection without a source never replaces one with a source:
+    /// the stricter count holds.
     pub(crate) fn connect(
         &self,
         fingerprint: &str,
@@ -663,13 +753,21 @@ impl Join {
             self.lapse_one(&mut state, fingerprint)?;
         }
         state.retire_key(now.as_millis());
-        if let Some(address) = source {
-            let counted = counted_source(address, self.config.ipv6_prefix);
-            let hash = state.hash_source(&counted, now.as_millis())?;
-            if state.sources.len() >= SOURCES_MAX {
-                state.sources.clear();
+        match source {
+            Some(address) => {
+                let counted = counted_source(address, self.config.ipv6_prefix);
+                let hash = state.hash_source(&counted, now.as_millis())?;
+                state.remember(fingerprint, Some(hash));
             }
-            state.sources.insert(fingerprint.to_string(), hash);
+            None => {
+                let addressed = state
+                    .connections
+                    .get(fingerprint)
+                    .is_some_and(|c| c.source.is_some());
+                if !addressed {
+                    state.remember(fingerprint, None);
+                }
+            }
         }
         Ok(None)
     }
@@ -736,7 +834,10 @@ impl Join {
     /// Count one attempt by `fingerprint` at `now`, or refuse it naming the limit it would
     /// break: its certificate's, its address's where the door said one, or everyone's. A
     /// refused attempt is not counted, and a counted one is on disk before anything else
-    /// happens, so a restart cannot reopen a spent window.
+    /// happens, so a restart cannot reopen a spent window. An attempt on a connection the
+    /// host does not remember is refused too, since whether its address has made its
+    /// requests cannot be known: the connection was pushed out, came from an address with
+    /// too many waiting, or is from before the last key but one.
     pub(crate) fn admit(&self, lobby: &str, fingerprint: &str, now: Time) -> CoreResult<()> {
         let unavailable = |what: String| Error::Unavailable(format!("{what}; try again later"));
         let mut state = self.state.lock().expect("join lock");
@@ -745,7 +846,7 @@ impl Join {
             .attempts
             .retain(|a| now.saturating_sub(a.at) < WINDOW_MILLIS);
         state.retire_key(now);
-        let source = state.sources.get(fingerprint).cloned();
+        let connection = state.connections.get(fingerprint).map(|c| c.source.clone());
         let c = &self.config;
         if state.attempts.len() >= c.per_hour {
             return Err(unavailable(format!(
@@ -766,6 +867,13 @@ impl Join {
                 c.per_certificate
             )));
         }
+        let Some(source) = connection else {
+            return Err(Error::Unavailable(format!(
+                "join lobby `{lobby}` no longer remembers the connection certificate \
+                 {fingerprint} asked on, so it cannot count the request by its source address; \
+                 reconnect and ask again"
+            )));
+        };
         if let Some(source) = &source {
             if state
                 .attempts

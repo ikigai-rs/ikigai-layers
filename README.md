@@ -561,11 +561,18 @@ fingerprint and that hash; an entry stops counting after an hour and leaves the 
 next counted request.
 
 A hash matches only others made under its own key, so once the key is replaced nothing links
-it to an address. The host forgets the replaced key's hashes then, from memory at once and
-from the file at the next counted request or open. A connection made under the old key is not
-counted by address until it reconnects, and one address can spend `per_address` once on each
-side of a replacement. A restart starts a fresh key, which costs at most one hour of
-per-address counting.
+it to an address. The host forgets the replaced key's hashes then: a request's from memory at
+once and from the file at the next counted request or open. A connection still waiting to ask
+is carried to the new key as the keyed hash of its old one, so connections from one address
+still count together, and it is forgotten at the replacement after that. One address can spend
+`per_address` once on each side of a replacement, and once more on connections carried over
+it. A restart starts a fresh key, which costs at most one hour of per-address counting.
+
+A request is counted by the address its connection came from, so a request on a connection the
+host no longer remembers is refused, and the stranger reconnects and asks again. The host
+remembers 4096 connections waiting to ask, forgetting the oldest when full, and 256 of them
+from one address, never forgetting an address's earlier ones for a later one: many
+connections from one address cannot push out its own or anyone else's.
 
 For each joined identity, its record holds when it joined and only the day of its last read:
 `last_read` is the UTC midnight that began that day, written at most once a day, at that day's

@@ -2032,3 +2032,135 @@ fn making_a_layer_private_revokes_its_joiners_at_the_next_open() {
         ["urn:cap:layer:feed:features", "urn:cap:layer:read:features"]
     );
 }
+
+#[test]
+fn a_flood_of_connections_does_not_lift_the_per_address_limit() {
+    let d = door_with("per_address = 1\n");
+    let (pem_a, fp_a) = certificate("flood-a");
+    let (pem_b, fp_b) = certificate("flood-b");
+    d.minted_at(&fp_a, Some(ADDRESS), T0).expect("a lobby");
+    d.minted_at(&fp_b, Some(ADDRESS), T0).expect("a lobby");
+    // Throwaway certificates from the same address: connecting is all they do.
+    for n in 0..4096u32 {
+        d.minted_at(&format!("{n:064x}"), Some(ADDRESS), T0 + 1)
+            .expect("a lobby");
+    }
+    let post = |pem: &str, fp: &str| {
+        issue(
+            &d.at(T0 + 2),
+            Verb::Sink,
+            SAY,
+            &[
+                ("content", &request_turtle(pem, fp, &["releases"])),
+                ("as", "application/json"),
+            ],
+            &d.minted(fp),
+        )
+        .map(|r| serde_json::from_str::<serde_json::Value>(&text(&r)).expect("JSON"))
+    };
+    post(&pem_a, &fp_a).expect("the first from this address is within the limit");
+    unavailable(post(&pem_b, &fp_b), "from one source address");
+}
+
+#[test]
+fn a_post_after_the_hourly_key_retires_still_counts_its_address() {
+    let d = door_with("per_address = 1\n");
+    let (pem_a, fp_a) = certificate("late-a");
+    let (pem_b, fp_b) = certificate("late-b");
+    // Both connect now; they post an hour later on the same connections.
+    d.minted_at(&fp_a, Some(ADDRESS), T0).expect("a lobby");
+    d.minted_at(&fp_b, Some(ADDRESS), T0).expect("a lobby");
+    let later = T0 + HOUR + MINUTE;
+    let post = |pem: &str, fp: &str| {
+        issue(
+            &d.at(later),
+            Verb::Sink,
+            SAY,
+            &[
+                ("content", &request_turtle(pem, fp, &["releases"])),
+                ("as", "application/json"),
+            ],
+            &d.minted(fp),
+        )
+        .map(|r| serde_json::from_str::<serde_json::Value>(&text(&r)).expect("JSON"))
+    };
+    post(&pem_a, &fp_a).expect("the first from this address is within the limit");
+    unavailable(post(&pem_b, &fp_b), "from one source address");
+}
+
+/// A join request posted at `millis` on the connection that minted `cap`, as a door would.
+fn post_on(
+    d: &Door,
+    cap: &Capability,
+    pem: &str,
+    fp: &str,
+    millis: u64,
+) -> Result<serde_json::Value, Error> {
+    issue(
+        &d.at(millis),
+        Verb::Sink,
+        SAY,
+        &[
+            ("content", &request_turtle(pem, fp, &["releases"])),
+            ("as", "application/json"),
+        ],
+        cap,
+    )
+    .map(|r| serde_json::from_str::<serde_json::Value>(&text(&r)).expect("JSON"))
+}
+
+#[test]
+fn a_connection_from_before_the_last_key_but_one_must_reconnect() {
+    let d = door_with("per_address = 1\n");
+    let (pem, fp) = certificate("patient");
+    let first = d.minted_at(&fp, Some(ADDRESS), T0).expect("a lobby");
+    // Another stranger an hour on retires the first key; the connection is carried over.
+    d.minted_at(&"ab".repeat(32), Some("198.51.100.9:4433"), T0 + HOUR + 1)
+        .expect("a lobby");
+    // An hour after that the second key retires too, and the connection is forgotten.
+    let later = T0 + 2 * HOUR + 2;
+    match post_on(&d, &first, &pem, &fp, later) {
+        Err(Error::Unavailable(m)) => assert!(
+            m.ends_with("cannot count the request by its source address; reconnect and ask again"),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    let again = d.minted_at(&fp, Some(ADDRESS), later).expect("a lobby");
+    post_on(&d, &again, &pem, &fp, later).expect("a fresh connection is counted and admitted");
+}
+
+#[test]
+fn a_connection_past_the_per_address_bound_is_refused_and_keeps_the_earlier_ones() {
+    let d = door_with("per_address = 1000\n");
+    let (pem_a, fp_a) = certificate("early");
+    let (pem_z, fp_z) = certificate("late");
+    let early = d.minted_at(&fp_a, Some(ADDRESS), T0).expect("a lobby");
+    for n in 0..255u32 {
+        d.minted_at(&format!("{n:064x}"), Some(ADDRESS), T0)
+            .expect("a lobby");
+    }
+    let late = d.minted_at(&fp_z, Some(ADDRESS), T0).expect("a lobby");
+    unavailable(
+        post_on(&d, &late, &pem_z, &fp_z, T0 + 1),
+        "no longer remembers the connection",
+    );
+    post_on(&d, &early, &pem_a, &fp_a, T0 + 1).expect("an earlier connection is remembered");
+}
+
+#[test]
+fn a_full_host_forgets_its_oldest_connection_and_refuses_its_request() {
+    let d = door_with("per_address = 1000\n");
+    let (pem, fp) = certificate("oldest");
+    let oldest = d.minted_at(&fp, Some(ADDRESS), T0).expect("a lobby");
+    // 4096 more from seventeen other addresses, none past the per-address bound.
+    for n in 0..4096u32 {
+        let source = format!("203.0.113.{}:4433", n % 17);
+        d.minted_at(&format!("{n:064x}"), Some(&source), T0)
+            .expect("a lobby");
+    }
+    unavailable(
+        post_on(&d, &oldest, &pem, &fp, T0 + 1),
+        "no longer remembers the connection",
+    );
+}
