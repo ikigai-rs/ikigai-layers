@@ -1963,16 +1963,10 @@ impl LayerEndpoint {
         let now = inv.now().map(xsd_date_time);
         let now = now.as_deref();
         let before = self.retention_cutoff(inv);
-        // Expiration and a lapsed lease advance without a Sink or Delete to cut the kernel's
-        // cache.
-        let answer = |r: Representation| {
-            Ok(
-                if self.def().retain.is_some() || self.def().lease_max.is_some() {
-                    r
-                } else {
-                    r.cacheable().depends_on(self.tuples_thread())
-                },
-            )
+        // Every answer hangs from the tuples thread, and on a leased layer it is fresh until
+        // the earliest `until` of a held lease it depends on ([`Fresh`], ledger #4078).
+        let answer = |r: Representation, fresh: Fresh, receipts: &[&str]| {
+            Ok(self.leased_answer(r, fresh, receipts))
         };
         if let (Some(_), Some(_)) = (tuple, template) {
             return Err(Error::InvalidArgument {
@@ -2011,7 +2005,9 @@ impl LayerEndpoint {
                     (true, Lookup::Taken(receipt)) if lapsed(receipt) => {
                         Err(format!("<{subject}> is pending: nobody has taken it"))
                     }
-                    (true, Lookup::Taken(receipt)) => Ok(Ok(receipt.clone())),
+                    (true, Lookup::Taken(receipt)) => {
+                        Ok(Ok((receipt.clone(), Fresh::of(&index, receipt, now))))
+                    }
                     (false, Lookup::Taken(receipt)) => Err(format!(
                         "<{subject}> is not pending: <{}> took it at {} (read its receipt with \
                          state=taken)",
@@ -2029,17 +2025,19 @@ impl LayerEndpoint {
                 }
             };
             return match found {
-                Ok(Ok(receipt)) => {
+                // Its receipt, fresh until its own lease's `until`, and cut by its settle.
+                Ok(Ok((receipt, fresh))) => {
                     let text = space
                         .store
                         .receipt_answer(&receipt, now)
                         .map_err(|e| self.space_error(e))?;
-                    answer(self.graph_face(text, as_ld).await?)
+                    answer(self.graph_face(text, as_ld).await?, fresh, &[&receipt.iri])
                 }
-                // Lapsed, unrecorded: the tuple as its receipt holds it, as it goes back.
+                // Lapsed, unrecorded: the tuple as its receipt holds it, as it goes back. Its
+                // drop back is a write no cut announces, so this answer is not kept.
                 Ok(Err(Err(receipt))) => {
                     let text = self.lapsed_tuple(&receipt)?;
-                    answer(self.graph_face(text, as_ld).await?)
+                    answer(self.graph_face(text, as_ld).await?, Fresh::Uncached, &[])
                 }
                 Ok(Err(Ok(cid))) => match space
                     .store
@@ -2050,7 +2048,8 @@ impl LayerEndpoint {
                     Some(bytes) => {
                         let text = String::from_utf8(bytes)
                             .map_err(|_| self.space_error(format!("tuple {cid} is not UTF-8")))?;
-                        answer(self.graph_face(text, as_ld).await?)
+                        // Pending: only a take ends it, and a take cuts the tuples thread.
+                        answer(self.graph_face(text, as_ld).await?, Fresh::Forever, &[])
                     }
                     // Taken a moment ago: the take's own cut ends this answer.
                     None => Err(self.not_found_tuple(inv, format!("<{subject}> was just taken"))),
@@ -2068,16 +2067,26 @@ impl LayerEndpoint {
                         .into(),
                 });
             }
-            let receipts: Vec<Receipt> = {
+            // Fresh until the earliest `until` among the receipts listed, each cut by its settle.
+            let (receipts, fresh): (Vec<Receipt>, Fresh) = {
                 let index = space.index.read().expect("tuplespace lock");
-                index
+                let receipts: Vec<Receipt> = index
                     .receipts()
                     .iter()
                     .filter(|r| r.seq > after && !index.expired_at(r, before.as_deref()))
                     .take(limit as usize)
                     .cloned()
-                    .collect()
+                    .collect();
+                let fresh = receipts
+                    .iter()
+                    .fold(Fresh::Forever, |f, r| f.meet(Fresh::of(&index, r, now)));
+                (receipts, fresh)
             };
+            let settles: Vec<&str> = receipts
+                .iter()
+                .filter(|r| r.lease.is_some())
+                .map(|r| r.iri.as_str())
+                .collect();
             if asked == JSON {
                 let listed: Vec<serde_json::Value> = receipts
                     .iter()
@@ -2105,10 +2114,14 @@ impl LayerEndpoint {
                         listed
                     })
                     .collect();
-                return answer(json_repr(serde_json::json!({
-                    "layer": self.layer(),
-                    "receipts": listed,
-                })));
+                return answer(
+                    json_repr(serde_json::json!({
+                        "layer": self.layer(),
+                        "receipts": listed,
+                    })),
+                    fresh,
+                    &settles,
+                );
             }
             let mut out = String::new();
             for r in &receipts {
@@ -2146,11 +2159,15 @@ impl LayerEndpoint {
                     out.push('\n');
                 }
             }
-            return answer(if graph_face {
-                self.graph_face(out, asked == JSON_LD).await?
-            } else {
-                Representation::new(ReprType::new(TEXT), out.into_bytes())
-            });
+            return answer(
+                if graph_face {
+                    self.graph_face(out, asked == JSON_LD).await?
+                } else {
+                    Representation::new(ReprType::new(TEXT), out.into_bytes())
+                },
+                fresh,
+                &settles,
+            );
         }
         // A template's hits: intray ids, and the `ik:seq`s of the lapsed, unrecorded tuples
         // it holds for. A lapsed tuple's bytes are in its receipt, not in intray, so its
@@ -2190,8 +2207,17 @@ impl LayerEndpoint {
         };
         // Each pending tuple, with the receipt it is read from when its lease lapsed unrecorded:
         // such a tuple reads as pending at its own `ik:seq`, where it will go back.
-        let pending: Vec<(TupleMeta, Option<Receipt>)> = {
+        //
+        // Any held lease in the layer can bring its tuple back into this listing, so it is
+        // fresh until the layer's earliest `until` ([`Index::next_lapse`]). A settle only
+        // keeps a tuple taken, so it needs no cut here: a renew just leaves the deadline early.
+        let (pending, fresh): (Vec<(TupleMeta, Option<Receipt>)>, Fresh) = {
             let index = space.index.read().expect("tuplespace lock");
+            let fresh = if index.lapsed_unrecorded(now).next().is_some() {
+                Fresh::Uncached
+            } else {
+                index.next_lapse().map_or(Fresh::Forever, Fresh::Until)
+            };
             let mut pending: Vec<(TupleMeta, Option<Receipt>)> = index
                 .pending()
                 .filter(|m| holds(m))
@@ -2208,11 +2234,12 @@ impl LayerEndpoint {
                     }),
             );
             pending.sort_by_key(|(m, _)| m.seq);
-            pending
+            let pending = pending
                 .into_iter()
                 .filter(|(m, _)| m.seq > after)
                 .take(limit as usize)
-                .collect()
+                .collect();
+            (pending, fresh)
         };
         if asked == JSON {
             // The list, mirroring the feed's JSON: what the text face says, one object a line.
@@ -2225,10 +2252,14 @@ impl LayerEndpoint {
                     })
                 })
                 .collect();
-            return answer(json_repr(serde_json::json!({
-                "layer": self.layer(),
-                "tuples": listed,
-            })));
+            return answer(
+                json_repr(serde_json::json!({
+                    "layer": self.layer(),
+                    "tuples": listed,
+                })),
+                fresh,
+                &[],
+            );
         }
         let mut out = String::new();
         for (meta, lapsed) in &pending {
@@ -2252,11 +2283,36 @@ impl LayerEndpoint {
                 ));
             }
         }
-        answer(if graph_face {
-            self.graph_face(out, asked == JSON_LD).await?
-        } else {
-            Representation::new(ReprType::new(TEXT), out.into_bytes())
-        })
+        answer(
+            if graph_face {
+                self.graph_face(out, asked == JSON_LD).await?
+            } else {
+                Representation::new(ReprType::new(TEXT), out.into_bytes())
+            },
+            fresh,
+            &[],
+        )
+    }
+
+    /// A tuplespace read's answer, cached as `fresh` allows (ledger #4078). It hangs from the
+    /// tuples thread, which every out and take cuts, and from the IRI of each receipt in
+    /// `receipts`: the kernel cuts only the thread named after a write's own target, so a
+    /// settle (a Sink on its receipt) cuts that receipt's thread and not the tuples thread.
+    /// A layer with a retention window is not cached: its expiry is not a lease's `until`.
+    fn leased_answer(&self, r: Representation, fresh: Fresh, receipts: &[&str]) -> Representation {
+        if self.def().retain.is_some() {
+            return r;
+        }
+        let r = match fresh {
+            Fresh::Uncached => return r,
+            Fresh::Until(deadline) => r.cacheable_until(deadline),
+            Fresh::Forever => r.cacheable(),
+        };
+        receipts
+            .iter()
+            .fold(r.depends_on(self.tuples_thread()), |r, iri| {
+                r.depends_on(*iri)
+            })
     }
 
     /// The tuple a lapsed, unrecorded take holds, as Turtle: what goes back to the space when
@@ -2540,33 +2596,72 @@ impl LayerEndpoint {
         let space = self.state.tuplespace();
         let before = self.retention_cutoff(inv);
         // A receipt retention has expired by now is not found, before any `sweep` records it.
+        let now = inv.now().map(xsd_date_time);
         let found = {
             let index = space.index.read().expect("tuplespace lock");
             index
                 .receipt(id)
                 .filter(|r| !index.expired_at(r, before.as_deref()))
-                .cloned()
+                .map(|r| (r.clone(), Fresh::of(&index, r, now.as_deref())))
         };
         match found {
-            // A retained receipt never changes, but a configured window can remove it, and a
-            // leased take's standing changes until it is settled or lapses.
-            Some(receipt) => {
-                let now = inv.now().map(xsd_date_time);
+            // A receipt changes by its settle, which cuts its own IRI, and a held lease's
+            // standing changes at its `until`; a configured window can remove it.
+            Some((receipt, fresh)) => {
                 let text = space
                     .store
                     .receipt_answer(&receipt, now.as_deref())
                     .map_err(|e| self.space_error(e))?;
                 let repr = self.graph_face(text, as_ld).await?;
-                Ok(if self.def().retain.is_some() || receipt.lease.is_some() {
-                    repr
-                } else {
-                    repr.cacheable()
-                })
+                Ok(self.leased_answer(repr, fresh, &[&receipt.iri]))
             }
             None => Err(self.not_found_tuple(
                 inv,
                 format!("no receipt `{id}` in layer `{}`", self.layer()),
             )),
+        }
+    }
+}
+
+/// How long a tuplespace read may be cached (ledger #4078). A read computes a lapse and never
+/// writes, so a lapse cuts nothing: it is a scheduled expiry at the lease's `until`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fresh {
+    /// Not cached: it shows a lapse whose record or drop back is still owed, which the lease
+    /// sweep writes without a cut, at a time nobody knows in advance.
+    Uncached,
+    /// Fresh until this instant, the earliest `until` of a held lease it depends on.
+    Until(ikigai_core::Time),
+    /// Fresh until a thread it hangs from is cut.
+    Forever,
+}
+
+impl Fresh {
+    /// How long `receipt`'s standing, as a read at `now` sees it, stays as it is.
+    fn of(index: &tuplespace::Index, receipt: &Receipt, now: Option<&str>) -> Fresh {
+        if index.returning(receipt, now) {
+            return Fresh::Uncached;
+        }
+        match &receipt.lease {
+            Some(Lease {
+                until,
+                state: LeaseState::Held,
+            }) => Fresh::Until(ikigai_core::Time::from_millis(tuplespace::until_millis(
+                until,
+            ))),
+            _ => Fresh::Forever,
+        }
+    }
+
+    /// The shorter of the two.
+    fn meet(self, other: Fresh) -> Fresh {
+        match (self, other) {
+            (Fresh::Uncached, _) | (_, Fresh::Uncached) => Fresh::Uncached,
+            (Fresh::Until(a), Fresh::Until(b)) => Fresh::Until(a.min(b)),
+            (Fresh::Until(t), Fresh::Forever) | (Fresh::Forever, Fresh::Until(t)) => {
+                Fresh::Until(t)
+            }
+            (Fresh::Forever, Fresh::Forever) => Fresh::Forever,
         }
     }
 }
@@ -2834,6 +2929,9 @@ impl Endpoint for LayerEndpoint {
         // past the retention window is not shown, and nothing is stored (README, "lease" and
         // "retain"). On a layer that retains, every write records them here, before its own
         // handler, so a write that records nothing itself still keeps the feed in time order.
+        // Because a read computes the lapse, a lapse is a scheduled expiry and cuts nothing:
+        // a leased `rd` and receipt read are cacheable until the earliest `until` they depend
+        // on (`Fresh`, `leased_answer`, ledger #4078).
         let writes = matches!(inv.request.verb, Verb::Sink | Verb::Delete);
         if writes && self.def().model == Model::Tuplespace && self.def().retain.is_some() {
             if let Some(now) = inv.now() {
