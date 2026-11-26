@@ -1123,3 +1123,176 @@ fn a_lapse_whose_drop_back_failed_still_reads_as_pending() {
     assert!(pending(&f).contains(&offer_iri("a")), "{}", pending(&f));
     assert_eq!(kinds(&f), ["out", "taken", "returned"]);
 }
+
+/// The clock moved WITHOUT a new kernel, so the kernel's cache carries over.
+fn move_to(clock: &Arc<ManualClock>, minutes: u64) {
+    clock.0.store(START + minutes * MINUTE, Ordering::SeqCst);
+}
+
+/// A leased read is cacheable until the lapse (ledger #4078): a read computes the lapse and
+/// never writes, so the lapse is a scheduled expiry at the lease's `until`, not a cut. Two `rd`
+/// on one kernel at minutes 8 and 9 are served from its cache; at minute 10 the kernel invokes
+/// the endpoint again and the tuple is pending. The same holds for `rd state=taken`, the
+/// receipt and `rd tuple=` naming the receipt.
+#[test]
+fn a_leased_rd_is_cached_until_the_lapse() {
+    let (f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    out(&f.kernel, &gonk(), &offer("b")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    let receipt = receipt_of(&f, &offer_iri("a"));
+    let reader = tasker(&bobby_gonk());
+    let reads: [Read; 4] = [
+        ("rd", TUPLES, &[]),
+        ("rd state=taken", TUPLES, &[("state", "taken")]),
+        ("the receipt", &receipt, &[]),
+        (
+            "rd tuple=",
+            TUPLES,
+            &[
+                ("tuple", "urn:layer:tasks-bobby:offer:a"),
+                ("state", "taken"),
+            ],
+        ),
+    ];
+    let first: Vec<String> = {
+        move_to(&clock, 8);
+        reads
+            .iter()
+            .map(|(_, iri, args)| source(&f.kernel, iri, args, &reader))
+            .collect()
+    };
+    assert!(!first[0].contains(&offer_iri("a")), "{}", first[0]);
+    for minute in [8, 9] {
+        move_to(&clock, minute);
+        for ((name, iri, args), before) in reads.iter().zip(&first) {
+            assert!(
+                f.kernel
+                    .is_cached(&request(Verb::Source, iri, args), &reader),
+                "{name} at minute {minute} is served from the cache"
+            );
+            assert_eq!(&source(&f.kernel, iri, args, &reader), before, "{name}");
+        }
+    }
+    move_to(&clock, 10);
+    for (name, iri, args) in &reads {
+        assert!(
+            !f.kernel
+                .is_cached(&request(Verb::Source, iri, args), &reader),
+            "{name} at the lapse invokes the endpoint again"
+        );
+    }
+    assert!(pending(&f).contains(&offer_iri("a")), "{}", pending(&f));
+    let receipt_now = source(&f.kernel, &receipt, &[], &reader);
+    assert!(receipt_now.contains("\"lapsed\""), "{receipt_now}");
+    // While the lapse is computed but not recorded, nothing is kept: the sweep records it
+    // without a cut.
+    assert!(!f
+        .kernel
+        .is_cached(&request(Verb::Source, TUPLES, &[]), &reader));
+    assert_eq!(
+        kinds(&f),
+        ["out", "out", "taken"],
+        "the reads wrote nothing"
+    );
+}
+
+/// A renew sets `until` to now plus its length, which can be earlier than the old lease's
+/// (ledger #4078): the cached pending listing, kept until the layer's earliest `until`, hangs
+/// from every held receipt's IRI too, so the renew's cut ends it and the tuple reads as pending
+/// once the shorter lease lapses.
+#[test]
+fn a_shortening_renew_ends_the_cached_pending_rd() {
+    let (f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    let receipt = receipt_of(&f, &offer_iri("a"));
+    let reader = tasker(&bobby_gonk());
+    let rd = request(Verb::Source, TUPLES, &[]);
+    move_to(&clock, 5);
+    assert!(!pending(&f).contains(&offer_iri("a")), "{}", pending(&f));
+    assert!(f.kernel.is_cached(&rd, &reader), "rd at minute 5 is cached");
+    settle(
+        &f,
+        &bobby_gonk(),
+        &receipt,
+        &[("settle", "renew"), ("lease", "1m")],
+    )
+    .unwrap();
+    assert!(
+        !f.kernel.is_cached(&rd, &reader),
+        "the renew ends the cached rd"
+    );
+    move_to(&clock, 7);
+    assert!(
+        !f.kernel.is_cached(&rd, &reader),
+        "rd at minute 7, past the renewed lease's lapse, invokes the endpoint"
+    );
+    let now = pending(&f);
+    assert!(now.contains(&offer_iri("a")), "the tuple is pending: {now}");
+}
+
+/// The kernel cuts only the thread named after a write's own target, so a settle (a Sink on
+/// its receipt) does not cut the tuples thread (ledger #4078). The leased reads that show the
+/// lease hang from the receipt's own IRI too: a renew or a done ends their cached answer.
+#[test]
+fn a_settle_ends_the_cached_leased_reads() {
+    let (f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    let receipt = receipt_of(&f, &offer_iri("a"));
+    let reader = tasker(&bobby_gonk());
+    let reads: [Read; 3] = [
+        ("rd state=taken", TUPLES, &[("state", "taken")]),
+        ("the receipt", &receipt, &[]),
+        (
+            "rd tuple=",
+            TUPLES,
+            &[
+                ("tuple", "urn:layer:tasks-bobby:offer:a"),
+                ("state", "taken"),
+            ],
+        ),
+    ];
+    move_to(&clock, 5);
+    for (name, iri, args) in &reads {
+        assert!(
+            source(&f.kernel, iri, args, &reader).contains("00:10:00"),
+            "{name}"
+        );
+        assert!(
+            f.kernel
+                .is_cached(&request(Verb::Source, iri, args), &reader),
+            "{name} is cached"
+        );
+    }
+    settle(
+        &f,
+        &bobby_gonk(),
+        &receipt,
+        &[("settle", "renew"), ("lease", "10m")],
+    )
+    .unwrap();
+    for (name, iri, args) in &reads {
+        assert!(
+            !f.kernel
+                .is_cached(&request(Verb::Source, iri, args), &reader),
+            "{name}: the renew ends the cached answer"
+        );
+        let now = source(&f.kernel, iri, args, &reader);
+        assert!(now.contains("00:15:00"), "{name}: {now}");
+    }
+    settle(&f, &bobby_gonk(), &receipt, &[("settle", "done")]).unwrap();
+    for (name, iri, args) in &reads {
+        let now = source(&f.kernel, iri, args, &reader);
+        assert!(now.contains("done"), "{name}: {now}");
+        // Done is final: cached with no deadline.
+        move_to(&clock, 120);
+        assert!(
+            f.kernel
+                .is_cached(&request(Verb::Source, iri, args), &reader),
+            "{name}: a done receipt stays cached"
+        );
+        move_to(&clock, 5);
+    }
+}

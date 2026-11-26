@@ -10,7 +10,7 @@ how to report a barrier. It is not a conformance claim. Adapted from the
 | Status | Evaluation in progress. No conformance claim. |
 | Owner | the maintainers of this repository |
 | Report a barrier | [a GitHub issue](https://github.com/ikigai-rs/ikigai-layers/issues/new?labels=accessibility) with the `accessibility` label; anything security-sensitive through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-layers/security/advisories/new) |
-| Last reviewed | 2026-11-24 |
+| Last reviewed | 2026-11-26 |
 
 ## What it emits that people read
 
@@ -29,7 +29,10 @@ presentation has not been evaluated here.
   `sweep` is recorded yet; a leased receipt
   appends labeled `attempt=N lease=<held, done or lapsed> until=<UTC time>` fields,
   `result=<iri>` once done, and `recorded=no` while a lapse is computed but not yet recorded,
-  with the same in its JSON, there as `"recorded": false` or `true`); entries,
+  with the same in its JSON, there as `"recorded": false` or `true`; a kernel may serve a
+  leased listing or receipt from its cache until the lease's `until`; a settle or renew of
+  any lease the answer depends on, including one that makes the lapse earlier, ends that
+  cached answer, and a kernel never caches one that shows `recorded=no`); entries,
   definitions and shapes are Turtle. The entry metadata graph (`urn:layer:{layer}:entry-metadata`)
   is Turtle or expanded JSON-LD with entry IRIs, sequence numbers, authors, creation times and
   reply links. Every answer a participant reads also comes as JSON or JSON-LD (README, "JSON faces").
@@ -245,3 +248,5 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-23 | The feed epoch: its refusal of a cursor from another epoch, its JSON fields and the `epoch` command. |
 | 2026-11-24 | A retention `sweep` is timed at the instant its batch expired, and a read leaves an expired receipt out before the sweep is recorded. |
 | 2026-11-24 | The configuration resources: labeled set lines, the revision line, the read-only refusal, and `grants`' `admin` line and refusals. |
+| 2026-11-25 | Leased reads are cached until the lapse: the receipt line's `lease=` and `recorded=no` are never served stale; no wording changes. |
+| 2026-11-26 | A renew that shortens a lease ends the cached pending listing, so `rd` shows the tuple pending at the new lapse; no wording changes. |
