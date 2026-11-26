@@ -1088,3 +1088,38 @@ fn open_records_a_lapse_while_down() {
     assert_eq!(feed_lines(&f)[2].1, LAPSE, "recorded at its until, 00:10");
     assert!(pending(&f).contains(&offer_iri("a")), "{}", pending(&f));
 }
+
+/// A lapse recorded whose tuple could not go back to the space yet (the drop back failed):
+/// until a later write or sweep drops it back, the tuple is out of the space but its take is
+/// over, so a read reads it as pending, from its receipt, as it does a lapse not yet recorded.
+/// It never reads as taken by the lapsed taker, and never disappears from the listing.
+#[test]
+fn a_lapse_whose_drop_back_failed_still_reads_as_pending() {
+    let (mut f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "5m").unwrap();
+    // The space's inbox is a file for a moment, so the drop back fails whoever runs the test.
+    let tuples = f.state.path().join(TASKS).join("tuples");
+    std::fs::rename(tuples.join("inbox"), tuples.join("inbox.away")).unwrap();
+    std::fs::write(tuples.join("inbox"), b"").unwrap();
+    at(&mut f, &clock, 6);
+    let swept = futures::executor::block_on(f.host.sweep_leases(clock.now()));
+    let listed = pending(&f);
+    let one = issue(
+        &f.kernel,
+        Verb::Source,
+        TUPLES,
+        &[("tuple", &offer_iri("a"))],
+        &tasker(&bobby_gonk()),
+    )
+    .map(|r| text(&r));
+    std::fs::remove_file(tuples.join("inbox")).unwrap();
+    std::fs::rename(tuples.join("inbox.away"), tuples.join("inbox")).unwrap();
+    assert!(swept.is_err(), "the drop back did not fail: {swept:?}");
+    assert!(listed.contains(&offer_iri("a")), "{listed}");
+    assert!(one.as_deref().is_ok_and(|t| t.contains("Do a.")), "{one:?}");
+    // The next sweep drops it back, once.
+    sweep_leases(&f, &clock);
+    assert!(pending(&f).contains(&offer_iri("a")), "{}", pending(&f));
+    assert_eq!(kinds(&f), ["out", "taken", "returned"]);
+}

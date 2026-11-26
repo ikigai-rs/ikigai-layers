@@ -1993,8 +1993,8 @@ impl LayerEndpoint {
             let as_ld = asked == JSON_LD;
             let found = {
                 let index = space.index.read().expect("tuplespace lock");
-                let lapsed =
-                    |r: &Receipt| r.lease.as_ref().is_some_and(|l| l.lapsed_unrecorded(now));
+                // Over, its tuple not back yet: read as pending, from the receipt.
+                let lapsed = |r: &Receipt| index.returning(r, now);
                 // A receipt retention has expired by now reads as gone, though no `sweep`
                 // has recorded it yet (ledger #4082).
                 let found = match index.lookup(subject) {
