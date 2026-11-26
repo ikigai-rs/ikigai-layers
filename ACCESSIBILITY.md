@@ -74,7 +74,10 @@ presentation has not been evaluated here.
   <fingerprint> has made them; try again later``; the per-address one says ``from one source
   address, counting an IPv6 /64 network as one address``, with the host's `join.ipv6_prefix`),
   the deny list, a certificate that has already
-  joined, and an identity that has lapsed (which says it may join again). No answer, refusal or
+  joined, an identity that has lapsed (which says it may join again), and a request on a
+  connection the host no longer remembers (``join lobby `<name>` no longer remembers the
+  connection certificate <fingerprint> asked on, so it cannot count the request by its source
+  address; reconnect and ask again``). No answer, refusal or
   diagnostic names a source address, and a door whose system cannot supply randomness gets the
   error ``the hourly key for source addresses cannot be drawn: …`` from `door_capability`.
 - **Whether a name is in use** (`src/endpoints.rs`, `urn:layers:participant:name:{name}`):
@@ -250,3 +253,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-la
 | 2026-11-24 | The configuration resources: labeled set lines, the revision line, the read-only refusal, and `grants`' `admin` line and refusals. |
 | 2026-11-25 | Leased reads are cached until the lapse: the receipt line's `lease=` and `recorded=no` are never served stale; no wording changes. |
 | 2026-11-26 | A renew that shortens a lease ends the cached pending listing, so `rd` shows the tuple pending at the new lapse; no wording changes. |
+| 2026-11-26 | The public join's refusal of a request on a connection the host no longer remembers, which says to reconnect. |
