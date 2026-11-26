@@ -851,10 +851,11 @@ So a lapse is a scheduled expiry, not a write, and a read on a leased layer is c
 it (ledger #4078): `rd`, `rd state=taken`, `rd tuple=` and a receipt read are kept until the
 earliest `until` of a held lease the answer depends on, the layer's earliest for the pending
 tuples (any held lease could bring its tuple back) and the receipt's own for a receipt. They
-also hang from the tuples thread, which every `out` and take cuts, and an answer that shows a
-lease hangs from its receipt's IRI, which a settle cuts (the kernel cuts only a write's own
-target). An answer that shows a lapse not yet recorded, or a tuple not yet back, is not kept,
-because its record comes with no cut. A layer with `retain` is not cached.
+also hang from the tuples thread, which every `out` and take cuts, and from the IRI of each
+receipt whose lease they depend on, which a settle cuts (the kernel cuts only a write's own
+target): for the pending tuples that is every held lease, because a renew can make an
+`until` earlier than the one the answer was kept until. An answer that shows a lapse not yet
+recorded, or a tuple not yet back, is not kept, because its record comes with no cut. A layer with `retain` is not cached.
 `rd match=` sees such a tuple too: its bytes are in its receipt, not in the space, so the
 template is evaluated against the receipt's copy by intray's own matcher, in the same
 evaluation as the stored tuples, within the same time budget and nesting bound, and a match

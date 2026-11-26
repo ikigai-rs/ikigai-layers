@@ -1197,6 +1197,41 @@ fn a_leased_rd_is_cached_until_the_lapse() {
     );
 }
 
+/// A renew sets `until` to now plus its length, which can be earlier than the old lease's
+/// (ledger #4078): the cached pending listing, kept until the layer's earliest `until`, hangs
+/// from every held receipt's IRI too, so the renew's cut ends it and the tuple reads as pending
+/// once the shorter lease lapses.
+#[test]
+fn a_shortening_renew_ends_the_cached_pending_rd() {
+    let (f, clock) = leased();
+    out(&f.kernel, &gonk(), &offer("a")).unwrap();
+    take_leased(&f, &bobby_gonk(), &offer_iri("a"), "10m").unwrap();
+    let receipt = receipt_of(&f, &offer_iri("a"));
+    let reader = tasker(&bobby_gonk());
+    let rd = request(Verb::Source, TUPLES, &[]);
+    move_to(&clock, 5);
+    assert!(!pending(&f).contains(&offer_iri("a")), "{}", pending(&f));
+    assert!(f.kernel.is_cached(&rd, &reader), "rd at minute 5 is cached");
+    settle(
+        &f,
+        &bobby_gonk(),
+        &receipt,
+        &[("settle", "renew"), ("lease", "1m")],
+    )
+    .unwrap();
+    assert!(
+        !f.kernel.is_cached(&rd, &reader),
+        "the renew ends the cached rd"
+    );
+    move_to(&clock, 7);
+    assert!(
+        !f.kernel.is_cached(&rd, &reader),
+        "rd at minute 7, past the renewed lease's lapse, invokes the endpoint"
+    );
+    let now = pending(&f);
+    assert!(now.contains(&offer_iri("a")), "the tuple is pending: {now}");
+}
+
 /// The kernel cuts only the thread named after a write's own target, so a settle (a Sink on
 /// its receipt) does not cut the tuples thread (ledger #4078). The leased reads that show the
 /// lease hang from the receipt's own IRI too: a renew or a done ends their cached answer.

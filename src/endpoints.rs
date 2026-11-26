@@ -2209,14 +2209,22 @@ impl LayerEndpoint {
         // such a tuple reads as pending at its own `ik:seq`, where it will go back.
         //
         // Any held lease in the layer can bring its tuple back into this listing, so it is
-        // fresh until the layer's earliest `until` ([`Index::next_lapse`]). A settle only
-        // keeps a tuple taken, so it needs no cut here: a renew just leaves the deadline early.
-        let (pending, fresh): (Vec<(TupleMeta, Option<Receipt>)>, Fresh) = {
+        // fresh until the layer's earliest `until` ([`Index::next_lapse`]). A renew sets
+        // `until` to now plus its length, which can be EARLIER than the deadline computed
+        // here, and its settle cuts only its receipt's IRI, so the listing also hangs from the
+        // IRI of every held lease's receipt: any renew or done settle ends it. A new take cuts
+        // the tuples thread.
+        let (pending, fresh, held) = {
             let index = space.index.read().expect("tuplespace lock");
             let fresh = if index.lapsed_unrecorded(now).next().is_some() {
                 Fresh::Uncached
             } else {
                 index.next_lapse().map_or(Fresh::Forever, Fresh::Until)
+            };
+            let held: Vec<String> = if fresh == Fresh::Uncached {
+                Vec::new()
+            } else {
+                index.held_receipts().map(|r| r.iri.clone()).collect()
             };
             let mut pending: Vec<(TupleMeta, Option<Receipt>)> = index
                 .pending()
@@ -2234,13 +2242,14 @@ impl LayerEndpoint {
                     }),
             );
             pending.sort_by_key(|(m, _)| m.seq);
-            let pending = pending
+            let pending: Vec<(TupleMeta, Option<Receipt>)> = pending
                 .into_iter()
                 .filter(|(m, _)| m.seq > after)
                 .take(limit as usize)
                 .collect();
-            (pending, fresh)
+            (pending, fresh, held)
         };
+        let held: Vec<&str> = held.iter().map(String::as_str).collect();
         if asked == JSON {
             // The list, mirroring the feed's JSON: what the text face says, one object a line.
             let listed: Vec<serde_json::Value> = pending
@@ -2258,7 +2267,7 @@ impl LayerEndpoint {
                     "tuples": listed,
                 })),
                 fresh,
-                &[],
+                &held,
             );
         }
         let mut out = String::new();
@@ -2290,7 +2299,7 @@ impl LayerEndpoint {
                 Representation::new(ReprType::new(TEXT), out.into_bytes())
             },
             fresh,
-            &[],
+            &held,
         )
     }
 

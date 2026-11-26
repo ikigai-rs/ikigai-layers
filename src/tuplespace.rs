@@ -560,6 +560,13 @@ impl Index {
             .map(|(millis, _)| ikigai_core::Time::from_millis(*millis))
     }
 
+    /// The receipts whose lease is held, from the index of held leases: a renew or a done
+    /// settle on any of them (a Sink on its IRI) changes what the layer's pending listing
+    /// will show at the lapse (ledger #4078).
+    pub fn held_receipts(&self) -> impl Iterator<Item = &Receipt> {
+        self.held.iter().filter_map(|(_, id)| self.receipt(id))
+    }
+
     /// Whether `receipt` is still in play, so retention keeps it whatever its age: a held
     /// lease is not over yet (computed lapsed or not, until its lapse is recorded and its tuple
     /// is back), and a lapsed one counts the attempts of a tuple pending again.
