@@ -1576,6 +1576,38 @@ fn a_count_under_five_is_reported_as_fewer_than_five() {
 }
 
 #[test]
+fn the_count_preserves_plain_and_json_bytes_at_the_floor() {
+    let d = door();
+    let readers = joined(&d, "reader", 5);
+    let now = T0 + 7 * DAY;
+    for held in &readers[..4] {
+        read_at(&d, held, now);
+    }
+    let assert_faces = |plain: &str, json: &str| {
+        assert_eq!(source(&d.at(now), COUNT, &[], &Capability::root()), plain);
+        assert_eq!(
+            source(
+                &d.at(now),
+                COUNT,
+                &[("as", "application/json")],
+                &Capability::root(),
+            ),
+            json
+        );
+    };
+
+    assert_faces(
+        "joined 5\nread-in-7-days fewer than 5\nread-in-30-days 5\n",
+        r#"{"joined":5,"readIn7Days":"fewer than 5","readIn30Days":5}"#,
+    );
+    read_at(&d, &readers[4], now);
+    assert_faces(
+        "joined 5\nread-in-7-days 5\nread-in-30-days 5\n",
+        r#"{"joined":5,"readIn7Days":5,"readIn30Days":5}"#,
+    );
+}
+
+#[test]
 fn each_window_counts_the_utc_days_ending_today() {
     let d = door();
     let this_week = joined(&d, "week", 5);
