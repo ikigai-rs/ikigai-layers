@@ -50,6 +50,7 @@ use ikigai_core::{
     ArgRef, Capability, EndpointSpace, Error, Exact, Fallback, Iri, Kernel, Request,
     Result as CoreResult, Space, Time, Verb,
 };
+use ikigai_fn::aggregate::Count;
 use oxrdf::{Literal, Triple};
 use serde::{Deserialize, Serialize};
 
@@ -93,9 +94,6 @@ const SOURCES_MAX: usize = 4096;
 /// not remembered, and its request is refused, so many connections from one address cannot
 /// push out its own earlier ones, nor fill [`SOURCES_MAX`] for everyone else.
 const SOURCES_PER_ADDRESS: usize = 256;
-/// The smallest count reported as a number. Anything under it, zero included, is reported in
-/// words, so that a count of one never singles anyone out.
-const COUNT_THRESHOLD: usize = 5;
 
 /// One joined identity's record.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -355,44 +353,29 @@ impl Granted {
     }
 }
 
-/// A count as the operator may read it: a number, or words under [`COUNT_THRESHOLD`].
-fn reported(count: usize) -> serde_json::Value {
-    if count < COUNT_THRESHOLD {
-        format!("fewer than {COUNT_THRESHOLD}").into()
-    } else {
-        count.into()
-    }
-}
-
 /// How many joined identities there are and how many read lately. Upper bounds on people: one
 /// person may hold several certificates.
 pub(crate) struct Counts {
-    joined: usize,
-    read_in_7_days: usize,
-    read_in_30_days: usize,
+    joined: Count,
+    read_in_7_days: Count,
+    read_in_30_days: Count,
 }
 
 impl Counts {
-    /// The answer as plain text: one labeled line per number.
+    /// The answer as plain text: one labeled line per count.
     pub(crate) fn text(&self) -> String {
-        let line = |label: &str, count: usize| match reported(count) {
-            serde_json::Value::String(words) => format!("{label} {words}\n"),
-            number => format!("{label} {number}\n"),
-        };
-        [
-            line("joined", self.joined),
-            line("read-in-7-days", self.read_in_7_days),
-            line("read-in-30-days", self.read_in_30_days),
-        ]
-        .concat()
+        format!(
+            "joined {}\nread-in-7-days {}\nread-in-30-days {}\n",
+            self.joined, self.read_in_7_days, self.read_in_30_days
+        )
     }
 
     /// The answer as JSON: each member a number, or words under the threshold.
     pub(crate) fn json(&self) -> serde_json::Value {
         serde_json::json!({
-            "joined": reported(self.joined),
-            "readIn7Days": reported(self.read_in_7_days),
-            "readIn30Days": reported(self.read_in_30_days),
+            "joined": self.joined,
+            "readIn7Days": self.read_in_7_days,
+            "readIn30Days": self.read_in_30_days,
         })
     }
 }
@@ -825,9 +808,9 @@ impl Join {
                 .count()
         };
         Counts {
-            joined: live.len(),
-            read_in_7_days: read_within(7),
-            read_in_30_days: read_within(30),
+            joined: Count::new(live.len()),
+            read_in_7_days: Count::new(read_within(7)),
+            read_in_30_days: Count::new(read_within(30)),
         }
     }
 

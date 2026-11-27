@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-layers"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 # The toolchain the shared CI's msrv job builds and tests on: the line the ecosystem's other
 # declared crates (ikigai-script, ikigai-log, ikigai-cms-web) hold. Nothing here needs more
@@ -37,6 +37,7 @@ host = [
     "dep:getrandom",
     "dep:hmac",
     "dep:ikigai-encrypt",
+    "dep:ikigai-fn",
     "dep:ikigai-sign",
     "dep:ikigai-intray",
     "dep:ikigai-store",
@@ -185,6 +186,8 @@ ikigai-encrypt = { version = "0.5.0", default-features = false, optional = true 
 # and the one every test here ran against; its `verify` (bytes, signature graph, SPKI key IRI) is
 # older. 0.6.0 is the release on core 0.4. ⚠ `"0.6.0"` is `<0.7.0`.
 ikigai-sign = { version = "0.6.0", optional = true }
+# The operator's join count uses the shared people-count floor and text and JSON rendering.
+ikigai-fn = { version = "0.12.2", optional = true }
 # An enrollment request carries its certificate as PEM, and the host checks that the certificate's
 # leaf DER hashes to the fingerprint the request states, which must be the poster's own. PEM is
 # decoded by RustCrypto's RFC 7468 decoder and the DER is checked as one well-formed DER document,
